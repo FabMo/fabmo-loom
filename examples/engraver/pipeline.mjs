@@ -15,6 +15,7 @@
 import { textToRegions } from './text-to-regions.mjs';
 import { computeMedialAxis } from '../../vendor/v_engraver/medial-axis.js';
 import { generateVEngraveToolpath, generatePocketPasses } from '../../vendor/v_engraver/toolpath-gen.js';
+import { generateProfile } from '../../strategies/profile.js';
 import { composeJob, postJobToSbp, postJobToGcode } from '../../ir/job.js';
 import { verifyJob } from '../../ir/verify.js';
 
@@ -38,7 +39,34 @@ export const DEFAULTS = {
   // Declaring the point model keeps the profile-window check honest.
   vBit: { includedAngle: 60, maxDepth: 0.2, tipDiameter: 0.002 },
   machine: { feedRate: 60, plungeRate: 30, safeZ: 0.5, rpm: 14000 },
+  // optional second op: cut the engraved text free as a rounded-corner tag
+  cutout: {
+    enabled: false,
+    buffer: 0.25,          // tag edge clearance around the text bbox
+    cornerRadius: 0.5,     // clamped to what the tag can geometrically carry
+    tool: { diameter: 0.25 },
+    feedRate: 80, plungeRate: 30,
+    depthPerPass: 0.25,
+    entry: 'ramp',
+  },
 };
+
+// rounded rectangle, CCW, arcs tessellated — the tag outline
+function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
+  r = Math.max(0, Math.min(r, (x1 - x0) / 2, (y1 - y0) / 2));
+  const ring = [];
+  const corner = (cx, cy, a0) => {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (i / seg) * (Math.PI / 2);
+      ring.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+  };
+  corner(x1 - r, y0 + r, -Math.PI / 2);
+  corner(x1 - r, y1 - r, 0);
+  corner(x0 + r, y1 - r, Math.PI / 2);
+  corner(x0 + r, y0 + r, Math.PI);
+  return ring;
+}
 
 /**
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
@@ -51,6 +79,7 @@ export function buildEngraveJob(fontBuffer, text, opts = {}) {
   const stock = { ...DEFAULTS.stock, ...opts.stock };
   const vBit = { ...DEFAULTS.vBit, ...opts.vBit };
   const machine = { ...DEFAULTS.machine, ...opts.machine };
+  const cutout = { ...DEFAULTS.cutout, ...opts.cutout, tool: { ...DEFAULTS.cutout.tool, ...opts.cutout?.tool } };
 
   const errors = [];
   if (!text || !text.trim()) return { ok: false, errors: ['nothing to engrave'], warnings: [], preview: null };
@@ -64,12 +93,15 @@ export function buildEngraveJob(fontBuffer, text, opts = {}) {
   // Fit: measured bbox + margins vs stock. The verifier will independently
   // check every motion against the stock envelope; this check exists to
   // give a human-sized message ("make the letters smaller") before motion
-  // is ever generated.
-  const needW = width + 2 * margin, needH = height + 2 * margin;
+  // is ever generated. With the cutout on, the outermost motion is the
+  // endmill center riding one tool radius outside the tag edge.
+  const fringe = cutout.enabled ? cutout.buffer + cutout.tool.diameter / 2 : 0;
+  const needW = width + 2 * (fringe + margin), needH = height + 2 * (fringe + margin);
   if (needW > stock.w + 1e-9 || needH > stock.h + 1e-9) {
+    const via = cutout.enabled ? `text + ${cutout.buffer}" tag buffer + cutter + ${margin}" margins` : `text + ${margin}" margins`;
     errors.push(
       `"${text}" at ${letterHeight}" letters needs ${needW.toFixed(2)}" × ${needH.toFixed(2)}" ` +
-      `(text ${width.toFixed(2)}" × ${height.toFixed(2)}" + ${margin}" margins) — stock is ${stock.w}" × ${stock.h}"`);
+      `(${via}) — stock is ${stock.w}" × ${stock.h}"`);
   }
   if (errors.length) return { ok: false, errors, warnings: [], preview: { regions, width, height } };
 
@@ -116,13 +148,46 @@ export function buildEngraveJob(fontBuffer, text, opts = {}) {
     target: { type: 'region', rings: targetRings, depth: vBit.maxDepth },
   };
 
+  // ---- optional op 2: cut the tag free (rounded-corner profile) ----
+  // Same op-local frame as the engraving (text bbox at 0,0), same placement.
+  // Through-cut is exactly −thickness: the verifier's depth gate is the
+  // stock bottom, spoilboard allowance is a deliberate non-feature here —
+  // hold the last skin with tape and a light sand.
+  const operations = [op];
+  const tools = { 1: { name: `${vBit.includedAngle}° V-bit`, diameter: vBit.tipDiameter } };
+  let tagRing = null;
+  if (cutout.enabled) {
+    tagRing = roundedRectRing(-cutout.buffer, -cutout.buffer,
+      width + cutout.buffer, height + cutout.buffer, cutout.cornerRadius);
+    const prof = generateProfile({ outer: tagRing }, cutout.tool, {
+      side: 'outside',
+      totalDepth: stock.thickness,
+      depthPerPass: cutout.depthPerPass,
+      safeZ: machine.safeZ,
+      entry: cutout.entry,
+    });
+    tools[2] = { name: `${cutout.tool.diameter}" endmill`, diameter: cutout.tool.diameter };
+    operations.push({
+      name: `cut out tag (${cutout.buffer}" buffer, r${cutout.cornerRadius}")`,
+      tool: 2,
+      feedRate: cutout.feedRate,
+      plungeRate: cutout.plungeRate,
+      placement,
+      moves: prof.moves,
+      // The declaration: an OUTSIDE profile — any swept area intruding the
+      // tag body (which holds the fresh engraving) is an error with
+      // measured area; depth capped at stock thickness.
+      target: { type: 'profile', side: 'outside', rings: [tagRing], depth: stock.thickness },
+    });
+  }
+
   const job = {
     units: 'in',
     stock,
     safeZ: machine.safeZ,
     spindleSpeed: machine.rpm,
-    tools: { 1: { name: `${vBit.includedAngle}° V-bit`, diameter: vBit.tipDiameter } },
-    operations: [op],
+    tools,
+    operations,
   };
 
   const composed = composeJob(job);
@@ -136,7 +201,10 @@ export function buildEngraveJob(fontBuffer, text, opts = {}) {
     errors: report.errors,
     warnings: report.warnings,
     report, job, composed,
-    preview: { regions, width, height, placement, medialAxis, moves: op.moves, pocketed: needsPocket },
+    preview: {
+      regions, width, height, placement, medialAxis, moves: op.moves, pocketed: needsPocket,
+      tagRing, cutoutMoves: cutout.enabled ? operations[1].moves : null,
+    },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom engraver — "${text}"` });

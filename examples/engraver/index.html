@@ -93,6 +93,11 @@
         <div><label>Max depth (in)</label><input id="maxDepth" type="number" step="0.025" min="0.025" value="0.2"></div>
         <div><label>Feed (in/min)</label><input id="feed" type="number" step="10" min="10" value="60"></div>
       </div>
+      <div class="grid3">
+        <div><label>Cut out as tag</label><input id="cutout" type="checkbox" style="width:auto; transform:scale(1.4); margin-top:6px"></div>
+        <div><label>Tag buffer (in)</label><input id="buffer" type="number" step="0.125" min="0.125" value="0.25"></div>
+        <div><label>Corner radius (in)</label><input id="cornerR" type="number" step="0.125" min="0" value="0.5"></div>
+      </div>
     </details>
 
     <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span></div>
@@ -114,7 +119,7 @@
 
   <section class="panel">
     <canvas id="preview" width="1160" height="640"></canvas>
-    <div class="foot-note" id="legend">stock outline · <span style="color:#888">letterforms</span> · <span style="color:#1b2a6b">engraving path</span> (darker = deeper) · counters stay standing</div>
+    <div class="foot-note" id="legend">stock outline · <span style="color:#888">letterforms</span> · <span style="color:#1b2a6b">engraving path</span> (darker = deeper) · <span style="color:#8c6428">tag outline</span> · <span style="color:#cc2229">cutout passes</span> · counters stay standing</div>
   </section>
 </main>
 <footer>

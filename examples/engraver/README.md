@@ -39,6 +39,25 @@ The foundation doesn't make the prompt smarter; it makes the prompt
 lines of unverified CAM expertise. With it, ~110 words of intent is the
 entire human contribution.
 
+## The second prompt: iteration
+
+Generation is half the story; a bespoke tool earns its keep when the next
+request is cheap. The tag-cutout feature in this app came from exactly
+this prompt:
+
+> Also add an automatic profile to cut out the V-carved text, with a
+> buffer of about 0.25" around the text and rounded corners (roughly
+> 0.5" radius).
+
+~30 words, because the expensive parts already exist: the outside-profile
+strategy (`strategies/profile.js`, ramp entry, depth passes), the
+composer (owns the toolchange), and the verifier (a profile target with
+`side:'outside'` makes "the endmill wandered into the tag body" an error
+with measured area). The feature is one more operation in the same Job —
+two tools, two independent declarations, one verified program. Iteration
+stays cheap as long as requests decompose onto the foundation; the day
+one doesn't, that's a gap report — file it.
+
 ## Build notes an agent (or human) will want
 
 - **opentype.js v2's shaper throws** on some fonts' GSUB tables (DejaVu's

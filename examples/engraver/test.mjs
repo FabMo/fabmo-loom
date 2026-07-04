@@ -129,5 +129,47 @@ console.log('--- layout robustness ---');
   else fail(`mixed text rejected: ${r.errors.join(' | ')}`);
 }
 
+// ---------------- 7. iteration: cut the tag free ----------------
+// The "second prompt" feature: an outside profile with a 0.25" buffer and
+// rounded corners, composed as a second tool. Two targets, one toolchange,
+// and the profile's own sabotage direction.
+
+console.log('--- cutout tag: two tools, two targets, one verified program ---');
+{
+  const r = quiet(() => buildEngraveJob(FONT, 'Help', { cutout: { enabled: true } }));
+  const targets = r.report?.stats.targets ?? [];
+  const prof = targets.find(t => t.type === 'profile');
+  if (r.ok && targets.length === 2 && prof && prof.intrusionArea === 0 && prof.depthViolations === 0) {
+    pass(`verified two-tool job: engrave target + profile target (${prof.samples} samples, 0 intrusion)`);
+  } else fail(`cutout job rejected or malformed: ${r.errors.join(' | ')}`);
+  const mounts = (r.sbp?.match(/C9/g) ?? []).length;
+  if (mounts === 2) pass('SBP carries both tool mounts (C9 × 2)');
+  else fail(`expected 2 tool mounts in SBP, found ${mounts}`);
+
+  // sabotage: the endmill wanders INTO the tag body (where the fresh
+  // engraving lives) at cutting depth
+  const op2 = r.job.operations[1];
+  const sab = {
+    ...r.job,
+    operations: [r.job.operations[0], {
+      ...op2,
+      moves: [...op2.moves,
+        { type: 'rapid', x: 0.5, y: 0.5 },     // op-local: inside the tag
+        { type: 'linear', z: -0.3 },
+        { type: 'linear', x: 1.2, y: 0.5 },
+      ],
+    }],
+  };
+  const report = quiet(() => verifyJob(sab, composeJob(sab), { coverageWarnPct: 100 }));
+  if (!report.ok && report.errors.some(e => e.includes('intrudes the part body'))) {
+    pass(`rejected: ${report.errors.find(e => e.includes('intrudes')).slice(0, 90)}`);
+  } else fail(`tag-body intrusion not caught (ok=${report.ok}: ${report.errors.join(' | ')})`);
+
+  // too-tight: tag + cutter + margins exceed stock → early human-sized error
+  const tight = quiet(() => buildEngraveJob(FONT, 'Help', { cutout: { enabled: true }, stock: { w: 4, h: 2, thickness: 0.5 } }));
+  if (!tight.ok && tight.errors.some(e => e.includes('tag buffer'))) pass('tag that exceeds stock: caught early with the buffer in the message');
+  else fail(`oversized tag not caught: ${JSON.stringify(tight.errors)}`);
+}
+
 console.log(failures === 0 ? '\nALL ENGRAVER CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

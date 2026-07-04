@@ -38,6 +38,7 @@ function params() {
     stock: { w: n('stockW', 8), h: n('stockH', 2.5), thickness: n('stockT', 0.5) },
     vBit: { includedAngle: n('angle', 60), maxDepth: n('maxDepth', 0.2), tipDiameter: 0.002 },
     machine: { feedRate: n('feed', 60), plungeRate: 30, safeZ: 0.5, rpm: 14000 },
+    cutout: { enabled: $('cutout').checked, buffer: n('buffer', 0.25), cornerRadius: n('cornerR', 0.5) },
   };
 }
 
@@ -58,22 +59,23 @@ function rebuild() {
 
 function render(p) {
   const r = result;
-  const t = r.report?.stats.targets?.[0];
+
+  const targetLine = (tt) => tt.type === 'profile'
+    ? `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.intrusionArea}</b> sq in intrusion · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`
+    : `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.gouges}</b> gouges · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`;
+  const targetLines = (r.report?.stats.targets ?? []).map(targetLine).join('<br>');
 
   if (r.ok) {
     setBadge('ok', 'VERIFIED');
     $('verdictText').textContent = 'this exact motion was measured, not assumed';
-    $('numbers').innerHTML =
-      `<b>${t.samples.toLocaleString()}</b> motion samples · <b>${t.gouges}</b> gouges · ` +
-      `<b>${t.depthViolations}</b> depth violations<br>` +
+    $('numbers').innerHTML = targetLines + `<br>` +
       `<b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ` +
-      `≈ <b>${r.report.stats.estCutTimeMin} min</b> at ${p.machine.feedRate} in/min`;
+      `≈ <b>${r.report.stats.estCutTimeMin} min</b>` +
+      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '');
   } else {
     setBadge('bad', 'REJECTED');
     $('verdictText').textContent = r.report ? 'the verifier refused this motion' : 'fix the setup first';
-    $('numbers').innerHTML = t
-      ? `<b>${t.samples.toLocaleString()}</b> samples · <b>${t.gouges}</b> gouges · <b>${t.depthViolations}</b> depth violations`
-      : '';
+    $('numbers').innerHTML = targetLines;
   }
   $('errors').textContent = r.errors.join('\n');
   $('warnings').textContent = r.warnings.join('\n');
@@ -133,6 +135,35 @@ function draw(p, r) {
       const d = Math.min(1, Math.abs((from.z + to.z) / 2) / maxD);
       ctx.strokeStyle = `rgba(27,42,107,${0.35 + 0.6 * d})`;
       ctx.lineWidth = 0.8 + 2.2 * d;
+      ctx.beginPath();
+      ctx.moveTo(X(from.x + place.x), Y(from.y + place.y));
+      ctx.lineTo(X(to.x + place.x), Y(to.y + place.y));
+      ctx.stroke();
+    });
+  }
+
+  // tag outline + cutout profile passes
+  if (pre.tagRing) {
+    ctx.beginPath();
+    pre.tagRing.forEach((pt, i) => {
+      const px = X(pt.x + place.x), py = Y(pt.y + place.y);
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(140,100,40,0.85)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (pre.cutoutMoves) {
+    walkMoves(pre.cutoutMoves, (state, move) => {
+      if (move.type !== 'linear') return;
+      const from = state.prev, to = state;
+      if (from.z > -1e-9 && to.z > -1e-9) return;
+      if (Math.abs(to.x - from.x) < 1e-12 && Math.abs(to.y - from.y) < 1e-12) return;
+      ctx.strokeStyle = 'rgba(204,34,41,0.45)';
+      ctx.lineWidth = 2.4;
       ctx.beginPath();
       ctx.moveTo(X(from.x + place.x), Y(from.y + place.y));
       ctx.lineTo(X(to.x + place.x), Y(to.y + place.y));
@@ -202,7 +233,7 @@ $('sabotage').addEventListener('click', () => {
 
 let timer = null;
 const debounce = () => { clearTimeout(timer); timer = setTimeout(rebuild, 250); };
-for (const id of ['text', 'letterHeight', 'margin', 'stockW', 'stockH', 'stockT', 'angle', 'maxDepth', 'feed']) {
+for (const id of ['text', 'letterHeight', 'margin', 'stockW', 'stockH', 'stockT', 'angle', 'maxDepth', 'feed', 'cutout', 'buffer', 'cornerR']) {
   $(id).addEventListener('input', debounce);
 }
 loadFont();
