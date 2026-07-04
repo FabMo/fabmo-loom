@@ -15,6 +15,8 @@ import { textToRegions } from '../examples/engraver/text-to-regions.mjs';
 import { computeMedialAxis } from '../vendor/v_engraver/medial-axis.js';
 import { generateVEngraveToolpath, generatePocketPasses } from '../vendor/v_engraver/toolpath-gen.js';
 import { generateProfile } from '../strategies/profile.js';
+import { generatePocket } from '../strategies/pocket.js';
+import { generateRestPocket } from '../strategies/rest.js';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -117,6 +119,69 @@ export const CATALOG = {
         bbox: { minX: 0, minY: 0, maxX: width, maxY: height },
         previewRegions: regions,
       };
+    },
+  },
+
+  pocket_text: {
+    doc: 'Pocket the text INTO the surface with a small endmill — flat-bottomed letterforms at constant depth, the look for paint-fill signs and inlays (vcarve_text is the variable-depth carved look instead). Counters preserved. Strokes narrower than the bit get a grazing slot-fit; genuinely too-narrow text fails with advice (bigger letters or a smaller bit). Optional REST cleanup: a second, smaller bit pockets only the corners the bulk bit could not reach (adds a toolchange).',
+    params: {
+      text: { type: 'string', doc: 'the text to pocket — bind to a text control', bindable: true },
+      letterHeight: { type: 'number', default: 1.5, min: 0.3, max: 6, doc: 'total text height in inches; pocketing wants larger letters than V-carving', bindable: true },
+      depth: { type: 'number', default: 0.25, doc: 'pocket floor depth, inches' },
+      toolDiameter: { type: 'number', default: 0.125, doc: 'bulk endmill diameter, inches' },
+      restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit (e.g. 0.0625) that cleans just the corners' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+    },
+    run(p, ctx) {
+      const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
+      if (!regions.length) return { error: 'no engravable outlines in that text' };
+      const params = {
+        stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
+        safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
+      };
+      const bulk = { moves: [], rings: [] };
+      for (const region of regions) {
+        const g = generatePocket(region, { diameter: p.toolDiameter }, params);
+        if (!g.moves.length) continue;
+        if (bulk.moves.length) bulk.moves.push({ type: 'rapid', z: ctx.safeZ });
+        bulk.moves.push(...g.moves);
+        if (g.target) bulk.rings.push(...g.target.rings);
+      }
+      if (!bulk.moves.length) {
+        return { error: `a ${p.toolDiameter}" bit does not fit anywhere in "${p.text}" at ${p.letterHeight}" letters — try larger letters or a smaller bit` };
+      }
+      const ops = [{
+        subName: 'bulk',
+        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: bulk.moves,
+        target: { type: 'region', rings: bulk.rings, depth: p.depth },
+        previewRegions: regions,
+      }];
+      if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
+        const rest = { moves: [], rings: [] };
+        for (const region of regions) {
+          const g = generateRestPocket(region, p.toolDiameter, { diameter: p.restDiameter }, params);
+          if (!g.moves.length) continue;
+          if (rest.moves.length) rest.moves.push({ type: 'rapid', z: ctx.safeZ });
+          rest.moves.push(...g.moves);
+          if (g.target) rest.rings.push(...g.target.rings);
+        }
+        if (rest.moves.length) {
+          ops.push({
+            subName: 'rest corners',
+            // rest recuts the cleared envelope at blob edges by design —
+            // declared, so the footprint-overlap check stays armed for
+            // everything that doesn't declare it
+            allowOverlap: true,
+            tool: { name: `${p.restDiameter}" endmill`, diameter: p.restDiameter },
+            feedRate: p.feedRate, plungeRate: 30,
+            moves: rest.moves,
+            target: { type: 'region', rings: rest.rings, depth: p.depth },
+          });
+        }
+      }
+      return { ops, bbox: { minX: 0, minY: 0, maxX: width, maxY: height } };
     },
   },
 

@@ -86,7 +86,10 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     if (errors.length) break;
     const r = entry.run(p, ctx);
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
-    built.push({ op, r });
+    // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
+    // pocket + a smaller-bit rest pass = two tools); each sub-op carries
+    // its own tool, moves, and declared target
+    for (const sub of (r.ops ?? [r])) built.push({ op, r: sub });
     ctx.contentBBox = ctx.contentBBox
       ? {
           minX: Math.min(ctx.contentBBox.minX, r.bbox.minX), minY: Math.min(ctx.contentBBox.minY, r.bbox.minY),
@@ -133,13 +136,14 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     spindleSpeed: ctx.rpm,
     tools,
     operations: built.map(({ op, r }) => ({
-      name: `${op.id} (${op.strategy})`,
+      name: `${op.id}${r.subName ? ` ${r.subName}` : ''} (${op.strategy})`,
       tool: toolNumber.get(`${r.tool.name}|${r.tool.diameter}`),
       feedRate: r.feedRate,
       plungeRate: r.plungeRate,
       placement,
       moves: r.moves,
       target: r.target,
+      allowOverlap: !!r.allowOverlap,
     })),
   };
 

@@ -204,5 +204,48 @@ console.log('--- buildParseRequest ---');
   } else fail('parse request malformed');
 }
 
+// ---------------- 9. pocket_text: paint-fill pockets + rest corners ----------------
+// One catalog verb lowering to TWO machine operations (bulk bit + smaller
+// rest bit = a toolchange), the rest op declaring allowOverlap (it recuts
+// the cleared envelope at blob edges by design).
+
+console.log('--- pocket_text: bulk + rest corners, one verb, two tools ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.stock = { w: 8, h: 2.5, thickness: 0.5 };
+  const res = applyActions(rec, {
+    summary: 'Created a paint-fill sign app.',
+    actions: [
+      { kind: 'set_name', name: 'Paint-fill sign' },
+      { kind: 'add_control', control: { id: 'word', type: 'text', label: 'Word', default: 'Anna' } },
+      { kind: 'add_operation', operation: { id: 'pocket', strategy: 'pocket_text', params: { text: { ctrl: 'word' }, letterHeight: 1.5 } } },
+    ],
+    declined: [],
+  });
+  rec = res.recipe;
+  const r1 = run(rec);
+  const t1 = r1.report?.stats.targets ?? [];
+  if (r1.ok && t1.length === 1 && t1[0].gouges === 0) pass(`bulk pocket verified: ${t1[0].samples} samples, 0 gouges`);
+  else fail(`bulk pocket failed: ${r1.errors?.join(' | ')}`);
+
+  const res2 = applyActions(rec, {
+    summary: 'Added a rest pass for the corners.',
+    actions: [{ kind: 'set_operation', operation: { id: 'pocket', params: { restDiameter: 0.0625 } } }],
+    declined: [],
+  });
+  rec = res2.recipe;
+  const r2 = run(rec);
+  const t2 = r2.report?.stats.targets ?? [];
+  const mounts = (r2.sbp?.match(/C9/g) ?? []).length;
+  if (r2.ok && t2.length === 2 && mounts === 2 && t2.every(t => t.gouges === 0)) {
+    pass(`rest pass woven: 2 targets, 2 tool mounts, 0 gouges (rest declares allowOverlap)`);
+  } else fail(`rest failed: ok=${r2.ok} targets=${t2.length} mounts=${mounts} ${r2.errors?.join(' | ')}`);
+
+  // too narrow for the bit → advice, not motion
+  const r3 = run({ ...rec, pipeline: [{ id: 'pocket', strategy: 'pocket_text', params: { text: { ctrl: 'word' }, letterHeight: 0.35 } }] });
+  if (!r3.ok && r3.errors[0]?.includes('does not fit')) pass(`too-narrow text: "${r3.errors[0].slice(0, 70)}..."`);
+  else fail(`too-narrow not caught: ${JSON.stringify(r3.errors)}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
