@@ -82,7 +82,7 @@ RULES:
 - Only these strategies and their listed params. A request needing anything else (holes, images, other fonts, 3D, rotation...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops.
 - Params marked bindable are the usual candidates; other params are usually literals.
-- Operation order is machining order: engraving before any tag_cutout (the cutout frees the part).
+- Operation order is machining order: engraving and pockets first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change existing ops; do not remove+re-add.
 - If the recipe is empty and the user asks for an app, also set_name it.
 - The stock is ${JSON.stringify(recipe.stock)} — set_stock only when asked or when the request clearly cannot fit.

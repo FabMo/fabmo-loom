@@ -247,5 +247,55 @@ console.log('--- pocket_text: bulk + rest corners, one verb, two tools ---');
   else fail(`too-narrow not caught: ${JSON.stringify(r3.errors)}`);
 }
 
+// ---------------- 10. the coaster gap report, filled ----------------
+// From live testing 2026-07-05: "round coasters, 2.5 inch diameter with a
+// 2 inch pocket at the center 0.125 deep" — declined when only text-based
+// pocketing existed. pocket_shape + disc_cutout are the fill.
+
+console.log('--- coaster story: geometric pocket + round disc cutout ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, {
+    summary: 'Created a round-coaster app.',
+    actions: [
+      { kind: 'set_name', name: 'Drink coasters' },
+      { kind: 'set_stock', stock: { w: 4, h: 4, thickness: 0.375 } },
+      { kind: 'add_control', control: { id: 'discDia', type: 'number', label: 'Coaster diameter (in)', default: 2.5, min: 2, max: 4, step: 0.25 } },
+      { kind: 'add_control', control: { id: 'wellDia', type: 'number', label: 'Well diameter (in)', default: 2, min: 1, max: 3.5, step: 0.25 } },
+      { kind: 'add_operation', operation: { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: { ctrl: 'wellDia' }, depth: 0.125 } } },
+      { kind: 'add_operation', operation: { id: 'disc', strategy: 'disc_cutout', params: { diameter: { ctrl: 'discDia' }, tabs: true } } },
+    ],
+    declined: [],
+  });
+  rec = res.recipe;
+  const r = run(rec);
+  const targets = r.report?.stats.targets ?? [];
+  const disc = r.preview?.built?.find(x => x.op.id === 'disc');
+  if (r.ok && targets.length === 2 && targets.every(t => (t.gouges ?? t.intrusionArea) === 0 && t.depthViolations === 0)
+      && (disc?.r.previewTabs?.length ?? 0) >= 4) {
+    pass(`coaster verified: 2" well + 2.5" disc, ${disc.r.previewTabs.length} tabs, all targets clean`);
+  } else fail(`coaster failed: ok=${r.ok} targets=${targets.length} ${r.errors?.join(' | ')}`);
+
+  // true-geometry reach: a 2.2" disc over the 2" round well is legal (0.1"
+  // rim) even though the well's BBOX corner is 1.41" out — boxes would ban it
+  const snug = run(rec, { discDia: 2.2, wellDia: 2 });
+  if (snug.ok) pass('2.2" disc over 2" round well: reach measured from real outlines, not bbox corners');
+  else fail(`snug disc wrongly rejected: ${snug.errors?.join(' | ')}`);
+
+  // and a disc genuinely smaller than the content fails with the number
+  const tight = run(rec, { discDia: 1.9, wellDia: 2 });
+  if (!tight.ok && tight.errors[0]?.includes('needs ≥ 2.00')) pass(`too-small disc: "${tight.errors[0].slice(0, 60)}..."`);
+  else fail(`too-small disc not caught: ${JSON.stringify(tight.errors)}`);
+
+  // rectangle pocket with sharp corners exercises rest cleanup on shapes
+  const tray = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { w: 6, h: 4, thickness: 0.5 },
+    pipeline: [{ id: 'tray', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 3, height: 2, cornerRadius: 0, depth: 0.25, restDiameter: 0.0625 } }],
+  });
+  const trayTargets = tray.report?.stats.targets ?? [];
+  if (tray.ok && trayTargets.length === 2) pass('rectangle tray with sharp corners: bulk + rest corners, verified');
+  else fail(`tray failed: ok=${tray.ok} targets=${trayTargets.length} ${tray.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

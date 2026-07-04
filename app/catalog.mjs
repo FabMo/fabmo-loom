@@ -29,6 +29,44 @@ const ringArea = (ring) => {
 const ccw = (ring) => (ringArea(ring) > 0 ? ring : [...ring].reverse());
 const cwr = (ring) => (ringArea(ring) < 0 ? ring : [...ring].reverse());
 
+function circleRing(cx, cy, r, n = 96) {
+  const ring = [];
+  for (let i = 0; i < n; i++) {
+    const a = (2 * Math.PI * i) / n;
+    ring.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+  }
+  return ring;
+}
+
+// shapes center themselves on the existing content (so a pocket, a
+// monogram, and a disc cutout all stack concentrically); the first op in
+// a recipe centers at the local origin
+function contentCenter(ctx) {
+  const b = ctx.contentBBox;
+  return b ? { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 } : { x: 0, y: 0 };
+}
+
+// entries register their true outlines so downstream shapes (a disc cutout
+// sizing itself around a round pocket) measure real geometry, not bounding
+// boxes — a 2" circle reaches 1.0" from center, not its bbox corner's 1.41"
+function noteContent(ctx, rings) {
+  (ctx.contentRings ??= []).push(...rings);
+}
+function contentReach(ctx, c) {
+  if (!ctx.contentRings?.length) {
+    const b = ctx.contentBBox;
+    if (!b) return 0;
+    return Math.max(
+      Math.hypot(b.minX - c.x, b.minY - c.y), Math.hypot(b.maxX - c.x, b.minY - c.y),
+      Math.hypot(b.minX - c.x, b.maxY - c.y), Math.hypot(b.maxX - c.x, b.maxY - c.y));
+  }
+  let reach = 0;
+  for (const ring of ctx.contentRings) {
+    for (const q of ring) reach = Math.max(reach, Math.hypot(q.x - c.x, q.y - c.y));
+  }
+  return reach;
+}
+
 function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   r = Math.max(0, Math.min(r, (x1 - x0) / 2, (y1 - y0) / 2));
   const ring = [];
@@ -71,6 +109,7 @@ export const CATALOG = {
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
+      noteContent(ctx, regions.map(r => r.outer));
       const ma = computeMedialAxis(regions, {});
       const moves = generateVEngraveToolpath(ma, vBit, machine);
       const halfAngle = (p.includedAngle / 2) * Math.PI / 180;
@@ -99,6 +138,7 @@ export const CATALOG = {
     run(p, ctx) {
       const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
+      noteContent(ctx, regions.map(r => r.outer));
       const moves = [];
       const rings = regions.flatMap(r => [r.outer, ...r.holes]);
       for (const ring of rings) {
@@ -135,6 +175,7 @@ export const CATALOG = {
     run(p, ctx) {
       const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
+      noteContent(ctx, regions.map(r => r.outer));
       const params = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
@@ -185,8 +226,108 @@ export const CATALOG = {
     },
   },
 
+  pocket_shape: {
+    doc: 'Pocket a GEOMETRIC shape into the surface — a round or rounded-rectangle recess at constant depth (coaster wells, trays, dishes, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for rectangle corners (circles have none).',
+    params: {
+      shape: { type: 'string', default: 'circle', doc: '"circle" or "rectangle"' },
+      diameter: { type: 'number', default: 2, doc: 'circle only: pocket diameter, inches', bindable: true },
+      width: { type: 'number', default: 2, doc: 'rectangle only: pocket width, inches', bindable: true },
+      height: { type: 'number', default: 1.5, doc: 'rectangle only: pocket height, inches', bindable: true },
+      cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches' },
+      depth: { type: 'number', default: 0.125, doc: 'pocket floor depth, inches', bindable: true },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches' },
+      restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit that cleans rectangle corners' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+    },
+    run(p, ctx) {
+      const c = contentCenter(ctx);
+      let ring;
+      if (p.shape === 'circle') {
+        ring = circleRing(c.x, c.y, p.diameter / 2);
+      } else if (p.shape === 'rectangle') {
+        ring = roundedRectRing(c.x - p.width / 2, c.y - p.height / 2, c.x + p.width / 2, c.y + p.height / 2, p.cornerRadius);
+      } else {
+        return { error: `pocket_shape: unknown shape "${p.shape}" (circle or rectangle)` };
+      }
+      noteContent(ctx, [ring]);
+      const region = { outer: ring };
+      const params = {
+        stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
+        safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
+      };
+      const g = generatePocket(region, { diameter: p.toolDiameter }, params);
+      if (!g.moves.length) {
+        return { error: `a ${p.toolDiameter}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
+      }
+      const bb = ring.reduce((a, q) => ({
+        minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+        maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+      }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      const ops = [{
+        subName: 'bulk',
+        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: g.moves,
+        target: g.target ?? { type: 'region', rings: [ring], depth: p.depth },
+        previewRegions: [{ outer: ring, holes: [] }],
+      }];
+      if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
+        const rg = generateRestPocket(region, p.toolDiameter, { diameter: p.restDiameter }, params);
+        if (rg.moves.length) {
+          ops.push({
+            subName: 'rest corners',
+            allowOverlap: true,
+            tool: { name: `${p.restDiameter}" endmill`, diameter: p.restDiameter },
+            feedRate: p.feedRate, plungeRate: 30,
+            moves: rg.moves,
+            target: rg.target ?? { type: 'region', rings: [ring], depth: p.depth },
+          });
+        }
+      }
+      return { ops, bbox: bb };
+    },
+  },
+
+  disc_cutout: {
+    doc: 'Cut out a ROUND part of an explicit diameter — coasters, discs, wheels — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Use this, not tag_cutout, when the user names a round part or gives its diameter. Everything machined so far must fit inside the disc. Holding tabs available, same behavior as tag_cutout; without tabs, hold with tape/onion skin.',
+    params: {
+      diameter: { type: 'number', default: 3, doc: 'the finished disc diameter, inches', bindable: true },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
+      tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches; at least 4 regardless' },
+    },
+    run(p, ctx) {
+      const c = contentCenter(ctx);
+      const R = p.diameter / 2;
+      const reach = contentReach(ctx, c);
+      if (reach > R + 1e-9) {
+        return { error: `a ${p.diameter}" disc is too small for the content so far (needs ≥ ${(2 * reach).toFixed(2)}" diameter)` };
+      }
+      const ring = circleRing(c.x, c.y, R);
+      const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
+        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
+        safeZ: ctx.safeZ, entry: 'ramp',
+        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+      });
+      return {
+        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: prof.moves,
+        target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
+        bbox: {
+          minX: c.x - R - p.toolDiameter / 2, minY: c.y - R - p.toolDiameter / 2,
+          maxX: c.x + R + p.toolDiameter / 2, maxY: c.y + R + p.toolDiameter / 2,
+        },
+        previewRing: ring,
+        previewTabs: prof.tabs,
+      };
+    },
+  },
+
   tag_cutout: {
-    doc: 'Cut the work free as a rounded-corner tag: an outside profile around everything machined so far, with a buffer. Cuts through the full stock thickness with an endmill (ramp entry, depth passes). Holding tabs are available: triangular bridges that keep the piece attached to the sheet (snap out by hand, dress with a roundover) — placement is automatic with shop practice (a tab near each cardinal point, concave corners avoided). Without tabs, the part must be held with tape/onion skin.',
+    doc: 'Cut the work free as a rounded-corner rectangular tag: an outside profile around everything machined so far, with a buffer. (For a ROUND part with an explicit diameter, use disc_cutout instead.) Cuts through the full stock thickness with an endmill (ramp entry, depth passes). Holding tabs are available: triangular bridges that keep the piece attached to the sheet (snap out by hand, dress with a roundover) — placement is automatic with shop practice (a tab near each cardinal point, concave corners avoided). Without tabs, the part must be held with tape/onion skin.',
     params: {
       buffer: { type: 'number', default: 0.25, doc: 'clearance from the content bounding box to the tag edge, inches', bindable: true },
       cornerRadius: { type: 'number', default: 0.5, doc: 'tag corner radius, inches (clamped to fit)', bindable: true },
