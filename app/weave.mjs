@@ -107,7 +107,20 @@ export function startWeave(panel, label = 'weaving…') {
     ctx.shadowOffsetY = 0;
   }
 
+  // start with the cloth already woven: seed picks with back-dated births
+  // as if the loom had been running forever, then just keep the cadence
+  let seeded = false;
+  function seed(t0) {
+    const N = Math.ceil((clothBot - fellY) / rowPitch) + 1;
+    for (let k = 0; k < N; k++) {
+      rows.push({ parity: k % 2, born: t0 - (N - k) * ROW_MS });
+    }
+    rowCounter = N;
+    lastSpawn = t0 - ROW_MS;   // a fresh pick spawns on this first frame
+  }
+
   function frame(t) {
+    if (!seeded) { seed(t); seeded = true; }
     if (t - lastSpawn >= ROW_MS) {
       rows.push({ parity: rowCounter % 2, born: t });
       rowCounter++;
