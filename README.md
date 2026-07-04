@@ -1,5 +1,7 @@
 # FabMo Loom
 
+<img src="assets/loom-logo.jpg" width="320" alt="FabMo Loom — warp threads drawn as circuit traces, woven through red and blue weft">
+
 **The composition foundation for CNC/CAM apps: a canonical motion IR,
 toolpath strategies, and an independent verifier.**
 
