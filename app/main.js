@@ -6,6 +6,7 @@
 import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { buildParseRequest, applyActions } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
+import { startWeave } from './weave.mjs';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
@@ -196,6 +197,7 @@ async function generate() {
   busy = true;
   $('generate').disabled = true;
   $('generate').textContent = 'weaving…';
+  const stopWeave = startWeave($('appPanel'));
   try {
     const req = buildParseRequest(recipe, utterance);
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -231,6 +233,7 @@ async function generate() {
   } catch (e) {
     addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
   } finally {
+    stopWeave();
     busy = false;
     $('generate').disabled = false;
     $('generate').textContent = 'Generate';
