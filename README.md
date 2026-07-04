@@ -21,6 +21,14 @@ repository is that foundation.
 toolpath in two minutes, then point your AI coding agent at the repo
 ([AGENTS.md](AGENTS.md) hands it the contract) and build your own app.
 
+**Or open [the Loom app](app/)** — the loom itself: describe the app you
+need ("an app to engrave names" → "add a cutout around the names") and
+watch it woven in front of you. Apps are recipe *documents*, not code;
+prompts (your own Anthropic key, browser-direct) and sliders edit the
+same recipe, every state runs through the verifier, and requests the
+strategy catalog can't express are declined honestly — each decline is a
+gap report that grows the catalog.
+
 ## The model (the fabrication hourglass, short form)
 
 ```
