@@ -12,12 +12,12 @@
     "@anthropic-ai/sdk": "^0.104.1",
     "clipper-lib": "^6.4.2",
     "d3-delaunay": "^6.0.4",
-    "opentype.js": "^2.0.0"
+    "opentype.js": "^2.0.0",
+    "three": "^0.164.0"
   },
   "devDependencies": {
     "occt-import-js": "^0.0.23",
-    "puppeteer": "^25.1.0",
-    "three": "^0.164.0"
+    "puppeteer": "^25.1.0"
   },
   "license": "Apache-2.0",
   "repository": {

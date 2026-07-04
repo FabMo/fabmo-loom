@@ -7,12 +7,16 @@ import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { buildParseRequest, applyActions } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
+import { simulateJob } from './sim.mjs';
+import { createView3D } from './view3d.mjs';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
 const ctx = canvas.getContext('2d');
 
 let FONT = null;
+let viewMode = localStorage.getItem('loom:view') ?? '3d';
+let view3d = null;
 let recipe = loadRecipe();
 let controlValues = controlDefaults(recipe);
 let result = null;
@@ -104,7 +108,24 @@ function render() {
   $('warnings').textContent = r.warnings.join('\n');
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
-  draw();
+  refreshPreview();
+}
+
+function refreshPreview() {
+  const is3d = viewMode === '3d';
+  $('preview').style.display = is3d ? 'none' : 'block';
+  $('preview3d').style.display = is3d ? 'block' : 'none';
+  $('btn3d').className = is3d ? 'small' : 'small ghost';
+  $('btn2d').className = is3d ? 'small ghost' : 'small';
+  if (is3d) {
+    view3d ??= createView3D($('preview3d'));
+    const pre = result?.preview;
+    const stock = pre?.stock ?? { w: 8, h: 2.5, thickness: recipe.stock.thickness ?? 0.5 };
+    const sim = pre?.built?.length ? simulateJob(pre.built, pre.placement, stock) : null;
+    view3d.update(sim, stock);
+  } else {
+    draw();
+  }
 }
 
 function draw() {
@@ -278,6 +299,8 @@ $('chips').addEventListener('click', (e) => {
   const p = e.target?.dataset?.p;
   if (p) { $('prompt').value = p; generate(); }
 });
+$('btn3d').addEventListener('click', () => { viewMode = '3d'; localStorage.setItem('loom:view', '3d'); refreshPreview(); });
+$('btn2d').addEventListener('click', () => { viewMode = '2d'; localStorage.setItem('loom:view', '2d'); refreshPreview(); });
 $('reset').addEventListener('click', () => {
   recipe = structuredClone(EMPTY_RECIPE);
   controlValues = controlDefaults(recipe);

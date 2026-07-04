@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
+import { simulateJob, surfaceAt } from './sim.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const buf = readFileSync(join(here, '..', 'examples', 'engraver', 'assets', 'DejaVuSans-Bold.ttf'));
@@ -352,6 +353,55 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   const trayTargets = tray.report?.stats.targets ?? [];
   if (tray.ok && trayTargets.length === 2) pass('rectangle tray with sharp corners: bulk + rest corners, verified');
   else fail(`tray failed: ok=${tray.ok} targets=${trayTargets.length} ${tray.errors?.join(' | ')}`);
+}
+
+// ---------------- 11. material-removal simulation (feeds the 3D preview) ----------------
+// The simulator is DOM-free, so the surface the user will SEE is asserted
+// here with physical numbers: the coaster's well floor, the through kerf,
+// the untouched rim, the tab bridges standing in the kerf.
+
+console.log('--- simulation: the 3D preview surface, measured ---');
+{
+  const r = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.375 },
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 2.5, tabs: true } },
+    ],
+  });
+  const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+  const cx = r.preview.stock.w / 2, cy = r.preview.stock.h / 2;
+  const well = surfaceAt(sim, cx, cy);
+  const rim = surfaceAt(sim, cx + 1.1, cy);
+  const waste = surfaceAt(sim, 0.05, 0.05);
+  if (Math.abs(well + 0.125) < 0.002 && rim === 0 && waste === 0) {
+    pass(`surface measured: well ${well.toFixed(3)}, rim ${rim}, waste ${waste}`);
+  } else fail(`surface wrong: well=${well} rim=${rim} waste=${waste}`);
+
+  // the kerf: mostly through, but tab bridges must stand in it
+  let through = 0, kerfMax = -Infinity, samples = 0;
+  for (let a = 0; a < 360; a += 2) {
+    const z = surfaceAt(sim, cx + 1.31 * Math.cos(a * Math.PI / 180), cy + 1.31 * Math.sin(a * Math.PI / 180));
+    samples++;
+    if (z < -0.374) through++;
+    if (z > kerfMax) kerfMax = z;
+  }
+  const bridges = samples - through;
+  if (through > samples * 0.6 && bridges >= 4 && kerfMax > -0.37) {
+    pass(`kerf mostly through (${through}/${samples}) with ${bridges} bridge samples standing (highest ${kerfMax.toFixed(3)})`);
+  } else fail(`kerf wrong: through=${through}/${samples} bridges=${bridges} kerfMax=${kerfMax}`);
+
+  // vee cone model: an outline pass cuts exactly its depth at the centerline
+  const o = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'outline', strategy: 'outline_text', params: { text: 'O', letterHeight: 1.5, depth: 0.04 } }],
+  });
+  const osim = simulateJob(o.preview.built, o.preview.placement, o.preview.stock);
+  const ring = o.preview.built[0].r.previewRegions[0].outer;
+  const q = ring[0], p2 = o.preview.placement;
+  const z = surfaceAt(osim, q.x + p2.x, q.y + p2.y);
+  if (Math.abs(z + 0.04) < 0.006) pass(`vee centerline depth measured: ${z.toFixed(4)} (declared -0.04)`);
+  else fail(`vee sim off: ${z}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

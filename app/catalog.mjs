@@ -135,6 +135,7 @@ export const CATALOG = {
         ? generatePocketPasses(regions, vBit, machine, maxR * 0.8) : [];
       return {
         tool: { name: `${p.includedAngle}° V-bit`, diameter: 0.002 },  // point-tip model (see engraver notes)
+        cutter: { type: 'vee', includedAngle: p.includedAngle },
         feedRate: p.feedRate, plungeRate: 30,
         moves: [...moves, ...pocketMoves],
         target: { type: 'region', rings: regions.flatMap(r => [ccw(r.outer), ...r.holes.map(cwr)]), depth: p.maxDepth },
@@ -169,6 +170,7 @@ export const CATALOG = {
       }
       return {
         tool: { name: '60° V-bit', diameter: 0.002 },
+        cutter: { type: 'vee', includedAngle: 60 },
         feedRate: p.feedRate, plungeRate: 30,
         moves,
         // 'on' profile: the tip rides the boundary itself — depth is the check
@@ -211,6 +213,7 @@ export const CATALOG = {
       const ops = [{
         subName: 'bulk',
         tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: bulk.moves,
         target: { type: 'region', rings: bulk.rings, depth: p.depth },
@@ -233,6 +236,7 @@ export const CATALOG = {
             // everything that doesn't declare it
             allowOverlap: true,
             tool: { name: `${p.restDiameter}" endmill`, diameter: p.restDiameter },
+            cutter: { type: 'flat', diameter: p.restDiameter },
             feedRate: p.feedRate, plungeRate: 30,
             moves: rest.moves,
             target: { type: 'region', rings: rest.rings, depth: p.depth },
@@ -283,6 +287,7 @@ export const CATALOG = {
       const ops = [{
         subName: 'bulk',
         tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: g.moves,
         target: g.target ?? { type: 'region', rings: [ring], depth: p.depth },
@@ -330,6 +335,7 @@ export const CATALOG = {
       });
       return {
         tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: prof.moves,
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
@@ -366,6 +372,7 @@ export const CATALOG = {
       });
       return {
         tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: prof.moves,
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },

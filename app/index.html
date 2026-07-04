@@ -98,7 +98,14 @@
       <div id="minStock" class="numbers" style="color:var(--mut)"></div>
     </div>
     <div id="controls"></div>
-    <canvas id="preview" width="1160" height="600"></canvas>
+    <div id="previewWrap" style="position:relative">
+      <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
+        <button id="btn3d" class="small">3D</button>
+        <button id="btn2d" class="small ghost">2D</button>
+      </div>
+      <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
+      <div id="preview3d"></div>
+    </div>
     <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span></div>
     <div id="numbers" class="numbers"></div>
     <div id="errors" class="errors"></div>
@@ -110,7 +117,7 @@
       <button id="openRecipe" class="ghost small">Open recipe…</button>
       <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
     </div>
-    <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must fixture. Exports unlock only on VERIFIED. First run cuts air.</div>
+    <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must fixture. The 3D view is the simulated cut surface (drag to rotate); 2D shows the toolpath. Exports unlock only on VERIFIED. First run cuts air.</div>
     <details>
       <summary>the recipe (what the prompts are editing)</summary>
       <pre id="recipeJson"></pre>
@@ -124,6 +131,8 @@
 <script type="importmap">
 {
   "imports": {
+    "three": "../node_modules/three/build/three.module.js",
+    "three/addons/": "../node_modules/three/examples/jsm/",
     "d3-delaunay": "../node_modules/d3-delaunay/src/index.js",
     "delaunator": "../node_modules/delaunator/index.js",
     "robust-predicates": "../node_modules/robust-predicates/index.js"
