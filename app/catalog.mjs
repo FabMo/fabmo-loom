@@ -83,6 +83,23 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   return ring;
 }
 
+// Center text geometry on the content so far — a monogram added to a
+// coaster lands with its VISUAL center (bbox center) on the pocket's
+// center, not its bottom-left corner ("center the letter" means the
+// letter's middle, to a human). Returns translated COPIES: the text
+// cache stays in its own frame so repeat ops agree.
+function centeredText(ctx, text, letterHeight) {
+  const { regions, width, height } = textGeometry(ctx, text, letterHeight);
+  const cc = contentCenter(ctx);
+  const dx = cc.x - width / 2, dy = cc.y - height / 2;
+  const shift = (ring) => ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
+  return {
+    regions: regions.map(r => ({ outer: shift(r.outer), holes: r.holes.map(shift) })),
+    width, height,
+    bbox: { minX: dx, minY: dy, maxX: dx + width, maxY: dy + height },
+  };
+}
+
 // Shared text→regions step for the text strategies. ctx caches by
 // (text, letterHeight) so multiple ops over the same text agree exactly.
 function textGeometry(ctx, text, letterHeight) {
@@ -105,7 +122,7 @@ export const CATALOG = {
       feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
@@ -121,7 +138,7 @@ export const CATALOG = {
         feedRate: p.feedRate, plungeRate: 30,
         moves: [...moves, ...pocketMoves],
         target: { type: 'region', rings: regions.flatMap(r => [ccw(r.outer), ...r.holes.map(cwr)]), depth: p.maxDepth },
-        bbox: { minX: 0, minY: 0, maxX: width, maxY: height },
+        bbox,
         previewRegions: regions,
       };
     },
@@ -136,7 +153,7 @@ export const CATALOG = {
       feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const moves = [];
@@ -156,7 +173,7 @@ export const CATALOG = {
         moves,
         // 'on' profile: the tip rides the boundary itself — depth is the check
         target: { type: 'profile', side: 'on', rings: rings.map(ccw), depth: p.depth },
-        bbox: { minX: 0, minY: 0, maxX: width, maxY: height },
+        bbox,
         previewRegions: regions,
       };
     },
@@ -173,7 +190,7 @@ export const CATALOG = {
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, width, height } = textGeometry(ctx, p.text, p.letterHeight);
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const params = {
@@ -222,7 +239,7 @@ export const CATALOG = {
           });
         }
       }
-      return { ops, bbox: { minX: 0, minY: 0, maxX: width, maxY: height } };
+      return { ops, bbox };
     },
   },
 

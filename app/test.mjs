@@ -289,6 +289,29 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   if (!tight.ok && tight.errors[0]?.includes('needs ≥ 2.00')) pass(`too-small disc: "${tight.errors[0].slice(0, 60)}..."`);
   else fail(`too-small disc not caught: ${JSON.stringify(tight.errors)}`);
 
+  // "a monogram at the center of the pocket" (live-tested): text used to
+  // land with its bbox CORNER on the content center — a human means the
+  // letter's visual middle. All content ops now center on the content.
+  {
+    const mono = run({
+      ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.375 },
+      pipeline: [
+        { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } },
+        { id: 'monogram', strategy: 'vcarve_text', params: { text: 'B', letterHeight: 1 } },
+        { id: 'disc', strategy: 'disc_cutout', params: { diameter: 2.5, tabs: true } },
+      ],
+    });
+    const m = mono.preview?.built?.find(x => x.op.id === 'monogram');
+    let mnx = Infinity, mxx = -Infinity, mny = Infinity, mxy = -Infinity;
+    for (const g of m?.r.previewRegions ?? []) for (const q of g.outer) {
+      mnx = Math.min(mnx, q.x); mxx = Math.max(mxx, q.x); mny = Math.min(mny, q.y); mxy = Math.max(mxy, q.y);
+    }
+    const cx = (mnx + mxx) / 2, cy = (mny + mxy) / 2;
+    if (mono.ok && Math.abs(cx) < 1e-6 && Math.abs(cy) < 1e-6 && mono.report.stats.targets.length === 3) {
+      pass('monogram centers its visual middle on the pocket center (three-op coaster verified)');
+    } else fail(`monogram off-center: (${cx.toFixed(3)}, ${cy.toFixed(3)}) ok=${mono.ok}`);
+  }
+
   // strategy conversion: the live-tested stumble — a recipe holding an old
   // tag_cutout op named "cutout" gets converted to a disc by set_operation
   // with a new strategy (params replaced, not merged)
