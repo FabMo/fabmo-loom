@@ -1,0 +1,10 @@
+[package]
+name = "seam-diff-harness"
+version = "0.1.0"
+edition = "2021"
+
+# Native (non-wasm) link against the terrain kernel's rlib so the seam's
+# passesToMoves adapter can be differential-tested against the kernel's own
+# gcode.rs/sbp.rs posts on identical input.
+[dependencies]
+terrain-carver-kernel = { path = "../../../terrain_carver/kernel" }

@@ -1,0 +1,10 @@
+FabMo Loom
+Copyright 2026 ShopBot Tools, Inc.
+
+FabMo Loom is part of the FabMo platform, from the makers of ShopBot
+(https://www.shopbottools.com). It was developed at ShopBot Labs
+(https://labs.shopbottools.com).
+
+This product includes clipper-lib (Clipper, by Angus Johnson; JavaScript
+port by Timo), used under the Boost Software License 1.0, vendored at
+vendor/clipper.js.

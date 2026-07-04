@@ -1,0 +1,26 @@
+{
+  "name": "fabmo-loom",
+  "version": "0.1.0",
+  "description": "FabMo Loom — composition foundation for CNC/CAM apps: canonical motion IR, toolpath strategies, independent verifier. From the makers of ShopBot.",
+  "type": "module",
+  "scripts": {
+    "test": "node test/verify-test.mjs && node test/surface-raster-test.mjs && node test/tool-select-test.mjs && node test/rest-test.mjs && node test/bore-test.mjs && node test/chamfer-test.mjs && node test/profile-test.mjs && node test/arc-fit-test.mjs",
+    "test:workspace": "node test/diff-test.mjs && node test/e2e-demo.mjs && node test/pocket-test.mjs && node test/tool-select-test.mjs && node test/rest-test.mjs && node test/bore-test.mjs && node test/surface-raster-test.mjs && node test/chamfer-test.mjs && node test/chamfer-detect-test.mjs && node test/verify-test.mjs && node test/profile-test.mjs && node test/arc-fit-test.mjs && node test/step-job-test.mjs && node test/step-real-test.mjs && node test/intent-apply-test.mjs",
+    "fixtures": "cd test/diff && cargo run --release && cargo run --release -- relief"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "clipper-lib": "^6.4.2",
+    "d3-delaunay": "^6.0.4"
+  },
+  "devDependencies": {
+    "occt-import-js": "^0.0.23",
+    "puppeteer": "^25.1.0",
+    "three": "^0.164.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FabMo/fabmo-loom.git"
+  }
+}
