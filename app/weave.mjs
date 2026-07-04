@@ -55,7 +55,6 @@ export function startWeave(panel, label = 'weaving…') {
   const colX = (i) => 20 + i * colGap;
   const rowH = 16, rowGap = 7, rowPitch = rowH + rowGap;
   const clothTop = 26, clothBot = Hc - 6;
-  const maxRows = Math.floor((clothBot - clothTop) / rowPitch);
 
   // ---- isometric mapping: cloth x → down-right, cloth y → down-left ----
   const ISO = { ax: 0.866, ay: 0.5 };
@@ -67,11 +66,16 @@ export function startWeave(panel, label = 'weaving…') {
     dpr * tx, dpr * ty,
   );
 
-  const rows = [];                    // woven rows; rows[0] is newest
+  // Continuous diagonal scroll: the cloth drifts along the warp at exactly
+  // one row-pitch per pick, so each red strip weaves in WHILE it drifts
+  // away from the fell (just below the pads), and old rows slide off the
+  // end of the warp forever. row.age ∈ [0,1] is its weaving progress;
+  // y = fellY + rowPitch · totalAge is its drift.
+  const fellY = clothTop;
+  const rows = [];                    // [{ parity, born }], newest last
   let rowCounter = 0;
-  let current = { parity: 0, progress: 0 };
   const ROW_MS = 700;
-  let lastT = performance.now();
+  let lastSpawn = -Infinity;
   let raf = 0;
   const ease = (t) => 1 - Math.pow(1 - t, 3);
 
@@ -104,30 +108,34 @@ export function startWeave(panel, label = 'weaving…') {
   }
 
   function frame(t) {
-    const dt = t - lastT;
-    lastT = t;
-    current.progress += dt / ROW_MS;
-    if (current.progress >= 1) {
-      rows.unshift({ parity: current.parity });
-      if (rows.length > maxRows) rows.pop();
+    if (t - lastSpawn >= ROW_MS) {
+      rows.push({ parity: rowCounter % 2, born: t });
       rowCounter++;
-      current = { parity: rowCounter % 2, progress: 0 };
+      lastSpawn = t;
     }
+    // drop rows that have drifted past the end of the warp
+    while (rows.length && fellY + rowPitch * ((t - rows[0].born) / ROW_MS) > clothBot + rowH) rows.shift();
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W * dpr, H * dpr);
     setIso();
 
-    // the woven block anchors at the far end and grows toward the pads —
-    // the fell of the cloth, where the new row is beaten in
-    const blockRows = rows.length;
-    const yOf = (idx) => clothBot - rowH - (blockRows - 1 - idx) * rowPitch;
-    const yCurrent = clothBot - rowH - blockRows * rowPitch;
-    const fr = ease(Math.min(1, current.progress));
+    const yOf = (r) => fellY + rowPitch * ((t - r.born) / ROW_MS);
+    const frOf = (r) => ease(Math.min(1, (t - r.born) / ROW_MS));
+
+    // weft passes are clipped to the warp's extent so departing rows
+    // slide off the end of the threads instead of floating past them
+    const clipWeft = (fn) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, fellY - 2, Wc, clothBot - fellY + rowH * 0.6);
+      ctx.clip();
+      fn();
+      ctx.restore();
+    };
 
     // 1. weft under-pass
-    rows.forEach((r, i) => weftStrip(yOf(i), 1));
-    if (yCurrent > clothTop - rowH) weftStrip(yCurrent, fr);
+    clipWeft(() => rows.forEach((r) => weftStrip(yOf(r), frOf(r))));
 
     // 2. warp threads, alternating navy/sky, via-pad ends
     for (let c = 0; c < COLS; c++) {
@@ -152,18 +160,20 @@ export function startWeave(panel, label = 'weaving…') {
     }
 
     // 3. weft over-pass — the crossings, with depth shadow
-    rows.forEach((r, i) => overSegments(yOf(i), 1, r.parity, true));
-    if (yCurrent > clothTop - rowH) {
-      overSegments(yCurrent, fr, current.parity, true);
-      // the shuttle: a pad-styled dot leading the in-flight strip
+    clipWeft(() => rows.forEach((r) => overSegments(yOf(r), frOf(r), r.parity, true)));
+
+    // the shuttle rides the youngest, still-weaving row
+    const young = rows[rows.length - 1];
+    if (young && (t - young.born) < ROW_MS) {
+      const fr = frOf(young);
       const tip = Math.min(6 + fr * (Wc - 12), Wc - 8);
       ctx.fillStyle = NAVY;
       ctx.beginPath();
-      ctx.arc(tip, yCurrent + rowH / 2, 7, 0, Math.PI * 2);
+      ctx.arc(tip, yOf(young) + rowH / 2, 7, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = 'rgba(247,246,242,1)';
       ctx.beginPath();
-      ctx.arc(tip, yCurrent + rowH / 2, 2.8, 0, Math.PI * 2);
+      ctx.arc(tip, yOf(young) + rowH / 2, 2.8, 0, Math.PI * 2);
       ctx.fill();
     }
 
