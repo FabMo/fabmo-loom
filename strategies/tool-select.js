@@ -18,7 +18,7 @@
 // AT the bit width counts as reachable (centerline slot pass).
 
 import ClipperLib from '../vendor/clipper.js';
-import { insetRegion, regionToPaths, fromClipper, SCALE, SLOT_GRAZE } from './pocket.js';
+import { insetRegionSlotAware, regionToPaths, fromClipper, SCALE } from './pocket.js';
 
 const ARC_TOL = 0.0005 * SCALE;
 
@@ -53,10 +53,12 @@ export function regionArea(region) {
  * (polygon-with-holes + edgeTypes, as generatePocket takes it), measured
  * against the region proper. Returns clipper-free rings.
  */
-export function reachablePaths(region, diameter) {
+export function reachablePaths(region, diameter, slot = false) {
   const R = diameter / 2;
-  let inset = insetRegion(region, R, R);
-  if (!inset.length) inset = insetRegion(region, R - SLOT_GRAZE, R);
+  // slot=true mirrors generatePocket's slot-fit mode (centerline passes in
+  // nominal-width grooves, walls grazed up to SLOT_GRAZE); slot=false is
+  // clean standoff with the fallback-on-empty rescue only
+  const inset = insetRegionSlotAware(region, R, R, slot ? undefined : Infinity).paths;
   if (!inset.length) return [];
   const co = new ClipperLib.ClipperOffset(2, ARC_TOL);
   co.AddPaths(inset, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
@@ -86,14 +88,25 @@ export function coverageCurve(region, depth, bits, opts = {}) {
     .sort((a, b) => b.diameter - a.diameter)
     .map(bit => {
       const maxDepth = bit.maxDepth ?? o.depthRatio * bit.diameter;
-      if (depth > maxDepth + 1e-9) {
+      // machine resolution is ~0.001": a rated depth within half a thou of
+      // the feature depth is real-world capable (STEP thickness often
+      // arrives as 0.500000000000002 — that must not exclude a 0.5-rated
+      // bit from a through cut)
+      if (depth > maxDepth + 5e-4) {
         return { diameter: bit.diameter, maxDepth, frac: 0, area: 0, excluded: 'depth' };
       }
       const area = total > 0 ? pathsArea(reachablePaths(region, bit.diameter)) : 0;
+      // slot-fit coverage alongside clean: what the bit reaches when
+      // nominal-width grooves get a wall-grazing centerline pass. The
+      // chain picker treats it as a rescue (pickChainSlotAware), never as
+      // a default upgrade.
+      const slotArea = total > 0 ? pathsArea(reachablePaths(region, bit.diameter, true)) : 0;
       return {
         diameter: bit.diameter, maxDepth,
         frac: total > 0 ? Math.min(1, area / total) : 0,
         area,
+        slotFrac: total > 0 ? Math.min(1, slotArea / total) : 0,
+        slotArea,
       };
     });
 }
@@ -143,6 +156,32 @@ export function pickChain(curve, areaTotal, opts = {}) {
     if (earns) { chain.push(i); covered = c.frac; }
   }
   return chain;
+}
+
+/**
+ * pickChain on clean coverage, re-picked on slot-fit coverage only when the
+ * clean chain leaves a meaningful deficit. Slot fit (a centerline pass
+ * grazing the walls of a nominal-width groove by up to SLOT_GRAZE) is a
+ * RESCUE, not an optimization: a feature some approved bit covers cleanly
+ * keeps the clean assignment (a 0.25"-wide C-channel takes the 1/8" clean,
+ * not the 1/4" rubbing its walls), while territory NO bit reaches cleanly
+ * is cut at slot fit rather than dropped (004681 Through Cutout 15's
+ * 1/8"-nominal slot legs — through cuts can never fall to the residual).
+ * Returns { chain, slot }.
+ */
+export function pickChainSlotAware(curve, areaTotal, opts = {}) {
+  const o = { ...KNEE_DEFAULTS, ...opts };
+  const chain = pickChain(curve, areaTotal, opts);
+  const final = chain.length ? curve[chain[chain.length - 1]].frac : 0;
+  if (final >= o.doneAt) return { chain, slot: false };
+  const slotCurve = curve.map(e => ({ ...e, frac: e.slotFrac ?? e.frac, area: e.slotArea ?? e.area }));
+  const slotChain = pickChain(slotCurve, areaTotal, opts);
+  const slotFinal = slotChain.length ? slotCurve[slotChain[slotChain.length - 1]].frac : 0;
+  const gain = slotFinal - final;
+  if (gain >= o.minGainFrac || gain * areaTotal >= o.minGainArea) {
+    return { chain: slotChain, slot: true };
+  }
+  return { chain, slot: false };
 }
 
 // 0.125 → '1/8"' — bits are named the way the shop talks about them

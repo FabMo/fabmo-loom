@@ -103,7 +103,7 @@ export function generateRestPocket(region, prevDiameter, tool, params) {
   let blobs = 0;
 
   for (const r of regions) {
-    const g = generatePocket(r, tool, { ...params, minRingArea: 0 });
+    const g = generatePocket(r, tool, { ...params, minRingArea: 0, slotSwapRatio: Infinity });
     if (!g.moves.length) continue;
     if (moves.length) moves.push({ type: 'rapid', z: params.safeZ });
     moves.push(...g.moves);

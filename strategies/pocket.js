@@ -62,76 +62,14 @@ function pointInPaths(x, y, paths) {
 }
 
 // Normalize a region to clipper Paths with consistent orientation
-// (outer counter-clockwise/positive, holes clockwise/negative), applying
-// open-edge spillover. `ext` is how far past an open edge the shape is
-// extended. Pass 2·bitRadius: the FIXED virtual region whose outermost
-// inset (bitRadius) lands exactly bitRadius past the open edge — full
-// clearance — while deeper insets retreat inward by one stepover per
-// level, exactly like a closed pocket. (Extending per-level by
-// insetDistance + bitRadius instead pins EVERY ring to the open edge,
-// re-cutting the same air band each pass — correct but hugely wasteful.)
-export function regionToPaths(region, ext) {
+// (outer counter-clockwise/positive, holes clockwise/negative). Open-edge
+// spillover is NOT applied here — insetRegion owns it (set-theoretically;
+// see its header).
+export function regionToPaths(region) {
   let outer = region.outer;
-  let edgeTypes = region.edgeTypes ?? null;
-  if (signedArea(outer) < 0) {
-    const n = outer.length;
-    outer = outer.slice().reverse();
-    if (edgeTypes) edgeTypes = outer.map((_, k) => region.edgeTypes[(((n - 2 - k) % n) + n) % n]);
-  }
+  if (signedArea(outer) < 0) outer = outer.slice().reverse();
 
   let paths = [toClipper(outer)];
-
-  if (edgeTypes && ext > 0 && edgeTypes.includes('open')) {
-    const rects = [];
-    const n = outer.length;
-    // outward normal of a CCW ring is to the RIGHT of travel
-    const normals = outer.map((a, i) => {
-      const b = outer[(i + 1) % n];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const len = Math.hypot(dx, dy);
-      return len < 1e-9 ? null : { x: dy / len, y: -dx / len };
-    });
-    for (let i = 0; i < n; i++) {
-      if (edgeTypes[i] !== 'open' || !normals[i]) continue;
-      const a = outer[i], b = outer[(i + 1) % n];
-      const { x: nx, y: ny } = normals[i];
-      rects.push(toClipper([
-        a, b,
-        { x: b.x + nx * ext, y: b.y + ny * ext },
-        { x: a.x + nx * ext, y: a.y + ny * ext },
-      ]));
-    }
-    // Where two OPEN edges meet, the per-edge rects leave the diagonal
-    // corner unfilled — the virtual region gets a notch there and every
-    // inset bows around it ("avoiding the corner"). Patch the vertex with
-    // the parallelogram spanned by both edge normals so the spillover
-    // wraps the open corner like the rest of the open boundary.
-    // Wound (v → nc → np+nc → np) to MATCH the edge rects' winding: a
-    // mixed-orientation clip set makes the nonzero union emit an extra
-    // hole-like path that cancels real region during the inset.
-    for (let i = 0; i < n; i++) {
-      const prev = (i - 1 + n) % n;
-      if (edgeTypes[i] !== 'open' || edgeTypes[prev] !== 'open') continue;
-      const np = normals[prev], nc = normals[i];
-      if (!np || !nc) continue;
-      const v = outer[i];
-      rects.push(toClipper([
-        v,
-        { x: v.x + nc.x * ext, y: v.y + nc.y * ext },
-        { x: v.x + (np.x + nc.x) * ext, y: v.y + (np.y + nc.y) * ext },
-        { x: v.x + np.x * ext, y: v.y + np.y * ext },
-      ]));
-    }
-    if (rects.length) {
-      const c = new ClipperLib.Clipper();
-      c.AddPaths(paths, ClipperLib.PolyType.ptSubject, true);
-      c.AddPaths(rects, ClipperLib.PolyType.ptClip, true);
-      const out = new ClipperLib.Paths();
-      c.Execute(ClipperLib.ClipType.ctUnion, out,
-        ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
-      paths = out;
-    }
-  }
 
   if (region.holes?.length) {
     const c = new ClipperLib.Clipper();
@@ -146,19 +84,169 @@ export function regionToPaths(region, ext) {
   return paths;
 }
 
+// drop collinear/near-duplicate vertices at the arc-tolerance scale —
+// keeps ring point counts (and posted file sizes) sane
+const cleaned = out =>
+  ClipperLib.Clipper.CleanPolygons(out, ARC_TOL).filter(p => p.length >= 3);
+
 // Inset a region by distance d (in region units). Returns clipper Paths —
 // possibly several disjoint outers, each possibly with holes (islands).
 // Round joins: the inset is exactly the locus a round tool of radius d can
 // reach, so sharp concave corners get the physically correct fillet.
+//
+// With open edges (bitRadius > 0), the legal tool-center set at level d is
+// built set-theoretically instead of by insetting a spillover-extended
+// virtual polygon:
+//
+//   legal(d) = dilate(region, 2·bitRadius − d) − bands(walls ∪ islands, d)
+//
+// dilate: everything within (2R − d) of the region. Past open edges that
+// is exactly the spillover ladder — level 0 (d = R) lands the center R
+// past the edge (periphery 2R past, full clearance), deeper levels retreat
+// one stepover per level like a closed pocket, d > 2R is a plain erode.
+// bands: round-capped both-sided offset of every wall chain and island
+// ring — the ring-level standoff from real geometry. Ring levels have
+// d ≥ R ≥ 2R − d, so the wall band also swallows the whole beyond-wall
+// shadow the dilation added: no center ever lands past a wall. The
+// slot-graze fallback (d = R − graze < R) reopens a 2·graze-deep shadow
+// window past walls; a second, outside-only subtraction closes it without
+// tightening the in-region standoff.
+//
+// The previous construction unioned a per-open-edge rectangle fan onto the
+// region and inset that. Around a concave circular bite the fan left slit
+// artifacts, and every fictitious slit pushes the inset a full bit radius
+// away — phantom keep-out that cost the 1/4" its only corridor through
+// 004681 Pocket 3's narrow neck and dragged in a pointless 1/8" rest pass.
 export function insetRegion(region, d, bitRadius = 0) {
-  const paths = regionToPaths(region, 2 * bitRadius);
-  const co = new ClipperLib.ClipperOffset(MITER, ARC_TOL);
-  co.AddPaths(paths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const hasOpen = bitRadius > 0 && !!region.edgeTypes?.includes('open');
+  if (!hasOpen) {
+    const co = new ClipperLib.ClipperOffset(MITER, ARC_TOL);
+    co.AddPaths(regionToPaths(region), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+    const out = new ClipperLib.Paths();
+    co.Execute(out, -d * SCALE);
+    return cleaned(out);
+  }
+
+  const base = regionToPaths(region);
+  const grow = new ClipperLib.ClipperOffset(MITER, ARC_TOL);
+  grow.AddPaths(base, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const dilated = new ClipperLib.Paths();
+  grow.Execute(dilated, (2 * bitRadius - d) * SCALE);
+  if (!dilated.length) return [];
+
+  // wall chains, indexed against the CCW-oriented outer like edgeTypes
+  let outer = region.outer;
+  let edgeTypes = region.edgeTypes;
+  if (signedArea(outer) < 0) {
+    const n = outer.length;
+    outer = outer.slice().reverse();
+    edgeTypes = outer.map((_, k) => region.edgeTypes[(((n - 2 - k) % n) + n) % n]);
+  }
+  const n = outer.length;
+  const isWall = e => edgeTypes[e] !== 'open';
+  // a wall chain ends where an open edge begins, but the material it stands
+  // for does not necessarily end there (a neighboring region's wall often
+  // continues the same face). Persist each wall as a half-plane constraint
+  // through the whole spillover zone: extend the chain tangentially past
+  // both end vertices before offsetting.
+  const EXT = 2 * bitRadius;
+  const extended = pts => {
+    const out = pts.slice();
+    for (const [from, at] of [[1, 0], [pts.length - 2, pts.length - 1]]) {
+      // walk inward past zero-length segments for a usable direction
+      let f = from;
+      const step = from < at ? -1 : 1;
+      while (f >= 0 && f < pts.length
+        && Math.hypot(pts[at].x - pts[f].x, pts[at].y - pts[f].y) < 1e-9) f += step;
+      if (f < 0 || f >= pts.length) continue;
+      const dx = pts[at].x - pts[f].x, dy = pts[at].y - pts[f].y;
+      const len = Math.hypot(dx, dy);
+      const p = { x: pts[at].x + (dx / len) * EXT, y: pts[at].y + (dy / len) * EXT };
+      if (at === 0) out.unshift(p); else out.push(p);
+    }
+    return out;
+  };
+  // spillover must not wrap around an open chain's END vertex: the space
+  // diagonally past it belongs to geometry this region knows nothing about
+  // (Aggregate's Pocket 13 has full-height material there). Fence each end
+  // with a segment along the end edge's outward normal — the lateral bound
+  // the old spillover rectangles enforced by their flat sides.
+  const fences = [];
+  for (let s = 0; s < n; s++) {
+    if (isWall(s) || !isWall((s - 1 + n) % n)) continue; // open-chain starts
+    let last = s;
+    for (let e = s; !isWall(e); e = (e + 1) % n) last = e;
+    for (const e of [s, last]) {
+      const a = outer[e], b = outer[(e + 1) % n];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      if (len < 1e-9) continue;
+      const nx = (b.y - a.y) / len, ny = -(b.x - a.x) / len; // outward, CCW ring
+      const v = e === s ? a : b;
+      fences.push([v, { x: v.x + nx * EXT, y: v.y + ny * EXT }]);
+    }
+  }
+  const bands = radius => {
+    const so = new ClipperLib.ClipperOffset(MITER, ARC_TOL);
+    for (let s = 0; s < n; s++) {
+      if (!isWall(s) || isWall((s - 1 + n) % n)) continue; // chain starts
+      const pts = [outer[s]];
+      for (let e = s; isWall(e); e = (e + 1) % n) pts.push(outer[(e + 1) % n]);
+      so.AddPath(toClipper(extended(pts)), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etOpenRound);
+    }
+    for (const f of fences) {
+      so.AddPath(toClipper(f), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etOpenRound);
+    }
+    for (const h of region.holes ?? []) {
+      so.AddPath(toClipper(h), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedLine);
+    }
+    const out = new ClipperLib.Paths();
+    so.Execute(out, radius * SCALE);
+    return out;
+  };
+
+  const c = new ClipperLib.Clipper();
+  c.AddPaths(dilated, ClipperLib.PolyType.ptSubject, true);
+  c.AddPaths(bands(d), ClipperLib.PolyType.ptClip, true);
+  if (2 * bitRadius - d > d + 1e-12) {
+    // graze-fallback shadow closure: fence beyond-wall (and inside-island)
+    // space out to the dilation depth, keeping the in-region standoff at d
+    const wide = new ClipperLib.Clipper();
+    wide.AddPaths(bands(2 * bitRadius - d), ClipperLib.PolyType.ptSubject, true);
+    wide.AddPaths(base, ClipperLib.PolyType.ptClip, true);
+    const shadow = new ClipperLib.Paths();
+    wide.Execute(ClipperLib.ClipType.ctDifference, shadow,
+      ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    c.AddPaths(shadow, ClipperLib.PolyType.ptClip, true);
+  }
   const out = new ClipperLib.Paths();
-  co.Execute(out, -d * SCALE);
-  // drop collinear/near-duplicate vertices at the arc-tolerance scale —
-  // keeps ring point counts (and posted file sizes) sane
-  return ClipperLib.Clipper.CleanPolygons(out, ARC_TOL).filter(p => p.length >= 3);
+  c.Execute(ClipperLib.ClipType.ctDifference, out,
+    ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return cleaned(out);
+}
+
+// Slot-aware inset for the outermost (bit-radius) level. A groove within
+// SLOT_GRAZE of the bit width has no room at the exact inset — STEP or
+// tessellation noise alone kills it — but earns a centerline pass that
+// grazes the walls. The graze inset is a superset of the exact one
+// (insets are monotone), so swap to it whenever it opens SUBSTANTIALLY
+// more center room, not only when the exact inset is empty: a mixed
+// region never triggers an all-or-nothing fallback-on-empty (004681's
+// Through Cutout 15 — the junction diamonds where its 1/8"-nominal slots
+// cross fit the 1/8" exactly, so the slot legs between them used to
+// read unreachable and fell to a residual pass that excludes through
+// cuts entirely).
+// ratio = Infinity restores fallback-on-empty only — rest passes use it:
+// their synthetic corner blobs are always small, so the ratio test would
+// fire spuriously and rub finish walls the bulk bit already cut to size.
+const SLOT_SWAP_RATIO = 1.5;
+export function insetRegionSlotAware(region, d, bitRadius, ratio = SLOT_SWAP_RATIO) {
+  const exact = insetRegion(region, d, bitRadius);
+  const graze = insetRegion(region, d - SLOT_GRAZE, bitRadius);
+  // net center area (holes are negatively oriented and subtract)
+  const area = paths => paths.reduce((a, p) => a + ClipperLib.Clipper.Area(p), 0);
+  const slotFit = graze.length > 0
+    && (!exact.length || area(graze) > ratio * area(exact));
+  return { paths: slotFit ? graze : exact, slotFit };
 }
 
 export function generateDepths(totalDepth, depthPerPass) {
@@ -224,13 +312,13 @@ export function generatePocket(region, tool, params) {
   let slotFit = false;
   for (let k = 0; k < MAX_LEVELS; k++) {
     const d = bitRadius + k * stepover;
-    let paths = insetRegion(region, d, bitRadius);
-    if (k === 0 && !paths.length) {
-      // exact-width slot: a groove machined by a bit of (nominally) its own
-      // width has no room at the full-radius inset — tessellation noise
-      // alone kills it. Retry grazing-close so the centerline pass survives.
-      paths = insetRegion(region, d - SLOT_GRAZE, bitRadius);
-      if (paths.length) slotFit = true;
+    let paths;
+    if (k === 0) {
+      const sa = insetRegionSlotAware(region, d, bitRadius, params.slotSwapRatio);
+      paths = sa.paths;
+      slotFit = sa.slotFit;
+    } else {
+      paths = insetRegion(region, d, bitRadius);
     }
     if (!paths.length) break;
     if (k === 0) level0Paths = paths;

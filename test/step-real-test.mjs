@@ -151,6 +151,12 @@ const FIXTURES = [
     // appears (coverage read 96.9% instead of 99.98%).
     expectAssignments: { 'Pocket 1': 0.25 },
     expectNoRest: ['Pocket 1'],
+    // tabs on: the outer profile gets 3D tabs, and the 1.5 x 5.1 window —
+    // too small a slug to trust to vacuum alone — now profiles too, held
+    // by its own tabs instead of being pocketed to sawdust
+    tabs: true,
+    expectWindowProfiles: ['Through Cutout 1'],
+    expectTabs: { 'outer profile': 4, 'Through Cutout 1': 2 }, // op → minimum tab count
   },
   // Brian's HDPE base plate (2026-07-03): 19 x 16, a huge (9.4 x 10.5)
   // central through window plus ~40 circular pockets. The window drove the
@@ -177,8 +183,26 @@ const FIXTURES = [
     expectAssignments: {
       'Circular Pocket 11': 0.25,
       'Drilled Through Hole 26': 0.125,
+      'Pocket 3': 0.25,
+      // serpentine of 1/8"-nominal slots (0.125000-0.125001 in the STEP):
+      // only the junction diamonds fit the 1/8" at clean standoff (46%);
+      // the slot legs need the slot-fit rescue (pickChainSlotAware) or
+      // they fall to a residual pass that excludes through cuts — uncut.
+      'Through Cutout 15': 0.125,
     },
-    expectNoRest: ['Circular Pocket 11'],
+    expectCoverageAtLeast: { 'Through Cutout 15': 0.99 },
+    // the 9.4 x 10.5 central window: rim profiled to size, 96 sq in slug
+    // left on the vacuum (pocketing it away was ~2/3 of the whole job)
+    expectWindowProfiles: ['Through Cutout 6'],
+    // Pocket 3 (Brian 2026-07-04): a step whose bottom span weaves around a
+    // Ø0.78 circular bite and two drill bites — all open edges, walls on
+    // the other three sides, one 0.131" neck between the left wall and the
+    // bite. The old rectangle-fan spillover left slit artifacts near the
+    // bite center; each fictitious slit pushed the inset a bit radius away,
+    // read as 96% coverage, and dragged in a pointless 1/8" rest pass along
+    // ground the 1/4" may legally overhang. insetRegion's set-form
+    // spillover (dilate − wall/fence bands) keeps the neck corridor open.
+    expectNoRest: ['Circular Pocket 11', 'Pocket 3'],
     expectFullDepthFeatures: ['Drilled Through Hole 26'],
   },
 ];
@@ -395,6 +419,7 @@ async function runPart(stepPath, expect = {}) {
       veeBits: [{ angleDeg: 90, diameter: 0.5 }],
       endmills: expect.endmills ?? [],
     },
+    tabs: expect.tabs,
   };
   const built = buildJob(features, depthGrid, PARAMS);
   for (const w of built.warnings) console.log(`  warning: ${w}`);
@@ -538,6 +563,49 @@ async function runPart(stepPath, expect = {}) {
       if (!tf) { fail(`no tool-plan entry for "${label}"`); continue; }
       if ((tf.rest ?? []).length === 0) pass(`${label}: single-bit plan, no rest pass (coverage ${(tf.coverage * 100).toFixed(1)}%)`);
       else fail(`${label}: unexpected rest chain [${tf.rest.join(', ')}]`);
+    }
+  }
+
+  // big through windows must be cut as inside profiles (slug stays on the
+  // vacuum table), not pocketed into sawdust
+  if (expect.expectWindowProfiles) {
+    for (const label of expect.expectWindowProfiles) {
+      const winOp = built.job.operations.find(o => o.name.startsWith(`${label} (window profile`));
+      const pocketOp = built.job.operations.find(o => o.name.startsWith(`${label} (pocket`));
+      if (winOp && !pocketOp) pass(`${label}: window profile op, no pocket op (slug kept)`);
+      else fail(`${label}: window profile=${!!winOp}, pocket=${!!pocketOp} — expected profile only`);
+    }
+  }
+
+  // 3D tabs: count triangular Z bumps (rise-then-fall below the surface)
+  // in the named op's cutting stream
+  if (expect.expectTabs) {
+    for (const [opName, minTabs] of Object.entries(expect.expectTabs)) {
+      const op = built.job.operations.find(o => o.name.startsWith(opName));
+      if (!op) { fail(`no op matching "${opName}" for tab check`); continue; }
+      let z = null, rising = false, apexes = 0;
+      for (const m of op.moves) {
+        if (m.type === 'rapid') { z = null; rising = false; continue; }
+        if (m.type !== 'linear') continue;
+        const nz = m.z ?? z;
+        if (z != null && nz > z + 1e-9 && nz < -1e-6) rising = true;
+        else if (z != null && nz < z - 1e-9) { if (rising) apexes++; rising = false; }
+        z = nz;
+      }
+      if (apexes >= minTabs) pass(`${opName}: ${apexes} tab bump(s) (≥ ${minTabs})`);
+      else fail(`${opName}: ${apexes} tab bump(s), expected ≥ ${minTabs}`);
+    }
+  }
+
+  // planned coverage floor — catches a feature quietly losing most of its
+  // region to the residual while keeping the right bit label
+  if (expect.expectCoverageAtLeast) {
+    const plan = built.info.toolPlan;
+    for (const [label, min] of Object.entries(expect.expectCoverageAtLeast)) {
+      const tf = plan.features.find(t => t.label === label);
+      if (!tf) { fail(`no tool-plan entry for "${label}"`); continue; }
+      if (tf.coverage >= min) pass(`${label}: coverage ${(tf.coverage * 100).toFixed(1)}% ≥ ${min * 100}%`);
+      else fail(`${label}: coverage ${(tf.coverage * 100).toFixed(1)}% < expected ${min * 100}%`);
     }
   }
 
