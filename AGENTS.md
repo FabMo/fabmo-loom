@@ -85,6 +85,37 @@ Checklist:
   `test/surface-raster-test.mjs` for the pattern.
 - Wire it into the `test` script in `package.json` if self-contained.
 
+## Growing the Loom catalog (app/)
+
+The Loom app (app/) exposes foundation skills as prompt-facing catalog
+entries. A skill is not "in Loom" until it is in `app/catalog.mjs`. The
+pipeline: skill honed in an app → graduated into the workspace seams repo
+with a gauntlet → `tools/sync-from-seams.sh` (which NOTEs strategies not
+yet in the catalog) → catalog integration here. The integration checklist:
+
+1. Decide the prompt-facing shape. Catalog entries are macro-strategies —
+   verbs a user would say — not 1:1 wrappers of strategy modules. A new
+   capability is often a new PARAM on an existing entry (3D tabs became
+   `tabs`/`tabHeight`/`tabSpacing` on `tag_cutout`), not a new entry.
+2. Write the entry in `app/catalog.mjs`: typed params (string/number/
+   boolean, defaults, min/max, `bindable` on user-tweakable ones) and a
+   `doc` string written FOR THE MODEL — the catalog doc is the LLM's
+   entire knowledge of the capability. Say what it does, when to use it,
+   and any physical caveats. `run()` returns moves + a declared verifier
+   target (never omit it) + `bbox` + any `preview*` data the canvas can
+   draw.
+3. If the capability was previously named as a decline example — in the
+   RULES list of `buildSystemPrompt` (app/intent.mjs) or in another
+   entry's doc — remove it there, or the model will keep declining it.
+4. Extend `app/test.mjs`: a scripted action payload that uses the new
+   capability and verifies, plus (if it replaced a decline) move the
+   decline test to something still out of scope. Wire nothing new; the
+   file is already in `npm test`.
+5. Run `npm test`, then exercise it live in the app with a real key.
+
+Declines logged by users are the backlog for this section — a decline
+converts to a feature by exactly this list.
+
 ## Testing
 
 - `npm test` — self-contained gauntlets; must stay green.

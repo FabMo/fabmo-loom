@@ -121,12 +121,15 @@ export const CATALOG = {
   },
 
   tag_cutout: {
-    doc: 'Cut the work free as a rounded-corner tag: an outside profile around everything machined so far, with a buffer. Cuts through the full stock thickness with an endmill (ramp entry, depth passes). NOTE: no holding tabs yet — through-cut parts must be held with tape/onion skin; a request for tabs must be declined as a capability gap.',
+    doc: 'Cut the work free as a rounded-corner tag: an outside profile around everything machined so far, with a buffer. Cuts through the full stock thickness with an endmill (ramp entry, depth passes). Holding tabs are available: triangular bridges that keep the piece attached to the sheet (snap out by hand, dress with a roundover) — placement is automatic with shop practice (a tab near each cardinal point, concave corners avoided). Without tabs, the part must be held with tape/onion skin.',
     params: {
       buffer: { type: 'number', default: 0.25, doc: 'clearance from the content bounding box to the tag edge, inches', bindable: true },
       cornerRadius: { type: 'number', default: 0.5, doc: 'tag corner radius, inches (clamped to fit)', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches (capped at half the stock thickness)' },
+      tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs along the profile, inches; at least 4 tabs regardless' },
     },
     run(p, ctx) {
       const b = ctx.contentBBox; // union of prior ops' bboxes
@@ -136,6 +139,7 @@ export const CATALOG = {
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
         side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
         safeZ: ctx.safeZ, entry: 'ramp',
+        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
       });
       return {
         tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
@@ -147,6 +151,7 @@ export const CATALOG = {
           maxX: b.maxX + p.buffer + p.toolDiameter / 2, maxY: b.maxY + p.buffer + p.toolDiameter / 2,
         },
         previewRing: ring,
+        previewTabs: prof.tabs,
       };
     },
   },

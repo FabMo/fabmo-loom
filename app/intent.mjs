@@ -79,7 +79,7 @@ AVAILABLE STRATEGIES (the complete list — nothing else exists):
 ${catalogDoc()}
 
 RULES:
-- Only these strategies and their listed params. A request needing anything else (holding tabs, holes, images, other fonts, 3D, rotation...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
+- Only these strategies and their listed params. A request needing anything else (holes, images, other fonts, 3D, rotation...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops.
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving before any tag_cutout (the cutout frees the part).

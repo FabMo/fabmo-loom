@@ -153,6 +153,14 @@ function draw() {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+    if (r.previewTabs?.length) {
+      ctx.fillStyle = '#c9a86a';
+      for (const tb of r.previewTabs) {
+        ctx.beginPath();
+        ctx.arc(X(tb.x + place.x), Y(tb.y + place.y), 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
     const maxD = r.target?.depth ?? 0.2;
     const isCut = !!r.previewRing;
     walkMoves(r.moves, (state, move) => {

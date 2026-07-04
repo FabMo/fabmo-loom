@@ -85,15 +85,38 @@ console.log('--- prompt 2 (scripted): a cutout around the names ---');
   else fail(`cutout recipe failed: ok=${r.ok} ${r.errors.join(' | ')}`);
 }
 
-// ---------------- 4. prompt three: "add tabs" → honest decline ----------------
+// ---------------- 4. prompt three: "add tabs" → now a FEATURE ----------------
+// (Until 2026-07-05 this was the honest-decline case; then the tab skill
+// graduated from the step app into seams/strategies/profile.js, synced in,
+// and the catalog learned it. The decline → feature conversion is the
+// whole platform loop in one test.)
 
-console.log('--- prompt 3 (scripted): add tabs → declined, recipe unchanged ---');
+console.log('--- prompt 3 (scripted): add holding tabs → woven, verified ---');
+{
+  const payload = {
+    summary: 'Added holding tabs to the cutout.',
+    actions: [{ kind: 'set_operation', operation: { id: 'cutout', params: { tabs: true } } }],
+    declined: [],
+  };
+  const res = applyActions(recipe, payload);
+  recipe = res.recipe;
+  const r = run(recipe);
+  const cut = r.preview?.built?.find(x => x.op.id === 'cutout');
+  const nTabs = cut?.r.previewTabs?.length ?? 0;
+  if (res.applied.length === 1 && r.ok && nTabs >= 4) {
+    pass(`tabs woven: ${nTabs} tabs placed (cardinal coverage), job still verifies`);
+  } else fail(`tabs failed: applied=${res.applied.length} ok=${r.ok} tabs=${nTabs} ${r.errors?.join(' | ')}`);
+}
+
+// ---------------- 4b. genuinely out-of-scope → honest decline ----------------
+
+console.log('--- decline: engrave a photo → recipe unchanged ---');
 {
   const before = JSON.stringify(recipe);
   const payload = {
-    summary: 'Holding tabs are not available yet.',
+    summary: 'Photographic engraving is not available.',
     actions: [],
-    declined: [{ what: 'holding tabs on the cutout profile', why: 'the profile strategy has no tab support yet' }],
+    declined: [{ what: 'engrave a photo', why: 'no image/heightmap source in the catalog yet' }],
   };
   const res = applyActions(recipe, payload);
   recipe = res.recipe;
@@ -110,7 +133,7 @@ console.log('--- validator: bad actions are skipped with reasons ---');
     summary: 'mixed garbage',
     actions: [
       { kind: 'add_operation', operation: { id: 'x1', strategy: 'helical_thread_mill', params: {} } },
-      { kind: 'add_operation', operation: { id: 'x2', strategy: 'tag_cutout', params: { tabs: true } } },
+      { kind: 'add_operation', operation: { id: 'x2', strategy: 'tag_cutout', params: { dogbone: true } } },
       { kind: 'add_operation', operation: { id: 'x3', strategy: 'vcarve_text', params: { text: { ctrl: 'no_such_control' } } } },
       { kind: 'remove_control', id: 'name' },
       { kind: 'teleport', id: 'engrave' },

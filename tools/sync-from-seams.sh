@@ -79,6 +79,14 @@ for (const f of fs.readdirSync('test').filter(f => f.endsWith('-test.mjs')))
   if (!wired.includes(f)) console.log(`  WARN test/${f} is wired into neither test script`);
 EOF
 
+# --- catalog coverage: foundation skills not yet prompt-facing ---
+node -e '
+const fs = require("fs");
+const cat = fs.readFileSync("app/catalog.mjs", "utf8");
+const missing = fs.readdirSync("strategies").filter(f => f.endsWith(".js") && !cat.includes(`strategies/${f}`));
+if (missing.length) console.log(`  NOTE not in the Loom catalog yet: ${missing.join(", ")} — see AGENTS.md "Growing the Loom catalog"`);
+'
+
 if [[ -z "$(git status --porcelain)" ]]; then
   echo "already in sync with seams $SRC_SHA"; exit 0
 fi

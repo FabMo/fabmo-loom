@@ -45,6 +45,9 @@ function resolveParams(entry, params, controlValues, errors, opId) {
     }
     if (v === undefined || v === null || v === '') v = spec.default;
     if (v === undefined) { errors.push(`op "${opId}": required param ${key} missing`); continue; }
+    if (spec.type === 'boolean') {
+      v = v === true || v === 'true' || v === 'yes';
+    }
     if (spec.type === 'number') {
       v = typeof v === 'number' ? v : parseFloat(v);
       if (isNaN(v)) { errors.push(`op "${opId}": param ${key} is not a number`); continue; }
