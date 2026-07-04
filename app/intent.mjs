@@ -85,7 +85,7 @@ RULES:
 - Operation order is machining order: engraving and pockets first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
-- The stock is ${JSON.stringify(recipe.stock)} — set_stock only when asked or when the request clearly cannot fit.
+- The stock is ${JSON.stringify(recipe.stock)}. When the user names physical dimensions that cannot fit it with ~0.375" margins (a 2.5" disc needs stock over 3.25" in BOTH directions), set_stock proactively to a sensible size in the same batch — do not weave something that cannot fit.
 
 CURRENT RECIPE:
 ${JSON.stringify(recipe, null, 1)}`;

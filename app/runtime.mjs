@@ -105,17 +105,20 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
   const b = ctx.contentBBox;
   const w = b.maxX - b.minX, h = b.maxY - b.minY;
   const margin = recipe.margin ?? 0.375;
-  if (w + 2 * margin > stock.w + 1e-9 || h + 2 * margin > stock.h + 1e-9) {
-    return {
-      ok: false, warnings: [],
-      errors: [`the content needs ${(w + 2 * margin).toFixed(2)}" × ${(h + 2 * margin).toFixed(2)}" (including ${margin}" margins) — stock is ${stock.w}" × ${stock.h}"`],
-      preview: { built, placement: { x: 0, y: 0 } },
-    };
-  }
+  // centering placement is computed BEFORE the fit check so that an
+  // over-size error still previews the content centered (overflowing the
+  // stock symmetrically) — placed at the corner it reads as a runaway cut
   const placement = {
     x: (stock.w - w) / 2 - b.minX,
     y: (stock.h - h) / 2 - b.minY,
   };
+  if (w + 2 * margin > stock.w + 1e-9 || h + 2 * margin > stock.h + 1e-9) {
+    return {
+      ok: false, warnings: [],
+      errors: [`the content needs ${(w + 2 * margin).toFixed(2)}" × ${(h + 2 * margin).toFixed(2)}" (including ${margin}" margins) — stock is ${stock.w}" × ${stock.h}". Enlarge the stock or shrink the content.`],
+      preview: { built, placement },
+    };
+  }
 
   // ---- tool table: one entry per distinct tool spec, in first-use order ----
   const tools = {};

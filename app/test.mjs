@@ -287,6 +287,24 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   if (!tight.ok && tight.errors[0]?.includes('needs ≥ 2.00')) pass(`too-small disc: "${tight.errors[0].slice(0, 60)}..."`);
   else fail(`too-small disc not caught: ${JSON.stringify(tight.errors)}`);
 
+  // over-size content still previews CENTERED (live-tested: a coaster on
+  // the default 8×2.5 stock previewed at the corner and read as a runaway
+  // out-of-bounds cut; it was only the fit error with a lying preview)
+  {
+    const noStock = run({
+      ...structuredClone(EMPTY_RECIPE),   // default stock: 2.5" tall — the disc can't fit
+      pipeline: [
+        { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } },
+        { id: 'disc', strategy: 'disc_cutout', params: { diameter: 2.5 } },
+      ],
+    });
+    const p = noStock.preview?.placement;
+    const centered = p && Math.abs(p.x - 4) < 1e-6 && Math.abs(p.y - 1.25) < 1e-6;
+    if (!noStock.ok && noStock.errors[0].includes('Enlarge the stock') && centered) {
+      pass('fit error previews content centered on stock, with enlarge-or-shrink advice');
+    } else fail(`fit-error preview wrong: ok=${noStock.ok} placement=${JSON.stringify(p)} ${noStock.errors?.[0]}`);
+  }
+
   // strategy conversion: the live-tested stumble — a recipe holding an old
   // tag_cutout op named "cutout" gets converted to a disc by set_operation
   // with a new strategy (params replaced, not merged)
