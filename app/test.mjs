@@ -287,6 +287,39 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   if (!tight.ok && tight.errors[0]?.includes('needs ≥ 2.00')) pass(`too-small disc: "${tight.errors[0].slice(0, 60)}..."`);
   else fail(`too-small disc not caught: ${JSON.stringify(tight.errors)}`);
 
+  // strategy conversion: the live-tested stumble — a recipe holding an old
+  // tag_cutout op named "cutout" gets converted to a disc by set_operation
+  // with a new strategy (params replaced, not merged)
+  {
+    let old = structuredClone(EMPTY_RECIPE);
+    old.stock = { w: 4, h: 4, thickness: 0.375 };
+    old = applyActions(old, {
+      summary: 'old state', declined: [],
+      actions: [
+        { kind: 'add_operation', operation: { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } } },
+        { kind: 'add_operation', operation: { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.25 } } },
+      ],
+    }).recipe;
+    const conv = applyActions(old, {
+      summary: 'Converted the tag to a 2.5" disc.',
+      declined: [],
+      actions: [{ kind: 'set_operation', operation: { id: 'cutout', strategy: 'disc_cutout', params: { diameter: 2.5, tabs: true } } }],
+    });
+    const op = conv.recipe.pipeline.find(o => o.id === 'cutout');
+    const rr = run(conv.recipe);
+    if (conv.applied[0]?.includes('converted to disc_cutout') && op.strategy === 'disc_cutout'
+        && !('buffer' in op.params) && rr.ok) {
+      pass('set_operation converts tag_cutout → disc_cutout (stale params dropped), verified');
+    } else fail(`conversion failed: ${JSON.stringify(conv.applied)} ${JSON.stringify(op?.params)} ok=${rr.ok}`);
+
+    const badConv = applyActions(old, {
+      summary: 'x', declined: [],
+      actions: [{ kind: 'set_operation', operation: { id: 'cutout', strategy: 'laser_cut', params: {} } }],
+    });
+    if (badConv.skipped[0]?.includes('unknown strategy')) pass('conversion to unknown strategy skipped with reason');
+    else fail(`bad conversion leaked: ${JSON.stringify(badConv.applied)}`);
+  }
+
   // rectangle pocket with sharp corners exercises rest cleanup on shapes
   const tray = run({
     ...structuredClone(EMPTY_RECIPE), stock: { w: 6, h: 4, thickness: 0.5 },

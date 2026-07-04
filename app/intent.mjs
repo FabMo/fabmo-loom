@@ -83,7 +83,7 @@ RULES:
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops.
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving and pockets first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part.
-- Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change existing ops; do not remove+re-add.
+- Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
 - The stock is ${JSON.stringify(recipe.stock)} — set_stock only when asked or when the request clearly cannot fit.
 
@@ -177,6 +177,18 @@ export function applyActions(recipe, payload) {
       case 'set_operation': {
         const op = next.pipeline.find(x => x.id === (a.operation?.id ?? a.id));
         if (!op) { skipped.push(`set_operation: no "${a.operation?.id ?? a.id}"`); break; }
+        const newStrategy = a.operation?.strategy;
+        if (newStrategy && newStrategy !== op.strategy) {
+          // converting an op to a different strategy: params are REPLACED,
+          // not merged — the old strategy's params don't belong to the new one
+          if (!CATALOG[newStrategy]) { skipped.push(`set_operation "${op.id}": unknown strategy "${newStrategy}"`); break; }
+          const vp = validParams(newStrategy, a.operation?.params);
+          if (vp.bad) { skipped.push(`set_operation "${op.id}": ${vp.bad}`); break; }
+          op.strategy = newStrategy;
+          op.params = vp.out;
+          applied.push(`operation "${op.id}" converted to ${newStrategy}`);
+          break;
+        }
         const vp = validParams(op.strategy, a.operation?.params);
         if (vp.bad) { skipped.push(`set_operation "${op.id}": ${vp.bad}`); break; }
         op.params = { ...op.params, ...vp.out };
