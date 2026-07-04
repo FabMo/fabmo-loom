@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engrave Anything — a FabMo Loom demo</title>
+<style>
+  :root {
+    --navy: #1b2a6b; --sky: #7ba3d4; --red: #cc2229;
+    --bg: #f7f6f2; --panel: #ffffff; --ink: #22263a; --mut: #6a7086;
+    --ok: #1a7f4b; --bad: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 22px; background: var(--navy); color: #fff;
+  }
+  header img { height: 44px; border-radius: 6px; }
+  header h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
+  header .sub { font-size: .8rem; opacity: .75; }
+  main {
+    max-width: 1200px; margin: 0 auto; padding: 18px 22px 40px;
+    display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: 18px;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid #e3e1d8; border-radius: 12px; padding: 16px 18px; }
+  label { display: block; font-size: .78rem; color: var(--mut); margin: 10px 0 3px; }
+  input[type=text] {
+    width: 100%; font-size: 1.6rem; padding: 10px 12px;
+    border: 2px solid var(--navy); border-radius: 10px; outline: none;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 12px; }
+  input[type=number], select {
+    width: 100%; padding: 6px 8px; font-size: .95rem;
+    border: 1px solid #c9c6ba; border-radius: 8px; background: #fff;
+  }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; font-size: .85rem; color: var(--mut); }
+  canvas { width: 100%; height: auto; display: block; background: #fdfdfb; border-radius: 10px; border: 1px solid #e3e1d8; }
+  .verdict { display: flex; align-items: baseline; gap: 12px; margin: 12px 0 6px; }
+  .badge { font-size: 1.25rem; font-weight: 700; padding: 4px 14px; border-radius: 999px; color: #fff; }
+  .badge.ok { background: var(--ok); } .badge.bad { background: var(--bad); } .badge.wait { background: var(--mut); }
+  .numbers { font-size: .88rem; line-height: 1.6; color: var(--ink); }
+  .numbers b { font-variant-numeric: tabular-nums; }
+  .errors { color: var(--bad); font-size: .85rem; white-space: pre-wrap; }
+  .warnings { color: #8a6d1a; font-size: .85rem; white-space: pre-wrap; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button {
+    font-size: 1rem; padding: 10px 18px; border-radius: 10px; border: none;
+    background: var(--navy); color: #fff; cursor: pointer; font-weight: 600;
+  }
+  button:disabled { background: #b9bcc9; cursor: not-allowed; }
+  button.ghost { background: #fff; color: var(--navy); border: 1.5px solid var(--navy); }
+  .sabotage { margin-top: 16px; font-size: .8rem; color: var(--mut); border-top: 1px dashed #ddd; padding-top: 10px; }
+  .sabotage button { background: var(--red); font-size: .8rem; padding: 6px 12px; }
+  footer { text-align: center; font-size: .75rem; color: var(--mut); padding: 12px; }
+  footer a { color: var(--navy); }
+  .foot-note { font-size: .75rem; color: var(--mut); margin-top: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <img src="../../assets/loom-logo.jpg" alt="FabMo Loom">
+  <div>
+    <h1>Engrave Anything</h1>
+    <div class="sub">type it → real font outlines → medial-axis V-carve → <b>verified</b> → cut it &nbsp;·&nbsp; a FabMo Loom demo</div>
+  </div>
+</header>
+<main>
+  <section class="panel">
+    <label for="text">Your text</label>
+    <input id="text" type="text" value="Help" autocomplete="off" autofocus>
+
+    <div class="grid2">
+      <div><label>Letter height (in)</label><input id="letterHeight" type="number" step="0.125" min="0.2" max="4" value="1"></div>
+      <div><label>Margin (in)</label><input id="margin" type="number" step="0.125" min="0" value="0.375"></div>
+    </div>
+
+    <details open>
+      <summary>Stock &amp; bit</summary>
+      <div class="grid3">
+        <div><label>Stock W (in)</label><input id="stockW" type="number" step="0.5" min="1" value="8"></div>
+        <div><label>Stock H (in)</label><input id="stockH" type="number" step="0.5" min="1" value="2.5"></div>
+        <div><label>Thickness (in)</label><input id="stockT" type="number" step="0.125" min="0.125" value="0.5"></div>
+      </div>
+      <div class="grid3">
+        <div><label>V-bit angle</label><select id="angle"><option>30</option><option selected>60</option><option>90</option><option>120</option></select></div>
+        <div><label>Max depth (in)</label><input id="maxDepth" type="number" step="0.025" min="0.025" value="0.2"></div>
+        <div><label>Feed (in/min)</label><input id="feed" type="number" step="10" min="10" value="60"></div>
+      </div>
+    </details>
+
+    <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span></div>
+    <div id="numbers" class="numbers"></div>
+    <div id="errors" class="errors"></div>
+    <div id="warnings" class="warnings"></div>
+
+    <div class="btns">
+      <button id="dlSbp" disabled>Download .sbp</button>
+      <button id="dlNc" class="ghost" disabled>Download .nc</button>
+    </div>
+    <div class="foot-note">Exports unlock only when the verifier accepts the motion — numbers, not vibes. Loom can't see your fixturing or Z zero: first run cuts air.</div>
+
+    <div class="sabotage">
+      For the skeptics: <button id="sabotage">inject a stray cut</button>
+      <span id="sabNote"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <canvas id="preview" width="1160" height="640"></canvas>
+    <div class="foot-note" id="legend">stock outline · <span style="color:#888">letterforms</span> · <span style="color:#1b2a6b">engraving path</span> (darker = deeper) · counters stay standing</div>
+  </section>
+</main>
+<footer>
+  FabMo Loom — from the makers of <a href="https://www.shopbottools.com">ShopBot</a> ·
+  <a href="https://github.com/FabMo/fabmo-loom">github.com/FabMo/fabmo-loom</a> ·
+  font: DejaVu Sans Bold (see assets/DejaVuSans-LICENSE.txt)
+</footer>
+<script type="importmap">
+{
+  "imports": {
+    "d3-delaunay": "../../node_modules/d3-delaunay/src/index.js",
+    "delaunator": "../../node_modules/delaunator/index.js",
+    "robust-predicates": "../../node_modules/robust-predicates/index.js"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
