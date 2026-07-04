@@ -25,12 +25,9 @@ export const ACTION_TOOL = {
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['set_name', 'set_stock', 'add_control', 'set_control', 'remove_control', 'add_operation', 'set_operation', 'remove_operation'] },
+            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'add_operation', 'set_operation', 'remove_operation'] },
             name: { type: 'string', description: 'set_name: the new recipe/app name' },
-            stock: {
-              type: 'object', description: 'set_stock: any of w/h/thickness, inches',
-              properties: { w: { type: 'number' }, h: { type: 'number' }, thickness: { type: 'number' } },
-            },
+            thickness: { type: 'number', description: 'set_thickness: the stock material thickness, inches (through-cuts use it)' },
             control: {
               type: 'object', description: 'add_control / set_control',
               properties: {
@@ -85,7 +82,7 @@ RULES:
 - Operation order is machining order: engraving and pockets first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
-- The stock is ${JSON.stringify(recipe.stock)}. When the user names physical dimensions that cannot fit it with ~0.375" margins (a 2.5" disc needs stock over 3.25" in BOTH directions), set_stock proactively to a sensible size in the same batch — do not weave something that cannot fit.
+- Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.
 
 CURRENT RECIPE:
 ${JSON.stringify(recipe, null, 1)}`;
@@ -133,10 +130,11 @@ export function applyActions(recipe, payload) {
         if (typeof a.name === 'string' && a.name.trim()) { next.name = a.name.trim(); applied.push(`named it "${next.name}"`); }
         else skipped.push('set_name: no name');
         break;
-      case 'set_stock': {
-        const s = a.stock ?? {};
-        for (const k of ['w', 'h', 'thickness']) if (typeof s[k] === 'number' && s[k] > 0) next.stock[k] = s[k];
-        applied.push(`stock ${next.stock.w}×${next.stock.h}×${next.stock.thickness}"`);
+      case 'set_thickness': {
+        if (typeof a.thickness === 'number' && a.thickness > 0) {
+          next.stock.thickness = a.thickness;
+          applied.push(`stock thickness ${a.thickness}"`);
+        } else skipped.push('set_thickness: no thickness');
         break;
       }
       case 'add_control': {

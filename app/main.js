@@ -37,6 +37,7 @@ function persist() { localStorage.setItem('loom:recipe', JSON.stringify(recipe))
 
 function renderControls() {
   $('appName').textContent = recipe.name;
+  $('thickness').value = recipe.stock.thickness;
   const host = $('controls');
   host.innerHTML = '';
   for (const c of recipe.controls) {
@@ -91,10 +92,13 @@ function render() {
     $('verdictText').textContent = 'this exact motion was measured, not assumed';
     $('numbers').innerHTML = targetLines + `<br><b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b>` +
       (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '');
+    const st = r.preview?.stock;
+    $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"` : '';
   } else {
     setBadge('bad', r.preview?.empty ? 'EMPTY' : 'REJECTED');
     $('verdictText').textContent = r.preview?.empty ? 'describe an app to begin' : 'the verifier refused this state';
     $('numbers').innerHTML = targetLines;
+    $('minStock').textContent = '';
   }
   $('errors').textContent = r.preview?.empty ? '' : r.errors.join('\n');
   $('warnings').textContent = r.warnings.join('\n');
@@ -106,7 +110,7 @@ function render() {
 function draw() {
   const { width: W, height: H } = canvas;
   ctx.clearRect(0, 0, W, H);
-  const stock = recipe.stock;
+  const stock = result?.preview?.stock ?? { w: 8, h: 2.5 };
   const pad = 28;
   const s = Math.min((W - 2 * pad) / stock.w, (H - 2 * pad) / stock.h);
   const ox = (W - stock.w * s) / 2, oy = (H + stock.h * s) / 2;
@@ -304,6 +308,15 @@ $('openFile').addEventListener('change', async () => {
 });
 
 if (localStorage.getItem('loom:apiKey')) $('apiKey').value = '••••••••••••';
+
+$('thickness').addEventListener('input', () => {
+  const v = parseFloat($('thickness').value);
+  if (!isNaN(v) && v > 0) {
+    recipe.stock.thickness = v;
+    persist();
+    debounceRun();
+  }
+});
 
 (async function boot() {
   const res = await fetch('../examples/engraver/assets/DejaVuSans-Bold.ttf');

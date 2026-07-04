@@ -167,10 +167,11 @@ console.log('--- verifier gate on recipe states ---');
   if (!r.ok && !r.sbp) pass(`outline below stock bottom: REJECTED, no file (${(r.errors[0] ?? '').slice(0, 60)}...)`);
   else fail('below-stock recipe produced a file');
 
-  // text too big for stock → human-sized fit error
+  // big text no longer "doesn't fit" — the stock grows to hold it and the
+  // user is told the minimum board
   const big = run(recipe, { ...controlDefaults(recipe), name: 'Congratulations', letterHeight: 2 });
-  if (!big.ok && big.errors[0].includes('stock is')) pass('oversized content: fit error before motion');
-  else fail(`fit not caught: ${JSON.stringify(big.errors)}`);
+  if (big.ok && big.preview.stock.w > 18) pass(`big text auto-sizes the stock: minimum board ${big.preview.stock.w}" × ${big.preview.stock.h}"`);
+  else fail(`auto-size failed: ok=${big.ok} stock=${JSON.stringify(big.preview?.stock)} ${big.errors?.join(' | ')}`);
 }
 
 // ---------------- 7. catalog breadth: outline style swap ----------------
@@ -199,8 +200,9 @@ console.log('--- outline_text: strategy swap by prompt ---');
 console.log('--- buildParseRequest ---');
 {
   const req = buildParseRequest(recipe, 'make the letters taller');
-  if (req.tools?.[0]?.name === 'apply_recipe_actions' && req.system.includes('vcarve_text') && req.system.includes(JSON.stringify(recipe.stock))) {
-    pass('request carries catalog doc + current recipe + forced tool choice');
+  if (req.tools?.[0]?.name === 'apply_recipe_actions' && req.system.includes('vcarve_text')
+      && req.system.includes('AUTO-SIZED') && req.system.includes(String(recipe.stock.thickness))) {
+    pass('request carries catalog doc + auto-size rule + thickness + forced tool choice');
   } else fail('parse request malformed');
 }
 
@@ -212,7 +214,6 @@ console.log('--- buildParseRequest ---');
 console.log('--- pocket_text: bulk + rest corners, one verb, two tools ---');
 {
   let rec = structuredClone(EMPTY_RECIPE);
-  rec.stock = { w: 8, h: 2.5, thickness: 0.5 };
   const res = applyActions(rec, {
     summary: 'Created a paint-fill sign app.',
     actions: [
@@ -259,7 +260,7 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
     summary: 'Created a round-coaster app.',
     actions: [
       { kind: 'set_name', name: 'Drink coasters' },
-      { kind: 'set_stock', stock: { w: 4, h: 4, thickness: 0.375 } },
+      { kind: 'set_thickness', thickness: 0.375 },
       { kind: 'add_control', control: { id: 'discDia', type: 'number', label: 'Coaster diameter (in)', default: 2.5, min: 2, max: 4, step: 0.25 } },
       { kind: 'add_control', control: { id: 'wellDia', type: 'number', label: 'Well diameter (in)', default: 2, min: 1, max: 3.5, step: 0.25 } },
       { kind: 'add_operation', operation: { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: { ctrl: 'wellDia' }, depth: 0.125 } } },
@@ -271,10 +272,11 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   const r = run(rec);
   const targets = r.report?.stats.targets ?? [];
   const disc = r.preview?.built?.find(x => x.op.id === 'disc');
+  const st = r.preview?.stock;
   if (r.ok && targets.length === 2 && targets.every(t => (t.gouges ?? t.intrusionArea) === 0 && t.depthViolations === 0)
-      && (disc?.r.previewTabs?.length ?? 0) >= 4) {
-    pass(`coaster verified: 2" well + 2.5" disc, ${disc.r.previewTabs.length} tabs, all targets clean`);
-  } else fail(`coaster failed: ok=${r.ok} targets=${targets.length} ${r.errors?.join(' | ')}`);
+      && (disc?.r.previewTabs?.length ?? 0) >= 4 && st?.w === 3.5 && st?.h === 3.5 && st?.thickness === 0.375) {
+    pass(`coaster verified on AUTO-SIZED stock ${st.w}" × ${st.h}" × ${st.thickness}" — no stock ever specified`);
+  } else fail(`coaster failed: ok=${r.ok} targets=${targets.length} stock=${JSON.stringify(st)} ${r.errors?.join(' | ')}`);
 
   // true-geometry reach: a 2.2" disc over the 2" round well is legal (0.1"
   // rim) even though the well's BBOX corner is 1.41" out — boxes would ban it
@@ -287,30 +289,11 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
   if (!tight.ok && tight.errors[0]?.includes('needs ≥ 2.00')) pass(`too-small disc: "${tight.errors[0].slice(0, 60)}..."`);
   else fail(`too-small disc not caught: ${JSON.stringify(tight.errors)}`);
 
-  // over-size content still previews CENTERED (live-tested: a coaster on
-  // the default 8×2.5 stock previewed at the corner and read as a runaway
-  // out-of-bounds cut; it was only the fit error with a lying preview)
-  {
-    const noStock = run({
-      ...structuredClone(EMPTY_RECIPE),   // default stock: 2.5" tall — the disc can't fit
-      pipeline: [
-        { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } },
-        { id: 'disc', strategy: 'disc_cutout', params: { diameter: 2.5 } },
-      ],
-    });
-    const p = noStock.preview?.placement;
-    const centered = p && Math.abs(p.x - 4) < 1e-6 && Math.abs(p.y - 1.25) < 1e-6;
-    if (!noStock.ok && noStock.errors[0].includes('Enlarge the stock') && centered) {
-      pass('fit error previews content centered on stock, with enlarge-or-shrink advice');
-    } else fail(`fit-error preview wrong: ok=${noStock.ok} placement=${JSON.stringify(p)} ${noStock.errors?.[0]}`);
-  }
-
   // strategy conversion: the live-tested stumble — a recipe holding an old
   // tag_cutout op named "cutout" gets converted to a disc by set_operation
   // with a new strategy (params replaced, not merged)
   {
     let old = structuredClone(EMPTY_RECIPE);
-    old.stock = { w: 4, h: 4, thickness: 0.375 };
     old = applyActions(old, {
       summary: 'old state', declined: [],
       actions: [
@@ -340,7 +323,7 @@ console.log('--- coaster story: geometric pocket + round disc cutout ---');
 
   // rectangle pocket with sharp corners exercises rest cleanup on shapes
   const tray = run({
-    ...structuredClone(EMPTY_RECIPE), stock: { w: 6, h: 4, thickness: 0.5 },
+    ...structuredClone(EMPTY_RECIPE),
     pipeline: [{ id: 'tray', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 3, height: 2, cornerRadius: 0, depth: 0.25, restDiameter: 0.0625 } }],
   });
   const trayTargets = tray.report?.stats.targets ?? [];

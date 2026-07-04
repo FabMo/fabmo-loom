@@ -93,6 +93,10 @@
 
   <section class="panel" id="appPanel" style="position:relative">
     <p id="appName">Untitled</p>
+    <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
+      <div style="width:130px"><label>Stock thickness (in)</label><input id="thickness" type="number" step="0.125" min="0.125" value="0.5"></div>
+      <div id="minStock" class="numbers" style="color:var(--mut)"></div>
+    </div>
     <div id="controls"></div>
     <canvas id="preview" width="1160" height="600"></canvas>
     <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span></div>
@@ -106,7 +110,7 @@
       <button id="openRecipe" class="ghost small">Open recipe…</button>
       <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
     </div>
-    <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Exports unlock only on VERIFIED. First run cuts air.</div>
+    <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must fixture. Exports unlock only on VERIFIED. First run cuts air.</div>
     <details>
       <summary>the recipe (what the prompts are editing)</summary>
       <pre id="recipeJson"></pre>

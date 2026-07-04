@@ -23,7 +23,7 @@ import { verifyJob } from '../ir/verify.js';
 
 export const EMPTY_RECIPE = {
   name: 'Untitled',
-  stock: { w: 8, h: 2.5, thickness: 0.5 },
+  stock: { thickness: 0.5 },   // W×H are DERIVED: stock auto-sizes to the content
   margin: 0.375,
   controls: [],
   pipeline: [],
@@ -71,7 +71,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
 
   const ctx = {
     fontBuffer,
-    stock,
+    stock: { thickness: stock.thickness },   // W×H not known until content runs
     safeZ: 0.5,
     rpm: 14000,
     contentBBox: null,
@@ -101,24 +101,22 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [], preview: { empty: true } };
   }
 
-  // ---- fit + placement: center the whole group on the stock ----
+  // ---- stock auto-sizes to the content: minimum board, quarter-inch
+  // rounded, margins included. "Doesn't fit" cannot happen; the user is
+  // told the minimum stock they must fixture instead.
   const b = ctx.contentBBox;
   const w = b.maxX - b.minX, h = b.maxY - b.minY;
   const margin = recipe.margin ?? 0.375;
-  // centering placement is computed BEFORE the fit check so that an
-  // over-size error still previews the content centered (overflowing the
-  // stock symmetrically) — placed at the corner it reads as a runaway cut
-  const placement = {
-    x: (stock.w - w) / 2 - b.minX,
-    y: (stock.h - h) / 2 - b.minY,
+  const roundQ = (x) => Math.ceil((x - 1e-9) / 0.25) * 0.25;
+  const autoStock = {
+    w: roundQ(w + 2 * margin),
+    h: roundQ(h + 2 * margin),
+    thickness: stock.thickness,
   };
-  if (w + 2 * margin > stock.w + 1e-9 || h + 2 * margin > stock.h + 1e-9) {
-    return {
-      ok: false, warnings: [],
-      errors: [`the content needs ${(w + 2 * margin).toFixed(2)}" × ${(h + 2 * margin).toFixed(2)}" (including ${margin}" margins) — stock is ${stock.w}" × ${stock.h}". Enlarge the stock or shrink the content.`],
-      preview: { built, placement },
-    };
-  }
+  const placement = {
+    x: (autoStock.w - w) / 2 - b.minX,
+    y: (autoStock.h - h) / 2 - b.minY,
+  };
 
   // ---- tool table: one entry per distinct tool spec, in first-use order ----
   const tools = {};
@@ -134,7 +132,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
 
   const job = {
     units: 'in',
-    stock,
+    stock: autoStock,
     safeZ: ctx.safeZ,
     spindleSpeed: ctx.rpm,
     tools,
@@ -160,7 +158,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     errors: report.errors,
     warnings: report.warnings,
     report, job, composed,
-    preview: { built, placement },
+    preview: { built, placement, stock: autoStock },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });
