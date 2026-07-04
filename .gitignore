@@ -2,3 +2,4 @@ node_modules/
 test/diff/target/
 test/diff/out/
 out/
+examples/out/

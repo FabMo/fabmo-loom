@@ -15,6 +15,10 @@ to build bespoke CAM tools, *if* they build on a foundation of verified
 kernels instead of hallucinating toolpath theory from scratch. This
 repository is that foundation.
 
+**Start here → [QUICKSTART.md](QUICKSTART.md)** — clone to verified
+toolpath in two minutes, then point your AI coding agent at the repo
+([AGENTS.md](AGENTS.md) hands it the contract) and build your own app.
+
 ## The model (the fabrication hourglass, short form)
 
 ```
