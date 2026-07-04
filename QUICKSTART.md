@@ -66,7 +66,11 @@ Code, Cursor, Copilot Workspace, etc. pick it up automatically or with
 one instruction.
 
 From the repo root, start your agent and describe the tool you actually
-need in your shop. Real examples of the right *shape*:
+need in your shop. For a fully worked example — the exact prompt that
+produces the [Engrave Anything](examples/engraver/) app, and why it's
+only ~110 words — see
+[examples/engraver/README.md](examples/engraver/README.md). More examples
+of the right *shape*:
 
 > Build me a single-page app: I pick a drawer-pull profile from three
 > presets, set width and bit diameter, and it exports a verified SBP
