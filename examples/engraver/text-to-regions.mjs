@@ -123,13 +123,11 @@ function layoutCommands(font, text, fontSize) {
   return commands;
 }
 
-/**
- * @param {ArrayBuffer} fontBuffer - a TTF/OTF file
- * @param {string} text
- * @param {Object} opts - { letterHeight } target height of the text bbox, inches
- * @returns {{ regions: [{outer, holes}], width, height, font }} bbox at (0,0)
- */
-export function textToRegions(fontBuffer, text, { letterHeight = 1 } = {}) {
+// Shared layout + flatten + scale + translate: contours in inches, Y up,
+// bbox at (0,0), ORIENTATION AS AUTHORED in the font (the Y flip mirrors
+// every contour uniformly, so outer-vs-hole remains encoded in relative
+// direction — exactly what a nonzero fill consumer needs).
+function prepContours(fontBuffer, text, letterHeight) {
   const font = opentype.parse(fontBuffer);
 
   // Lay out once at a probe size, flatten, then scale the points so the
@@ -148,9 +146,47 @@ export function textToRegions(fontBuffer, text, { letterHeight = 1 } = {}) {
     if (p.y > probeMaxY) probeMaxY = p.y;
   }
   const probeH = probeMaxY - probeMinY;
-  if (!(probeH > 0)) return { regions: [], width: 0, height: 0, font };
+  if (!(probeH > 0)) return { contours: [], width: 0, height: 0, font };
   const s = letterHeight / probeH;
   contours = contours.map(r => r.map(p => ({ x: p.x * s, y: p.y * s })));
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of contours) for (const p of r) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  contours = contours.map(r => r.map(p => ({ x: p.x - minX, y: p.y - minY })));
+  return { contours, width: maxX - minX, height: maxY - minY, font };
+}
+
+/**
+ * Raw flattened contours with the font's authored orientation, for
+ * consumers that apply the font's own NONZERO fill rule (a Clipper union).
+ * This is the correct source for script/decorative faces whose contours
+ * OVERLAP rather than nest — containment-depth classification (see
+ * textToRegions) misreads those.
+ *
+ * @returns {{ contours: [[{x,y}]], width, height, font }} bbox at (0,0)
+ */
+export function textToContours(fontBuffer, text, { letterHeight = 1 } = {}) {
+  return prepContours(fontBuffer, text, letterHeight);
+}
+
+/**
+ * @param {ArrayBuffer} fontBuffer - a TTF/OTF file
+ * @param {string} text
+ * @param {Object} opts - { letterHeight } target height of the text bbox, inches
+ * @returns {{ regions: [{outer, holes}], width, height, font }} bbox at (0,0)
+ *
+ * NOTE: hole assignment is containment-depth (even-odd), which assumes
+ * contours nest cleanly — true of upright text faces, NOT of connected
+ * scripts. Those callers want textToContours + a nonzero-fill union.
+ */
+export function textToRegions(fontBuffer, text, { letterHeight = 1 } = {}) {
+  const { contours, width, height, font } = prepContours(fontBuffer, text, letterHeight);
+  if (!contours.length) return { regions: [], width: 0, height: 0, font };
 
   // Containment depth by even-odd counting (winding-agnostic — fonts are
   // not reliable about contour direction). Even depth = outer, odd = hole
@@ -181,20 +217,5 @@ export function textToRegions(fontBuffer, text, { letterHeight = 1 } = {}) {
     if (parent) parent.holes.push(ccw(m.ring));
   }
 
-  // Translate the whole set so the bbox min corner is (0,0).
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const r of regions) {
-    for (const ring of [r.outer, ...r.holes]) {
-      for (const p of ring) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-    }
-  }
-  const shift = (ring) => ring.forEach(p => { p.x -= minX; p.y -= minY; });
-  for (const r of regions) { shift(r.outer); r.holes.forEach(shift); }
-
-  return { regions, width: maxX - minX, height: maxY - minY, font };
+  return { regions, width, height, font };
 }

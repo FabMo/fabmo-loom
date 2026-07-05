@@ -11,8 +11,9 @@
 // undoable by prompt and must be DECLINED (the decline is the gap report
 // that grows this file).
 
-import { textToRegions } from '../examples/engraver/text-to-regions.mjs';
+import { textToContours } from '../examples/engraver/text-to-regions.mjs';
 import { computeMedialAxis } from '../vendor/v_engraver/medial-axis.js';
+import { pointInPolygon, distanceToBoundary } from '../vendor/v_engraver/polygon-utils.js';
 import { generateVEngraveToolpath, generatePocketPasses } from '../vendor/v_engraver/toolpath-gen.js';
 import { generateProfile } from '../strategies/profile.js';
 import { generatePocket } from '../strategies/pocket.js';
@@ -89,29 +90,87 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   return ring;
 }
 
-// Union overlapping glyph outlines into clean regions. Connected scripts
-// (Pacifico) overlap BETWEEN letters and decorative faces overlap within
-// them — the medial axis would double-carve every overlap. Disjoint text
-// passes through geometrically unchanged (Clipper also normalizes ring
-// orientation for free). textToRegions emits holes CCW like outers, so
-// holes are reversed going in; everything comes back out CCW to keep the
-// downstream convention.
+// Weld raw font contours into clean {outer, holes} regions under the
+// font's own NONZERO fill rule — the same rule every rasterizer applies
+// to these outlines. The contours arrive AS AUTHORED (textToContours):
+// outers and counters wind opposite ways, so nonzero keeps counters as
+// holes, keeps self-crossing script strokes filled, and welds the joins
+// where connected letters overlap. Do NOT pre-classify outer/hole by
+// containment here — script glyphs overlap instead of nesting, and that
+// misclassification is exactly what used to delete strokes and counters.
+// Output normalized to the downstream convention (outers CCW, holes CCW).
 const CLIP_SCALE = 1e6;
-function unionTextRegions(regions) {
-  if (!regions.length) return regions;
+function weldContours(contours) {
+  if (!contours.length) return { regions: [], merged: false };
   const toClip = ring => ring.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) }));
   const fromClip = path => path.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE }));
   const c = new ClipperLib.Clipper();
-  for (const r of regions) {
-    c.AddPath(toClip(r.outer), ClipperLib.PolyType.ptSubject, true);
-    for (const h of r.holes) c.AddPath(toClip([...h].reverse()), ClipperLib.PolyType.ptSubject, true);
+  for (const ring of contours) {
+    c.AddPath(toClip(ring), ClipperLib.PolyType.ptSubject, true);
   }
   const tree = new ClipperLib.PolyTree();
   c.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
   const ex = ClipperLib.JS.PolyTreeToExPolygons(tree);
-  return ex
+  const regions = ex
     .filter(e => e.outer?.length >= 3)
     .map(e => ({ outer: ccw(fromClip(e.outer)), holes: (e.holes ?? []).map(h => ccw(fromClip(h))) }));
+  // merged = the weld changed the ring structure (fused joins, absorbed
+  // overlaps). Cleanly nested text maps 1:1: ring counts match.
+  const outRings = regions.reduce((n, r) => n + 1 + r.holes.length, 0);
+  return { regions, merged: outRings !== contours.length };
+}
+
+// Enforce the medial axis's own invariant against the exact region
+// geometry: every branch point must lie INSIDE its region with radius no
+// larger than the true distance to the boundary (tip depth = radius/tanβ,
+// so the vee's cut circle then stays inside by construction), and every
+// SEGMENT must provably stay inside — a chord is contained whenever its
+// length ≤ the sum of its endpoints' clearance radii (the endpoint disks
+// cover it). The Voronoi approximation plus branch smoothing violates
+// both by a few thou at the pinch waists a script weld creates — the
+// verifier caught the strays live. Where the disk test fails, subdivide
+// against the true boundary distance; where a midpoint lands outside,
+// SPLIT the branch: the stroke tapers to the surface on each side of the
+// waist (radius → waist depth → 0), which is also the correct cut.
+// Exact and local — globally densifying the Voronoi sampling instead is
+// quadratic and made long words take minutes.
+function clampMedialAxis(ma, regions) {
+  const inside = (x, y) => regions.find(r => pointInPolygon(x, y, r));
+  const clamp = (q, reg) => {
+    const d = distanceToBoundary(q.x, q.y, reg);
+    return q.radius > d ? { ...q, radius: d } : q;
+  };
+  const branches = [];
+  let seg = [];
+  const flush = () => { if (seg.length >= 2) branches.push(seg); seg = []; };
+
+  // a and b are clamped and inside reg; append the refined open interval
+  // (a, b] to seg, flushing at waist splits. Recursion halves the chord,
+  // so depth is bounded by log2(L / 0.002).
+  const refine = (a, b, reg) => {
+    const L = Math.hypot(b.x - a.x, b.y - a.y);
+    if (L <= a.radius + b.radius || L < 0.002) { seg.push(b); return; }
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, radius: (a.radius + b.radius) / 2 };
+    if (!pointInPolygon(mid.x, mid.y, reg)) { flush(); seg = [b]; return; }
+    const m = clamp(mid, reg);
+    refine(a, m, reg);
+    refine(m, b, reg);
+  };
+
+  for (const branch of ma.branches) {
+    seg = [];
+    let prev = null;
+    for (const q of branch) {
+      const reg = inside(q.x, q.y);
+      if (!reg) { flush(); prev = null; continue; }
+      const c = clamp(q, reg);
+      if (!prev) seg.push(c);
+      else refine(prev, c, reg);
+      prev = c;
+    }
+    flush();
+  }
+  ma.branches = branches;
 }
 
 // The text strategies share this guard: an unknown/unloaded font is a
@@ -239,11 +298,9 @@ function textGeometry(ctx, text, letterHeight, fontId) {
   const key = `${fontId}|${letterHeight}|${text}`;
   if (!ctx._textCache) ctx._textCache = new Map();
   if (!ctx._textCache.has(key)) {
-    const raw = textToRegions(ctx.fonts[fontId], text, { letterHeight });
-    const regions = unionTextRegions(raw.regions);
-    // merged = glyphs actually fused (connected script): downstream can
-    // spend extra care on the seams the fusion created
-    ctx._textCache.set(key, { ...raw, regions, merged: regions.length !== raw.regions.length });
+    const raw = textToContours(ctx.fonts[fontId], text, { letterHeight });
+    const { regions, merged } = weldContours(raw.contours);
+    ctx._textCache.set(key, { regions, merged, width: raw.width, height: raw.height });
   }
   return ctx._textCache.get(key);
 }
@@ -269,31 +326,13 @@ export const CATALOG = {
     run(p, ctx) {
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
-      const { regions, bbox, merged } = centeredText(ctx, p.text, p.letterHeight, p.font);
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight, p.font);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
       noteContent(ctx, regions.map(r => r.outer));
-      // adaptive boundary sampling, but only for FUSED text: the medial
-      // axis is a Voronoi approximation, and at the default density the
-      // pinched seams a connected script's union creates (Pacifico)
-      // starve for sites — vertices stray a few thou outside the outline
-      // and the verifier rightly rejects the motion. Target ~0.015"
-      // spacing there; disjoint letterforms keep the fast default.
-      let samplingDensity;
-      if (merged) {
-        let perimeter = 0;
-        for (const r of regions) {
-          for (const ring of [r.outer, ...r.holes]) {
-            for (let i = 0; i < ring.length; i++) {
-              const j = (i + 1) % ring.length;
-              perimeter += Math.hypot(ring[j].x - ring[i].x, ring[j].y - ring[i].y);
-            }
-          }
-        }
-        samplingDensity = Math.min(6000, Math.max(500, Math.round(perimeter / 0.015)));
-      }
-      const ma = computeMedialAxis(regions, samplingDensity ? { samplingDensity } : {});
+      const ma = computeMedialAxis(regions, {});
+      clampMedialAxis(ma, regions);
       const moves = generateVEngraveToolpath(ma, vBit, machine);
       const halfAngle = (p.includedAngle / 2) * Math.PI / 180;
       const maxR = p.maxDepth * Math.tan(halfAngle);

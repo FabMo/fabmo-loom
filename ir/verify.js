@@ -392,11 +392,12 @@ function checkRegionTarget(name, target, polylines, fp, radius, gougeTol, covera
 
   let samples = 0, gouges = 0, deepest = 0, depthViolations = 0;
   let firstGouge = null;
+  const legalIdx = buildPointInPathsIndex(legal);
   samplePolylines(polylines, radius / 2, (x, y, z) => {
     samples++;
     if (z >= -EPS) return; // above stock top: positioned, not cutting
     if (z < -target.depth - gougeTol) { depthViolations++; deepest = Math.min(deepest, z); }
-    if (!pointInPaths(x, y, legal)) {
+    if (!pointInPathsIndexed(x, y, legalIdx)) {
       gouges++;
       if (!firstGouge) firstGouge = { x, y, z };
     }
@@ -558,6 +559,66 @@ function pointInPaths(x, y, paths) {
     const r = ClipperLib.Clipper.PointInPolygon(pt, path);
     if (r === -1) return true;
     if (r === 1) winding += ClipperLib.Clipper.Orientation(path) ? 1 : -1;
+  }
+  return winding > 0;
+}
+
+// Row-indexed pointInPaths for hot sample loops: identical verdicts
+// (winding-aware, boundary counts inside, same integer space as Clipper),
+// but each query touches only the edges whose y-span crosses its row —
+// a welded-text legal region has ~10k edges and a V-carve ~10^5 samples,
+// which made the exact-but-linear scan the slowest thing in the pipeline.
+function buildPointInPathsIndex(paths) {
+  let minY = Infinity, maxY = -Infinity, edgeCount = 0;
+  for (const p of paths) {
+    edgeCount += p.length;
+    for (const q of p) { if (q.Y < minY) minY = q.Y; if (q.Y > maxY) maxY = q.Y; }
+  }
+  if (!edgeCount) return { empty: true };
+  const rows = Math.max(1, Math.min(4096, edgeCount));
+  const h = Math.max(1, Math.ceil((maxY - minY + 1) / rows));
+  const buckets = Array.from({ length: rows }, () => []);
+  const signs = paths.map(p => (ClipperLib.Clipper.Orientation(p) ? 1 : -1));
+  paths.forEach((path, pi) => {
+    for (let i = 0; i < path.length; i++) {
+      const a = path[i], b = path[(i + 1) % path.length];
+      const lo = Math.max(0, Math.floor((Math.min(a.Y, b.Y) - minY) / h));
+      const hi = Math.min(rows - 1, Math.floor((Math.max(a.Y, b.Y) - minY) / h));
+      for (let r = lo; r <= hi; r++) buckets[r].push({ ax: a.X, ay: a.Y, bx: b.X, by: b.Y, pi });
+    }
+  });
+  return { minY, h, rows, buckets, signs, parity: new Uint8Array(paths.length), touched: [] };
+}
+
+function pointInPathsIndexed(x, y, idx) {
+  if (idx.empty) return false;
+  const X = Math.round(x * SCALE), Y = Math.round(y * SCALE);
+  const r = Math.floor((Y - idx.minY) / idx.h);
+  if (r < 0 || r >= idx.rows) return false;
+  const { parity, touched } = idx;
+  touched.length = 0;
+  for (const e of idx.buckets[r]) {
+    // boundary counts inside (Clipper's -1): exact integer colinearity
+    const cross = (e.bx - e.ax) * (Y - e.ay) - (e.by - e.ay) * (X - e.ax);
+    if (cross === 0 &&
+        X >= Math.min(e.ax, e.bx) && X <= Math.max(e.ax, e.bx) &&
+        Y >= Math.min(e.ay, e.by) && Y <= Math.max(e.ay, e.by)) {
+      for (const pi of touched) parity[pi] = 0;
+      return true;
+    }
+    // half-open crossing test toward +x
+    if ((e.ay > Y) !== (e.by > Y)) {
+      const xi = e.ax + ((Y - e.ay) / (e.by - e.ay)) * (e.bx - e.ax);
+      if (xi > X) {
+        if (!parity[e.pi]) touched.push(e.pi);
+        parity[e.pi] ^= 1;
+      }
+    }
+  }
+  let winding = 0;
+  for (const pi of touched) {
+    if (parity[pi]) winding += idx.signs[pi];
+    parity[pi] = 0;
   }
   return winding > 0;
 }

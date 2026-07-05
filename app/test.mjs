@@ -598,20 +598,47 @@ console.log('--- fonts: whole shelf V-carves verified; script overlaps union ---
     else fail(`${f.id} failed: ok=${r.ok} ${r.errors?.join(' | ')}`);
   }
 
-  // connected script: letters merge — the union must produce FEWER regions
-  // than glyphs, and the result must still verify
+  // connected script: the weld must FUSE letters without deleting strokes
+  // or counters (regression: containment-depth hole classification read
+  // Pacifico's overlapping contours as giant "holes" — words came out
+  // with missing letters, negative net area, and filled counters). The
+  // nonzero weld of authored contours is measured here: one fused region,
+  // the loop counters SURVIVE as holes, and the ink area is sane.
+  const ringArea = (ring) => {
+    let a = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const j = (i + 1) % ring.length;
+      a += ring[i].x * ring[j].y - ring[j].x * ring[i].y;
+    }
+    return a / 2;
+  };
+  const inkArea = (regs) => regs.reduce((s, r) =>
+    s + Math.abs(ringArea(r.outer)) - r.holes.reduce((h, x) => h + Math.abs(ringArea(x)), 0), 0);
   const script = run({
     ...structuredClone(EMPTY_RECIPE),
     pipeline: [{ id: 'e', strategy: 'vcarve_text', params: { text: 'hello', letterHeight: 1, font: 'script' } }],
   });
-  const nRegions = script.preview?.built?.[0]?.r.previewRegions?.length ?? 99;
-  if (script.ok && nRegions < 5) pass(`Pacifico "hello": 5 letters union into ${nRegions} region(s), still verified`);
-  else fail(`script union failed: ok=${script.ok} regions=${nRegions} ${script.errors?.join(' | ')}`);
+  const regs = script.preview?.built?.[0]?.r.previewRegions ?? [];
+  const nHoles = regs.reduce((s, r) => s + r.holes.length, 0);
+  const ink = inkArea(regs);
+  if (script.ok && regs.length === 1 && nHoles >= 4 && ink > 0.8 && ink < 1.2) {
+    pass(`Pacifico "hello": welded to 1 region, ${nHoles} counters survive, ink area ${ink.toFixed(3)} sq in`);
+  } else fail(`script weld failed: ok=${script.ok} regions=${regs.length} holes=${nHoles} ink=${ink.toFixed(3)} ${script.errors?.join(' | ')}`);
 
-  // regression (caught live in the browser 2026-07-05): at the default
-  // medial-axis density, the union seams of "Amelia" put 6 toolpath
-  // samples a few thou outside the outline — fused text now buys adaptive
-  // sampling and the full tag recipe verifies
+  // counters in upright faces too: serif "Bob" = B(2) + o(1) + b(1)
+  const bob = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'e', strategy: 'outline_text', params: { text: 'Bob', letterHeight: 1, font: 'serif' } }],
+  });
+  const bobHoles = (bob.preview?.built?.[0]?.r.previewRegions ?? []).reduce((s, r) => s + r.holes.length, 0);
+  if (bob.ok && bobHoles === 4) pass('serif "Bob": all 4 counters present after the weld');
+  else fail(`Bob counters: ok=${bob.ok} holes=${bobHoles}`);
+
+  // regression (caught live in the browser 2026-07-05): the Voronoi
+  // medial axis plus branch smoothing strays a few thou outside at the
+  // pinch waists a script weld creates — clampMedialAxis enforces the
+  // inside/radius invariant per point and per chord, and the full tag
+  // recipe verifies
   const amelia = run({
     ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
     pipeline: [
@@ -619,7 +646,7 @@ console.log('--- fonts: whole shelf V-carves verified; script overlaps union ---
       { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.25, tabs: true, chamfer: 0.05 } },
     ],
   });
-  if (amelia.ok) pass('script "Amelia" + chamfered tab tag: seam-dense medial axis verifies');
+  if (amelia.ok) pass('script "Amelia" + chamfered tab tag: invariant-clamped medial axis verifies');
   else fail(`Amelia regression: ${amelia.errors?.join(' | ')}`);
 
   // unknown font: friendly error naming the shelf
