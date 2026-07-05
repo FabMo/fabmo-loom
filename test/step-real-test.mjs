@@ -202,7 +202,10 @@ const FIXTURES = [
     // read as 96% coverage, and dragged in a pointless 1/8" rest pass along
     // ground the 1/4" may legally overhang. insetRegion's set-form
     // spillover (dilate − wall/fence bands) keeps the neck corridor open.
-    expectNoRest: ['Circular Pocket 11', 'Pocket 3'],
+    // Pocket 10: a hole clipping the pocket corner used to read as an
+    // r≈0.09 wall concavity and drag in a 1/16" rest pass — the bridged
+    // wall-bite flyover fills it and the 1/4" covers everything
+    expectNoRest: ['Circular Pocket 11', 'Pocket 3', 'Pocket 10'],
     expectFullDepthFeatures: ['Drilled Through Hole 26'],
   },
 ];
@@ -517,6 +520,15 @@ async function runPart(stepPath, expect = {}) {
                 p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
           }
           if (inside) continue;
+          // ground at/below this floor is a legal flyover, not a stray —
+          // a bridged wall bite (hole clipping the pocket boundary) lets
+          // the centerline sweep across the below-floor dip
+          const gc = Math.round((p.x - depthGrid.min.x) / depthGrid.spacing - 0.5);
+          const gr = Math.round((p.y - depthGrid.min.z) / depthGrid.spacing - 0.5);
+          if (gc >= 0 && gc < depthGrid.gridW && gr >= 0 && gr < depthGrid.gridH) {
+            const gd = depthGrid.depths[gr * depthGrid.gridW + gc];
+            if (!Number.isFinite(gd) || gd >= f.depth - 0.02) continue;
+          }
           let dMin = Infinity;
           for (let i = 0; i < n; i++) {
             const a = f.contour[i], b = f.contour[(i + 1) % n];
