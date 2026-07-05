@@ -4,17 +4,18 @@
 // no code, no motion. See intent.mjs for the trust boundary.
 
 import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
-import { buildParseRequest, applyActions } from './intent.mjs';
+import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
+import { FONTS } from './fonts.mjs';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
 const ctx = canvas.getContext('2d');
 
-let FONT = null;
+let LOADED_FONTS = null;   // id → ArrayBuffer, the whole shelf
 let viewMode = localStorage.getItem('loom:view') ?? '3d';
 let view3d = null;
 let recipe = loadRecipe();
@@ -35,7 +36,15 @@ function loadRecipe() {
   } catch { /* fresh start */ }
   return structuredClone(EMPTY_RECIPE);
 }
-function persist() { localStorage.setItem('loom:recipe', JSON.stringify(recipe)); }
+function persist() {
+  try {
+    localStorage.setItem('loom:recipe', JSON.stringify(recipe));
+  } catch {
+    // embedded assets can outgrow localStorage — the recipe still works,
+    // it just won't survive a reload unless saved to a file
+    addTurn('This recipe is too large for browser auto-save (embedded assets) — use "Save recipe" to keep it.', true);
+  }
+}
 
 // ------------------------------------------------------------ controls UI
 
@@ -49,12 +58,23 @@ function renderControls() {
     if (c.type === 'text') wrap.className = 'ctl-text';
     const label = document.createElement('label');
     label.textContent = c.label ?? c.id;
-    const input = document.createElement('input');
-    input.type = c.type === 'number' ? 'number' : 'text';
-    if (c.type === 'number') {
-      if (c.min !== undefined) input.min = c.min;
-      if (c.max !== undefined) input.max = c.max;
-      input.step = c.step ?? 0.125;
+    let input;
+    if (c.type === 'choice') {
+      input = document.createElement('select');
+      for (const o of c.options ?? []) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label ?? o.value;
+        input.append(opt);
+      }
+    } else {
+      input = document.createElement('input');
+      input.type = c.type === 'number' ? 'number' : 'text';
+      if (c.type === 'number') {
+        if (c.min !== undefined) input.min = c.min;
+        if (c.max !== undefined) input.max = c.max;
+        input.step = c.step ?? 0.125;
+      }
     }
     input.value = controlValues[c.id] ?? c.default ?? '';
     input.addEventListener('input', () => {
@@ -66,7 +86,91 @@ function renderControls() {
     wrap.append(label, input);
     host.append(wrap);
   }
-  $('recipeJson').textContent = JSON.stringify(recipe, null, 2);
+  renderAssets();
+  // the debug view elides asset payloads the same way the LLM prompt does
+  $('recipeJson').textContent = JSON.stringify(promptRecipeView(recipe), null, 2);
+}
+
+// ------------------------------------------------------------- assets
+// Uploaded images/graphics live IN the recipe document (self-contained,
+// survives save/open). No strategy consumes them yet: this is the intake
+// side, the carving strategies are the next decline-to-feature loop.
+
+function renderAssets() {
+  const host = $('assets');
+  host.innerHTML = '';
+  for (const a of recipe.assets ?? []) {
+    const chip = document.createElement('span');
+    chip.className = 'asset-chip';
+    if (a.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = a.data;
+      img.alt = '';
+      chip.append(img);
+    }
+    const name = document.createElement('span');
+    name.textContent = a.kind === 'svg' ? `⬡ ${a.name}` : a.name;
+    chip.append(name);
+    const x = document.createElement('button');
+    x.className = 'x';
+    x.textContent = '×';
+    x.title = 'remove';
+    x.addEventListener('click', () => {
+      recipe.assets = recipe.assets.filter(z => z.id !== a.id);
+      persist();
+      renderAssets();
+    });
+    chip.append(x);
+    host.append(chip);
+  }
+}
+
+// raster uploads get downscaled client-side: carving heightmaps are ≤ a
+// few hundred cells across, so 1024px keeps all the fidelity a bit can
+// reproduce while staying inside localStorage budgets
+async function imageToDataUrl(file, maxDim = 1024) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('that file did not decode as an image'));
+      i.src = url;
+    });
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    return { data: cv.toDataURL(type, 0.85), width: w, height: h };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function addAssetFile(f) {
+  const isSvg = f.type === 'image/svg+xml' || f.name.toLowerCase().endsWith('.svg');
+  let asset;
+  if (isSvg) {
+    if (f.size > 512 * 1024) throw new Error('SVG larger than 512 KB — simplify it first');
+    const text = await f.text();
+    if (!text.includes('<svg')) throw new Error('that file does not look like an SVG');
+    asset = { kind: 'svg', data: text };
+  } else {
+    const { data, width, height } = await imageToDataUrl(f);
+    if (data.length > 1.5e6) throw new Error('image still too large after downscaling — crop it and retry');
+    asset = { kind: 'image', data, width, height };
+  }
+  recipe.assets ??= [];
+  const id = `${f.name.replace(/[^A-Za-z0-9._-]+/g, '_')}`;
+  let unique = id, n = 2;
+  while (recipe.assets.some(a => a.id === unique)) unique = `${id}~${n++}`;
+  recipe.assets.push({ id: unique, name: f.name, ...asset });
+  persist();
+  renderAssets();
+  addTurn(`Added ${asset.kind} "${escapeHtml(f.name)}"${asset.width ? ` (${asset.width}×${asset.height}px)` : ''} to the recipe. No strategy can carve it yet — it is stored for when image/graphic weaving arrives.`);
 }
 
 // ---------------------------------------------------------------- run/draw
@@ -74,10 +178,10 @@ function renderControls() {
 function setBadge(cls, text) { const b = $('badge'); b.className = `badge ${cls}`; b.textContent = text; }
 
 function runAndRender() {
-  if (!FONT) return;
+  if (!LOADED_FONTS) return;
   setBadge('wait', 'computing…');
   requestAnimationFrame(() => setTimeout(() => {
-    result = quiet(() => runRecipe(recipe, controlValues, FONT));
+    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS));
     render();
   }, 0));
 }
@@ -328,6 +432,17 @@ $('saveKey').addEventListener('click', () => {
 });
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.sbp`, result.sbp));
 $('dlNc').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.nc`, result.gcode));
+$('addAsset').addEventListener('click', () => $('assetFile').click());
+$('assetFile').addEventListener('change', async () => {
+  const f = $('assetFile').files[0];
+  $('assetFile').value = '';
+  if (!f) return;
+  try {
+    await addAssetFile(f);
+  } catch (e) {
+    addTurn(escapeHtml(e.message), true);
+  }
+});
 $('saveRecipe').addEventListener('click', () => download(`${slug(recipe.name)}.loom.json`, JSON.stringify(recipe, null, 2), 'application/json'));
 $('openRecipe').addEventListener('click', () => $('openFile').click());
 $('openFile').addEventListener('change', async () => {
@@ -355,8 +470,13 @@ $('thickness').addEventListener('input', () => {
 });
 
 (async function boot() {
-  const res = await fetch('../examples/engraver/assets/DejaVuSans-Bold.ttf');
-  FONT = await res.arrayBuffer();
+  const loaded = {};
+  await Promise.all(FONTS.map(async (f) => {
+    const res = await fetch(f.file);
+    if (!res.ok) throw new Error(`font "${f.id}" failed to load: ${res.status}`);
+    loaded[f.id] = await res.arrayBuffer();
+  }));
+  LOADED_FONTS = loaded;
   renderControls();
   runAndRender();
 })();

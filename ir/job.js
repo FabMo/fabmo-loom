@@ -62,7 +62,9 @@ export function composeJob(job) {
       z: op.plungeRate * unitScale,
     });
 
-    moves.push(...applyPlacement(op.moves, op.placement, unitScale));
+    // no spread: a dense op (adaptively-sampled V-carve of long text) can
+    // exceed the JS engine's argument limit around 65k moves
+    for (const m of applyPlacement(op.moves, op.placement, unitScale)) moves.push(m);
   }
 
   moves.push({ type: 'comment', text: '--- End of job ---' });

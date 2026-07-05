@@ -27,6 +27,11 @@ export const EMPTY_RECIPE = {
   margin: 0.375,
   controls: [],
   pipeline: [],
+  // uploaded images/graphics, embedded so recipes stay self-contained:
+  // { id, name, kind: 'image'|'svg', data (dataURL or svg text), width?, height? }
+  // No strategy consumes them yet — they are the raw material for the
+  // image/graphic strategies to come (the runtime ignores them).
+  assets: [],
 };
 
 export function controlDefaults(recipe) {
@@ -60,9 +65,11 @@ function resolveParams(entry, params, controlValues, errors, opId) {
 }
 
 /**
+ * @param {Object} fonts  font id → ArrayBuffer (the loaded font shelf,
+ *                        see fonts.mjs); strategies look up by param
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
-export function runRecipe(recipe, controlValues, fontBuffer) {
+export function runRecipe(recipe, controlValues, fonts) {
   const errors = [];
   const stock = recipe.stock;
   if (!recipe.pipeline.length) {
@@ -70,7 +77,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
   }
 
   const ctx = {
-    fontBuffer,
+    fonts,
     stock: { thickness: stock.thickness },   // W×H not known until content runs
     safeZ: 0.5,
     rpm: 14000,

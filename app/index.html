@@ -30,6 +30,9 @@
   button.small { font-size: .78rem; padding: 5px 10px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .chips button { background: #eef1fa; color: var(--navy); font-weight: 500; font-size: .78rem; padding: 5px 10px; border-radius: 999px; }
+  .asset-chip { display: inline-flex; align-items: center; gap: 6px; background: #eef1fa; color: var(--navy); font-size: .78rem; padding: 4px 10px; border-radius: 999px; }
+  .asset-chip img { height: 20px; width: 20px; object-fit: cover; border-radius: 4px; }
+  .asset-chip .x { background: none; border: none; color: var(--navy); font-weight: 700; padding: 0 2px; font-size: .85rem; cursor: pointer; }
   #history { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
   .turn { border-left: 3px solid var(--sky); padding: 4px 10px; font-size: .82rem; }
   .turn .you { color: var(--mut); }
@@ -100,6 +103,7 @@
       <div id="minStock" class="numbers" style="color:var(--mut)"></div>
     </div>
     <div id="controls"></div>
+    <div id="assets" class="chips"></div>
     <div id="previewWrap" style="position:relative">
       <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
         <button id="btn3d" class="small">3D</button>
@@ -117,7 +121,9 @@
       <button id="dlNc" class="ghost" disabled>Download .nc</button>
       <button id="saveRecipe" class="ghost small">Save recipe</button>
       <button id="openRecipe" class="ghost small">Open recipe…</button>
+      <button id="addAsset" class="ghost small">Add image/graphic…</button>
       <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
+      <input id="assetFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" style="display:none">
     </div>
     <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must fixture. The 3D view is the simulated cut surface (drag to rotate); 2D shows the toolpath. Exports unlock only on VERIFIED. First run cuts air.</div>
     <details>

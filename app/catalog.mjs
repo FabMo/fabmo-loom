@@ -21,6 +21,8 @@ import { generateBore } from '../strategies/bore.js';
 import { generateChamfer, imprintChamfer } from '../strategies/chamfer.js';
 import { generateSurfaceRaster } from '../strategies/surface-raster.js';
 import { coverageCurve, pickChainSlotAware, regionArea, formatDiameter } from '../strategies/tool-select.js';
+import ClipperLib from '../vendor/clipper.js';
+import { FONTS, DEFAULT_FONT } from './fonts.mjs';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -87,19 +89,54 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   return ring;
 }
 
+// Union overlapping glyph outlines into clean regions. Connected scripts
+// (Pacifico) overlap BETWEEN letters and decorative faces overlap within
+// them — the medial axis would double-carve every overlap. Disjoint text
+// passes through geometrically unchanged (Clipper also normalizes ring
+// orientation for free). textToRegions emits holes CCW like outers, so
+// holes are reversed going in; everything comes back out CCW to keep the
+// downstream convention.
+const CLIP_SCALE = 1e6;
+function unionTextRegions(regions) {
+  if (!regions.length) return regions;
+  const toClip = ring => ring.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) }));
+  const fromClip = path => path.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE }));
+  const c = new ClipperLib.Clipper();
+  for (const r of regions) {
+    c.AddPath(toClip(r.outer), ClipperLib.PolyType.ptSubject, true);
+    for (const h of r.holes) c.AddPath(toClip([...h].reverse()), ClipperLib.PolyType.ptSubject, true);
+  }
+  const tree = new ClipperLib.PolyTree();
+  c.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  const ex = ClipperLib.JS.PolyTreeToExPolygons(tree);
+  return ex
+    .filter(e => e.outer?.length >= 3)
+    .map(e => ({ outer: ccw(fromClip(e.outer)), holes: (e.holes ?? []).map(h => ccw(fromClip(h))) }));
+}
+
+// The text strategies share this guard: an unknown/unloaded font is a
+// friendly error naming the shelf, not a crash.
+function fontBufferOf(ctx, fontId) {
+  const buf = ctx.fonts?.[fontId];
+  if (!buf) {
+    return { error: `unknown font "${fontId}" — available: ${FONTS.map(f => f.id).join(', ')}` };
+  }
+  return { buf };
+}
+
 // Center text geometry on the content so far — a monogram added to a
 // coaster lands with its VISUAL center (bbox center) on the pocket's
 // center, not its bottom-left corner ("center the letter" means the
 // letter's middle, to a human). Returns translated COPIES: the text
 // cache stays in its own frame so repeat ops agree.
-function centeredText(ctx, text, letterHeight) {
-  const { regions, width, height } = textGeometry(ctx, text, letterHeight);
+function centeredText(ctx, text, letterHeight, fontId) {
+  const { regions, width, height, merged } = textGeometry(ctx, text, letterHeight, fontId);
   const cc = contentCenter(ctx);
   const dx = cc.x - width / 2, dy = cc.y - height / 2;
   const shift = (ring) => ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
   return {
     regions: regions.map(r => ({ outer: shift(r.outer), holes: r.holes.map(shift) })),
-    width, height,
+    width, height, merged,
     bbox: { minX: dx, minY: dy, maxX: dx + width, maxY: dy + height },
   };
 }
@@ -195,33 +232,68 @@ function chamferRimOp(ring, width, feedRate, safeZ) {
 }
 
 // Shared text→regions step for the text strategies. ctx caches by
-// (text, letterHeight) so multiple ops over the same text agree exactly.
-function textGeometry(ctx, text, letterHeight) {
-  const key = `${letterHeight}|${text}`;
+// (font, text, letterHeight) so multiple ops over the same text agree
+// exactly. Regions are unioned here so every consumer (medial axis,
+// pocketing, previews) sees overlap-free geometry.
+function textGeometry(ctx, text, letterHeight, fontId) {
+  const key = `${fontId}|${letterHeight}|${text}`;
   if (!ctx._textCache) ctx._textCache = new Map();
   if (!ctx._textCache.has(key)) {
-    ctx._textCache.set(key, textToRegions(ctx.fontBuffer, text, { letterHeight }));
+    const raw = textToRegions(ctx.fonts[fontId], text, { letterHeight });
+    const regions = unionTextRegions(raw.regions);
+    // merged = glyphs actually fused (connected script): downstream can
+    // spend extra care on the seams the fusion created
+    ctx._textCache.set(key, { ...raw, regions, merged: regions.length !== raw.regions.length });
   }
   return ctx._textCache.get(key);
 }
+
+// One font param spec shared by the text entries; the doc is the model's
+// entire knowledge of the shelf, so each id carries its blurb.
+const FONT_PARAM = {
+  type: 'string', default: DEFAULT_FONT, bindable: true,
+  doc: `typeface id — ${FONTS.map(f => `"${f.id}" = ${f.blurb}`).join('; ')}. When the user may want to switch, bind it to a "choice" control whose options are these ids`,
+};
 
 export const CATALOG = {
   vcarve_text: {
     doc: 'V-carve text with a vee bit along the medial axis of real font outlines (classic engraved-sign look, variable-width strokes). Counters (the holes of e/o/p) are preserved. Adds flat-bottom clearing automatically where strokes are wider than the bit reaches.',
     params: {
       text: { type: 'string', doc: 'the text to engrave — bind to a text control so users can retype it', bindable: true },
+      font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1, min: 0.2, max: 4, doc: 'total text height in inches, descenders included', bindable: true },
       includedAngle: { type: 'number', default: 60, doc: 'vee bit included angle, degrees (30/60/90/120)' },
       maxDepth: { type: 'number', default: 0.2, doc: 'depth cap in inches; wider strokes bottom out here' },
       feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
+      const fe = fontBufferOf(ctx, p.font);
+      if (fe.error) return fe;
+      const { regions, bbox, merged } = centeredText(ctx, p.text, p.letterHeight, p.font);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
       noteContent(ctx, regions.map(r => r.outer));
-      const ma = computeMedialAxis(regions, {});
+      // adaptive boundary sampling, but only for FUSED text: the medial
+      // axis is a Voronoi approximation, and at the default density the
+      // pinched seams a connected script's union creates (Pacifico)
+      // starve for sites — vertices stray a few thou outside the outline
+      // and the verifier rightly rejects the motion. Target ~0.015"
+      // spacing there; disjoint letterforms keep the fast default.
+      let samplingDensity;
+      if (merged) {
+        let perimeter = 0;
+        for (const r of regions) {
+          for (const ring of [r.outer, ...r.holes]) {
+            for (let i = 0; i < ring.length; i++) {
+              const j = (i + 1) % ring.length;
+              perimeter += Math.hypot(ring[j].x - ring[i].x, ring[j].y - ring[i].y);
+            }
+          }
+        }
+        samplingDensity = Math.min(6000, Math.max(500, Math.round(perimeter / 0.015)));
+      }
+      const ma = computeMedialAxis(regions, samplingDensity ? { samplingDensity } : {});
       const moves = generateVEngraveToolpath(ma, vBit, machine);
       const halfAngle = (p.includedAngle / 2) * Math.PI / 180;
       const maxR = p.maxDepth * Math.tan(halfAngle);
@@ -243,12 +315,15 @@ export const CATALOG = {
     doc: 'Trace the OUTLINES of text at a single shallow depth (stencil/outline look, constant-width line) instead of V-carving the body. Uses the same vee bit tip.',
     params: {
       text: { type: 'string', doc: 'the text to outline — bind to a text control', bindable: true },
+      font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1, min: 0.2, max: 4, doc: 'total text height in inches', bindable: true },
       depth: { type: 'number', default: 0.04, doc: 'single-pass outline depth in inches' },
       feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
+      const fe = fontBufferOf(ctx, p.font);
+      if (fe.error) return fe;
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight, p.font);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const moves = [];
@@ -279,6 +354,7 @@ export const CATALOG = {
     doc: 'Pocket the text INTO the surface with a small endmill — flat-bottomed letterforms at constant depth, the look for paint-fill signs and inlays (vcarve_text is the variable-depth carved look instead). Counters preserved. Strokes narrower than the bit get a grazing slot-fit; genuinely too-narrow text fails with advice (bigger letters or a smaller bit). Optional REST cleanup: a second, smaller bit pockets only the corners the bulk bit could not reach (adds a toolchange).',
     params: {
       text: { type: 'string', doc: 'the text to pocket — bind to a text control', bindable: true },
+      font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1.5, min: 0.3, max: 6, doc: 'total text height in inches; pocketing wants larger letters than V-carving', bindable: true },
       depth: { type: 'number', default: 0.25, doc: 'pocket floor depth, inches' },
       toolDiameter: { type: 'number', default: 0.125, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
@@ -286,7 +362,9 @@ export const CATALOG = {
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
     },
     run(p, ctx) {
-      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight);
+      const fe = fontBufferOf(ctx, p.font);
+      if (fe.error) return fe;
+      const { regions, bbox } = centeredText(ctx, p.text, p.letterHeight, p.font);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const params = {

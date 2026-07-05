@@ -15,10 +15,14 @@ import { fileURLToPath } from 'node:url';
 import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
+import { FONTS } from './fonts.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const buf = readFileSync(join(here, '..', 'examples', 'engraver', 'assets', 'DejaVuSans-Bold.ttf'));
-const FONT = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+const FONT_SHELF = {};
+for (const f of FONTS) {
+  const b = readFileSync(join(here, f.file));
+  FONT_SHELF[f.id] = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+}
 
 let failures = 0;
 const fail = (msg) => { failures++; console.log(`  ✗ FAIL ${msg}`); };
@@ -28,7 +32,7 @@ const quiet = (fn) => {
   console.log = () => {};
   try { return fn(); } finally { console.log = orig; }
 };
-const run = (recipe, values) => quiet(() => runRecipe(recipe, values ?? controlDefaults(recipe), FONT));
+const run = (recipe, values) => quiet(() => runRecipe(recipe, values ?? controlDefaults(recipe), FONT_SHELF));
 
 // ---------------- 1. empty recipe is honest ----------------
 
@@ -575,6 +579,132 @@ console.log('--- auto tool: coverage knee picks the chain, pick is reported ---'
   });
   if (!none.ok && none.errors[0]?.includes('drawer')) pass(`nothing earns: "${none.errors[0].slice(0, 70)}..."`);
   else fail(`no-bit case leaked: ${JSON.stringify(none.errors)}`);
+}
+
+// ---------------- 16. the font shelf: every face carves verified ----------------
+// The union pass is what makes this safe: connected scripts (Pacifico)
+// overlap between letters — without the union the medial axis would
+// double-carve every join. Overlap collapse is measured, not assumed.
+
+console.log('--- fonts: whole shelf V-carves verified; script overlaps union ---');
+{
+  for (const f of FONTS) {
+    const r = run({
+      ...structuredClone(EMPTY_RECIPE),
+      pipeline: [{ id: 'e', strategy: 'vcarve_text', params: { text: 'Beryl', letterHeight: 1, font: f.id } }],
+    });
+    const t = r.report?.stats.targets?.[0];
+    if (r.ok && t?.gouges === 0) pass(`${f.id}: "Beryl" verified (${t.samples} samples, 0 gouges)`);
+    else fail(`${f.id} failed: ok=${r.ok} ${r.errors?.join(' | ')}`);
+  }
+
+  // connected script: letters merge — the union must produce FEWER regions
+  // than glyphs, and the result must still verify
+  const script = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'e', strategy: 'vcarve_text', params: { text: 'hello', letterHeight: 1, font: 'script' } }],
+  });
+  const nRegions = script.preview?.built?.[0]?.r.previewRegions?.length ?? 99;
+  if (script.ok && nRegions < 5) pass(`Pacifico "hello": 5 letters union into ${nRegions} region(s), still verified`);
+  else fail(`script union failed: ok=${script.ok} regions=${nRegions} ${script.errors?.join(' | ')}`);
+
+  // regression (caught live in the browser 2026-07-05): at the default
+  // medial-axis density, the union seams of "Amelia" put 6 toolpath
+  // samples a few thou outside the outline — fused text now buys adaptive
+  // sampling and the full tag recipe verifies
+  const amelia = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Amelia', font: 'script' } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.25, tabs: true, chamfer: 0.05 } },
+    ],
+  });
+  if (amelia.ok) pass('script "Amelia" + chamfered tab tag: seam-dense medial axis verifies');
+  else fail(`Amelia regression: ${amelia.errors?.join(' | ')}`);
+
+  // unknown font: friendly error naming the shelf
+  const bad = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'e', strategy: 'vcarve_text', params: { text: 'Hi', font: 'comic-sans' } }],
+  });
+  if (!bad.ok && bad.errors[0]?.includes('available:')) pass(`unknown font refused: "${bad.errors[0].slice(0, 60)}..."`);
+  else fail(`unknown font leaked: ${JSON.stringify(bad.errors)}`);
+}
+
+// ---------------- 17. choice controls: dropdowns for fixed sets ----------------
+
+console.log('--- choice control: font picker as a dropdown ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, {
+    summary: 'Name tags with a font picker.',
+    actions: [
+      { kind: 'add_control', control: { id: 'name', type: 'text', label: 'Name', default: 'Ida' } },
+      { kind: 'add_control', control: { id: 'face', type: 'choice', label: 'Font', default: 'script', options: FONTS.map(f => ({ value: f.id, label: f.label })) } },
+      { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, font: { ctrl: 'face' } } } },
+    ],
+    declined: [],
+  });
+  rec = res.recipe;
+  const r = run(rec);
+  if (res.applied.length === 3 && r.ok) pass('font bound to a choice control, default "script", verified');
+  else fail(`choice control failed: applied=${res.applied.length} ok=${r.ok} ${r.errors?.join(' | ')}`);
+
+  // switching the dropdown re-runs with the other face
+  const swapped = run(rec, { ...controlDefaults(rec), face: 'condensed' });
+  if (swapped.ok) pass('dropdown switch to "condensed" re-verifies');
+  else fail(`font switch failed: ${swapped.errors?.join(' | ')}`);
+
+  // a choice control without options is rejected; a bad default snaps to
+  // the first option
+  const bad = applyActions(rec, {
+    summary: 'x', declined: [],
+    actions: [{ kind: 'add_control', control: { id: 'c2', type: 'choice', label: 'X' } }],
+  });
+  if (bad.skipped[0]?.includes('needs options')) pass('optionless choice control skipped with reason');
+  else fail(`optionless choice leaked: ${JSON.stringify(bad.applied)}`);
+  const snap = applyActions(rec, {
+    summary: 'x', declined: [],
+    actions: [{ kind: 'add_control', control: { id: 'c3', type: 'choice', options: [{ value: 'a' }, { value: 'b' }], default: 'zzz' } }],
+  });
+  const c3 = snap.recipe.controls.find(c => c.id === 'c3');
+  if (c3?.default === 'a') pass('out-of-set default snaps to the first option');
+  else fail(`bad default kept: ${JSON.stringify(c3)}`);
+}
+
+// ---------------- 18. uploaded assets: stored, surfaced, honestly unusable ----------------
+// Upload happens in the browser; here we assert the document and prompt
+// sides: assets ride the recipe, the LLM sees their names but never their
+// bytes, and the runtime ignores them.
+
+console.log('--- assets: in the document, out of the prompt ---');
+{
+  const rec = structuredClone(EMPTY_RECIPE);
+  rec.assets.push(
+    { id: 'logo.svg', name: 'logo.svg', kind: 'svg', data: '<svg>' + 'x'.repeat(5000) + '</svg>' },
+    { id: 'dog.png', name: 'dog.png', kind: 'image', data: 'data:image/png;base64,' + 'A'.repeat(20000), width: 640, height: 480 },
+  );
+  rec.pipeline.push({ id: 'e', strategy: 'vcarve_text', params: { text: 'Rex' } });
+
+  const req = buildParseRequest(rec, 'engrave the dog photo');
+  const sys = req.system;
+  if (sys.includes('"dog.png" (image, 640×480px)') && sys.includes('"logo.svg" (svg)') && sys.includes('DECLINE')) {
+    pass('prompt lists both assets with decline guidance');
+  } else fail('asset section missing from prompt');
+  if (!sys.includes('AAAAA') && !sys.includes('xxxxx') && sys.includes('chars omitted')) {
+    pass(`asset bytes elided from the prompt (${sys.length.toLocaleString()} chars total)`);
+  } else fail(`asset bytes leaked into the prompt (${sys.length} chars)`);
+
+  // the runtime runs the recipe as if the assets were not there
+  const r = run(rec);
+  if (r.ok) pass('runtime ignores assets: recipe still verifies');
+  else fail(`assets broke the runtime: ${r.errors?.join(' | ')}`);
+
+  // and they survive the apply cycle untouched
+  const out = applyActions(rec, { summary: 'rename', actions: [{ kind: 'set_name', name: 'Rex tag' }], declined: [] });
+  if (out.recipe.assets.length === 2 && out.recipe.assets[1].data.length === rec.assets[1].data.length) {
+    pass('assets ride through applyActions intact');
+  } else fail('applyActions disturbed assets');
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

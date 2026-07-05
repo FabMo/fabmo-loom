@@ -31,9 +31,17 @@ export const ACTION_TOOL = {
             control: {
               type: 'object', description: 'add_control / set_control',
               properties: {
-                id: { type: 'string' }, type: { type: 'string', enum: ['text', 'number'] },
+                id: { type: 'string' }, type: { type: 'string', enum: ['text', 'number', 'choice'] },
                 label: { type: 'string' }, default: {},
                 min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
+                options: {
+                  type: 'array', description: 'choice controls only: the selectable values',
+                  items: {
+                    type: 'object',
+                    properties: { value: { type: 'string' }, label: { type: 'string' } },
+                    required: ['value'],
+                  },
+                },
               },
             },
             operation: {
@@ -69,15 +77,29 @@ export const ACTION_TOOL = {
 
 // ------------------------------------------------------- grounding prompt
 
+// The recipe as shown to the model: asset payloads (base64 images, svg
+// text) are replaced by a byte count — they would drown the prompt and the
+// model has no use for the bytes (it references assets by name/id only).
+export function promptRecipeView(recipe) {
+  if (!recipe.assets?.length) return recipe;
+  return {
+    ...recipe,
+    assets: recipe.assets.map(a => ({ ...a, data: `<${a.data?.length ?? 0} chars omitted>` })),
+  };
+}
+
 export function buildSystemPrompt(recipe) {
+  const assetSection = recipe.assets?.length
+    ? `\n\nUPLOADED ASSETS (embedded in the recipe document, but NOT yet usable: no strategy in the catalog can carve images or graphics yet. If the user asks to engrave/carve/trace one, DECLINE that part — what: the asset use, why: "image/graphic strategies are not in the catalog yet; the upload is stored and ready for when they arrive" — and still apply any other part of the request):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}`
+    : '';
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
 AVAILABLE STRATEGIES (the complete list — nothing else exists):
-${catalogDoc()}
+${catalogDoc()}${assetSection}
 
 RULES:
 - Only these strategies and their listed params. A request needing anything else (images, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
-- Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops.
+- Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
@@ -85,7 +107,7 @@ RULES:
 - Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.
 
 CURRENT RECIPE:
-${JSON.stringify(recipe, null, 1)}`;
+${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 }
 
 export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8' } = {}) {
@@ -139,9 +161,17 @@ export function applyActions(recipe, payload) {
       }
       case 'add_control': {
         const c = a.control;
-        if (!c?.id || !['text', 'number'].includes(c.type)) { skipped.push('add_control: bad control'); break; }
+        if (!c?.id || !['text', 'number', 'choice'].includes(c.type)) { skipped.push('add_control: bad control'); break; }
         if (ctrlIds().has(c.id)) { skipped.push(`add_control: "${c.id}" exists`); break; }
-        next.controls.push({ id: c.id, type: c.type, label: c.label ?? c.id, default: c.default ?? (c.type === 'text' ? '' : 0), min: c.min, max: c.max, step: c.step });
+        let options;
+        if (c.type === 'choice') {
+          options = (c.options ?? []).filter(o => o && typeof o.value === 'string' && o.value);
+          if (!options.length) { skipped.push(`add_control "${c.id}": choice control needs options`); break; }
+        }
+        const fallback = c.type === 'text' ? '' : c.type === 'choice' ? options[0].value : 0;
+        let dflt = c.default ?? fallback;
+        if (c.type === 'choice' && !options.some(o => o.value === dflt)) dflt = options[0].value;
+        next.controls.push({ id: c.id, type: c.type, label: c.label ?? c.id, default: dflt, min: c.min, max: c.max, step: c.step, options });
         applied.push(`control "${c.id}"`);
         break;
       }
@@ -149,6 +179,13 @@ export function applyActions(recipe, payload) {
         const c = next.controls.find(x => x.id === (a.control?.id ?? a.id));
         if (!c) { skipped.push(`set_control: no "${a.control?.id ?? a.id}"`); break; }
         for (const k of ['label', 'default', 'min', 'max', 'step']) if (a.control?.[k] !== undefined) c[k] = a.control[k];
+        if (c.type === 'choice' && a.control?.options !== undefined) {
+          const options = (a.control.options ?? []).filter(o => o && typeof o.value === 'string' && o.value);
+          if (options.length) {
+            c.options = options;
+            if (!options.some(o => o.value === c.default)) c.default = options[0].value;
+          }
+        }
         applied.push(`control "${c.id}" updated`);
         break;
       }
