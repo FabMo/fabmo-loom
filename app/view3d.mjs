@@ -14,6 +14,8 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(width, height, false);
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.domElement.style.cssText = 'width:100%; height:auto; display:block; border-radius:10px; border:1px solid #e3e1d8;';
   container.append(renderer.domElement);
 
@@ -23,13 +25,35 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
   const camera = new THREE.PerspectiveCamera(40, width / height, 0.05, 200);
   camera.up.set(0, 0, 1);
 
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8272, 1.0));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-  sun.position.set(2, -3, 5);
+  // more directional than ambient: groove walls must shade differently
+  // from the flat top or carves read as painted lines. The sun casts
+  // shadows — a raking light self-shadowing the grooves is the cue that
+  // finally makes 0.1"-deep carving read as depth at board scale.
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8272, 0.55));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.9);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(4096, 4096);
+  // bias tuned for engraving-scale features: normalBias comparable to a
+  // groove width erases exactly the self-shadowing that reads as depth
+  sun.shadow.bias = -0.00005;
+  sun.shadow.normalBias = 0.001;
   scene.add(sun);
+  scene.add(sun.target);
   const fill = new THREE.DirectionalLight(0xfff4e0, 0.5);
   fill.position.set(-3, 2, -2);   // underside fill so low orbits stay readable
   scene.add(fill);
+
+  // aim the raking sun and fit its shadow camera to this stock
+  function placeSun(stock) {
+    const cx = stock.w / 2, cy = stock.h / 2;
+    const span = Math.max(stock.w, stock.h);
+    sun.position.set(cx + span * 0.7, cy - span * 0.9, span * 0.55);
+    sun.target.position.set(cx, cy, 0);
+    const sc = sun.shadow.camera;
+    sc.left = -span; sc.right = span; sc.top = span; sc.bottom = -span;
+    sc.near = 0.05; sc.far = span * 4;
+    sc.updateProjectionMatrix();
+  }
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = false;
@@ -59,10 +83,17 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
   /**
    * @param {ReturnType<import('./sim.mjs').simulateJob>|null} sim
    * @param {{w,h,thickness}} stock
+   * @param {number} zScale  vertical exaggeration (display-only; the whole
+   *   solid scales together, and the UI labels it — engraving depth is a
+   *   few percent of board span and reads flat at true scale)
+   * @param {number} [tintRange]  depth (positive inches) that maps to the
+   *   full cut tint — pass the job's FEATURE depth so an engraving next to
+   *   a through cut still uses the whole color scale
    */
-  function update(sim, stock) {
+  function update(sim, stock, zScale = 1, tintRange = null) {
     disposeGroup();
     group = new THREE.Group();
+    group.scale.z = zScale;
 
     // stock block, top face a hair below Z=0 so the heightfield owns the surface
     const t = stock.thickness;
@@ -71,6 +102,7 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
       new THREE.MeshStandardMaterial({ color: SIDE, roughness: 0.9 }),
     );
     box.position.set(stock.w / 2, stock.h / 2, -(t + 0.002) / 2);
+    box.receiveShadow = true;
     group.add(box);
 
     if (sim) {
@@ -79,6 +111,10 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
       const pos = new Float32Array(cols * rows * 3);
       const col = new Float32Array(cols * rows * 3);
       const tmp = new THREE.Color();
+      // depth tint normalized to THIS job's feature depth: a 0.05"
+      // engraving uses the whole tint scale instead of 10% of a
+      // through-cut's
+      const depthRange = Math.max(0.03, tintRange ?? -sim.minZ);
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           const i = r * cols + c;
@@ -86,8 +122,18 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
           pos[i * 3] = c * dx;
           pos[i * 3 + 1] = r * dx;
           pos[i * 3 + 2] = z;
-          const frac = Math.min(1, -grid[i] / Math.max(t, 1e-6));
+          // sub-linear ramp: shallow cuts (engraving on a thick board)
+          // still pick up a readable share of the tint scale
+          const frac = Math.pow(Math.min(1, -grid[i] / depthRange), 0.6);
           tmp.copy(BASE).lerp(CUT, frac === 0 ? 0 : 0.25 + 0.75 * frac);
+          // hillshade baked into vertex color: darken by local slope so
+          // groove walls stay readable from any orbit angle (the classic
+          // heightfield relief cue; lighting alone washes out at 3/4 view)
+          const zl = grid[i - (c > 0 ? 1 : 0)], zr = grid[i + (c < cols - 1 ? 1 : 0)];
+          const zd = grid[i - (r > 0 ? cols : 0)], zu = grid[i + (r < rows - 1 ? cols : 0)];
+          const slope = Math.hypot(zr - zl, zu - zd) / (2 * dx);
+          const shade = 1 - 0.45 * Math.min(1, slope / 1.8);
+          tmp.multiplyScalar(shade);
           col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
         }
       }
@@ -104,14 +150,20 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
       geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
       geo.setIndex(new THREE.BufferAttribute(idx, 1));
       geo.computeVertexNormals();
-      group.add(new THREE.Mesh(geo,
-        new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 })));
+      const mesh = new THREE.Mesh(geo,
+        new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 }));
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
     }
 
     scene.add(group);
+    placeSun(stock);
     frame(stock);
     renderer.render(scene, camera);
   }
 
-  return { update, domElement: renderer.domElement };
+  // camera/controls/scene exposed for deterministic poses and geometry
+  // probes in headless checks
+  return { update, domElement: renderer.domElement, camera, controls, scene, render: () => renderer.render(scene, camera) };
 }

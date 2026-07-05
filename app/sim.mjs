@@ -24,8 +24,11 @@ import { walkMoves } from '../ir/moves.js';
  * @returns {{ grid:Float32Array, cols, rows, dx, minZ }}  grid[r*cols+c] = surface Z (0 = untouched)
  */
 export function simulateJob(built, placement, stock, opts = {}) {
-  const maxCells = opts.maxCells ?? 260000;
-  const dx = Math.max(0.008, Math.sqrt((stock.w * stock.h) / maxCells));
+  // resolution sized for V-carve grooves: an engraving stroke is a few
+  // hundredths wide, so the grid must resolve a few thousandths or the
+  // 3D preview renders carves as flat tinted lines
+  const maxCells = opts.maxCells ?? 1200000;
+  const dx = Math.max(0.004, Math.sqrt((stock.w * stock.h) / maxCells));
   const cols = Math.max(2, Math.round(stock.w / dx) + 1);
   const rows = Math.max(2, Math.round(stock.h / dx) + 1);
   const grid = new Float32Array(cols * rows); // 0 = stock top
