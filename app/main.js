@@ -88,6 +88,8 @@ function render() {
   const r = result;
   const targetLine = (tt) => tt.type === 'profile'
     ? `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.intrusionArea ?? 0}</b> sq in intrusion · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`
+    : tt.type === 'heightmap'
+    ? `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.gouges}</b> gouges · <b>${tt.maskViolations}</b> mask escapes — <i>${tt.name}</i>`
     : `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.gouges}</b> gouges · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`;
   const targetLines = (r.report?.stats.targets ?? []).map(targetLine).join('<br>');
 
@@ -177,6 +179,17 @@ function draw() {
       ctx.setLineDash([6, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+    if (r.previewHoles?.length) {
+      ctx.strokeStyle = 'rgba(90,90,100,0.7)';
+      ctx.fillStyle = 'rgba(120,120,125,0.16)';
+      ctx.lineWidth = 1;
+      for (const h of r.previewHoles) {
+        ctx.beginPath();
+        ctx.arc(X(h.x + place.x), Y(h.y + place.y), h.r * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
     if (r.previewTabs?.length) {
       ctx.fillStyle = '#c9a86a';

@@ -76,10 +76,10 @@ AVAILABLE STRATEGIES (the complete list — nothing else exists):
 ${catalogDoc()}
 
 RULES:
-- Only these strategies and their listed params. A request needing anything else (holes, images, other fonts, 3D, rotation...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
+- Only these strategies and their listed params. A request needing anything else (images, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops.
 - Params marked bindable are the usual candidates; other params are usually literals.
-- Operation order is machining order: engraving and pockets first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part.
+- Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
 - Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.

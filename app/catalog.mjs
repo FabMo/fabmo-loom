@@ -17,6 +17,10 @@ import { generateVEngraveToolpath, generatePocketPasses } from '../vendor/v_engr
 import { generateProfile } from '../strategies/profile.js';
 import { generatePocket } from '../strategies/pocket.js';
 import { generateRestPocket } from '../strategies/rest.js';
+import { generateBore } from '../strategies/bore.js';
+import { generateChamfer, imprintChamfer } from '../strategies/chamfer.js';
+import { generateSurfaceRaster } from '../strategies/surface-raster.js';
+import { coverageCurve, pickChainSlotAware, regionArea, formatDiameter } from '../strategies/tool-select.js';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -97,6 +101,96 @@ function centeredText(ctx, text, letterHeight) {
     regions: regions.map(r => ({ outer: shift(r.outer), holes: r.holes.map(shift) })),
     width, height,
     bbox: { minX: dx, minY: dy, maxX: dx + width, maxY: dy + height },
+  };
+}
+
+// The standard drawer auto tool selection shops from (toolDiameter = 0).
+const DRAWER = [0.25, 0.125, 0.0625, 0.03125];
+
+// Coverage-knee tool selection aggregated across a set of regions: sum the
+// per-region coverage curves, then pickChainSlotAware — the largest bit
+// whose coverage clears the knee thresholds, plus any smaller bits whose
+// marginal corner area earns a rest pass. Returns the chain ({d, prev}
+// pairs, bulk first) and a user-facing note naming the pick.
+function autoToolChain(regions, depth) {
+  const bits = DRAWER.map(d => ({ diameter: d }));
+  let total = 0;
+  const agg = new Map(DRAWER.map(d => [d, { area: 0, slotArea: 0, excluded: null }]));
+  for (const region of regions) {
+    total += regionArea(region);
+    for (const e of coverageCurve(region, depth, bits)) {
+      const a = agg.get(e.diameter);
+      if (e.excluded) { a.excluded = e.excluded; continue; }
+      a.area += e.area;
+      a.slotArea += e.slotArea ?? e.area;
+    }
+  }
+  if (!(total > 0)) return { error: 'nothing to pocket' };
+  const curve = DRAWER.map(d => {
+    const a = agg.get(d);
+    return {
+      diameter: d, excluded: a.excluded ?? undefined,
+      frac: a.area / total, area: a.area,
+      slotFrac: a.slotArea / total, slotArea: a.slotArea,
+    };
+  });
+  const { chain, slot } = pickChainSlotAware(curve, total);
+  if (!chain.length) {
+    return { error: `no bit in the drawer (${DRAWER.map(formatDiameter).join(', ')}) earns a cut at ${depth}" deep — enlarge the feature or shallow the pocket` };
+  }
+  const seq = chain.map((i, k) => ({ d: curve[i].diameter, prev: k === 0 ? null : curve[chain[k - 1]].diameter }));
+  // one decimal: a rest pass often earns its keep on corner blobs that
+  // round away at integer percent ("100% → 100%" reads as a no-op)
+  const pct = f => (f * 100).toFixed(1);
+  const cov = chain.map(i => (slot ? curve[i].slotFrac : curve[i].frac));
+  const note = `auto tool: ${seq.map(s => formatDiameter(s.d)).join(' + ')} — coverage ${cov.map(pct).join('% → ')}%${slot ? ' (slot-fit centerline rescue)' : ''}`;
+  return { chain: seq, note };
+}
+
+// Edge-break sub-op for the cutout entries: a 90° V-bit rides the cutout
+// ring (CCW = material to the LEFT of travel = the part's top rim) cutting
+// a 45° face `width` wide. The declared target is the INTENDED surface —
+// flat stock imprinted with the chamfer cone over the band — so the
+// verifier measures the vee's motion against intent, independent of the
+// kernel that generated it. allowOverlap: the band deliberately straddles
+// the rim the profile kerf abuts.
+function chamferRimOp(ring, width, feedRate, safeZ) {
+  const VEE = { kind: 'vee', diameter: 0.5, angleDeg: 90 }; // cuts a 45° face
+  // flat-stock heightmap over the band, imprinted with the intent
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const q of ring) {
+    minX = Math.min(minX, q.x); minY = Math.min(minY, q.y);
+    maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y);
+  }
+  const pad = width + 0.1;
+  const span = Math.max(maxX - minX, maxY - minY) + 2 * pad;
+  const cell = Math.max(0.008, span / 400);
+  const cols = Math.ceil((maxX - minX + 2 * pad) / cell) + 1;
+  const rows = Math.ceil((maxY - minY + 2 * pad) / cell) + 1;
+  const flat = {
+    originX: minX - pad, originY: minY - pad,
+    dx: cell, dy: cell, cols, rows,
+    heights: new Float64Array(cols * rows),
+  };
+  const edge = { points: ring, closed: true };
+  const surface = imprintChamfer(flat, edge, width, 45);
+  const g = generateChamfer(edge, VEE, {
+    width, angleDeg: 45, depthPerPass: 0.1, safeZ, surface, outsideZ: 0,
+  });
+  if (!g.moves.length) {
+    return { error: `chamfer failed: ${g.warnings.join('; ') || 'no motion generated'}` };
+  }
+  return {
+    op: {
+      subName: 'chamfer rim',
+      allowOverlap: true,
+      tool: { name: '90° V-bit', diameter: VEE.diameter, kind: 'vee', angleDeg: 90 },
+      cutter: { type: 'vee', includedAngle: 90 },
+      feedRate, plungeRate: 30,
+      moves: g.moves,
+      target: g.target,
+      warnings: g.warnings,
+    },
   };
 }
 
@@ -187,7 +281,7 @@ export const CATALOG = {
       text: { type: 'string', doc: 'the text to pocket — bind to a text control', bindable: true },
       letterHeight: { type: 'number', default: 1.5, min: 0.3, max: 6, doc: 'total text height in inches; pocketing wants larger letters than V-carving', bindable: true },
       depth: { type: 'number', default: 0.25, doc: 'pocket floor depth, inches' },
-      toolDiameter: { type: 'number', default: 0.125, doc: 'bulk endmill diameter, inches' },
+      toolDiameter: { type: 'number', default: 0.125, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
       restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit (e.g. 0.0625) that cleans just the corners' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
     },
@@ -199,49 +293,47 @@ export const CATALOG = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
       };
-      const bulk = { moves: [], rings: [] };
-      for (const region of regions) {
-        const g = generatePocket(region, { diameter: p.toolDiameter }, params);
-        if (!g.moves.length) continue;
-        if (bulk.moves.length) bulk.moves.push({ type: 'rapid', z: ctx.safeZ });
-        bulk.moves.push(...g.moves);
-        if (g.target) bulk.rings.push(...g.target.rings);
+      let chain, autoWarnings = [];
+      if (p.toolDiameter === 0) {
+        const auto = autoToolChain(regions, p.depth);
+        if (auto.error) return { error: `"${p.text}" at ${p.letterHeight}" letters: ${auto.error}` };
+        chain = auto.chain;
+        autoWarnings = [auto.note];
+      } else {
+        chain = [{ d: p.toolDiameter, prev: null }];
+        if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
+          chain.push({ d: p.restDiameter, prev: p.toolDiameter });
+        }
       }
-      if (!bulk.moves.length) {
-        return { error: `a ${p.toolDiameter}" bit does not fit anywhere in "${p.text}" at ${p.letterHeight}" letters — try larger letters or a smaller bit` };
-      }
-      const ops = [{
-        subName: 'bulk',
-        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
-        cutter: { type: 'flat', diameter: p.toolDiameter },
-        feedRate: p.feedRate, plungeRate: 30,
-        moves: bulk.moves,
-        target: { type: 'region', rings: bulk.rings, depth: p.depth },
-        previewRegions: regions,
-      }];
-      if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
-        const rest = { moves: [], rings: [] };
+      const ops = [];
+      for (const { d, prev } of chain) {
+        const acc = { moves: [], rings: [] };
         for (const region of regions) {
-          const g = generateRestPocket(region, p.toolDiameter, { diameter: p.restDiameter }, params);
+          const g = prev == null
+            ? generatePocket(region, { diameter: d }, params)
+            : generateRestPocket(region, prev, { diameter: d }, params);
           if (!g.moves.length) continue;
-          if (rest.moves.length) rest.moves.push({ type: 'rapid', z: ctx.safeZ });
-          rest.moves.push(...g.moves);
-          if (g.target) rest.rings.push(...g.target.rings);
+          if (acc.moves.length) acc.moves.push({ type: 'rapid', z: ctx.safeZ });
+          acc.moves.push(...g.moves);
+          if (g.target) acc.rings.push(...g.target.rings);
         }
-        if (rest.moves.length) {
-          ops.push({
-            subName: 'rest corners',
-            // rest recuts the cleared envelope at blob edges by design —
-            // declared, so the footprint-overlap check stays armed for
-            // everything that doesn't declare it
-            allowOverlap: true,
-            tool: { name: `${p.restDiameter}" endmill`, diameter: p.restDiameter },
-            cutter: { type: 'flat', diameter: p.restDiameter },
-            feedRate: p.feedRate, plungeRate: 30,
-            moves: rest.moves,
-            target: { type: 'region', rings: rest.rings, depth: p.depth },
-          });
+        if (prev == null && !acc.moves.length) {
+          return { error: `a ${d}" bit does not fit anywhere in "${p.text}" at ${p.letterHeight}" letters — try larger letters or a smaller bit` };
         }
+        if (!acc.moves.length) continue;
+        ops.push({
+          subName: prev == null ? 'bulk' : `rest ${formatDiameter(d)}`,
+          // rest recuts the cleared envelope at blob edges by design —
+          // declared, so the footprint-overlap check stays armed for
+          // everything that doesn't declare it
+          allowOverlap: prev != null,
+          tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
+          cutter: { type: 'flat', diameter: d },
+          feedRate: p.feedRate, plungeRate: 30,
+          moves: acc.moves,
+          target: { type: 'region', rings: acc.rings, depth: p.depth },
+          ...(prev == null ? { previewRegions: regions, warnings: autoWarnings } : {}),
+        });
       }
       return { ops, bbox };
     },
@@ -256,7 +348,7 @@ export const CATALOG = {
       height: { type: 'number', default: 1.5, doc: 'rectangle only: pocket height, inches', bindable: true },
       cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches' },
       depth: { type: 'number', default: 0.125, doc: 'pocket floor depth, inches', bindable: true },
-      toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches' },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
       restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit that cleans rectangle corners' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
     },
@@ -276,37 +368,170 @@ export const CATALOG = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
       };
-      const g = generatePocket(region, { diameter: p.toolDiameter }, params);
-      if (!g.moves.length) {
-        return { error: `a ${p.toolDiameter}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
+      let chain, autoWarnings = [];
+      if (p.toolDiameter === 0) {
+        const auto = autoToolChain([region], p.depth);
+        if (auto.error) return { error: `that ${p.shape} pocket: ${auto.error}` };
+        chain = auto.chain;
+        autoWarnings = [auto.note];
+      } else {
+        chain = [{ d: p.toolDiameter, prev: null }];
+        if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
+          chain.push({ d: p.restDiameter, prev: p.toolDiameter });
+        }
       }
       const bb = ring.reduce((a, q) => ({
         minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
         maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
       }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
-      const ops = [{
-        subName: 'bulk',
-        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
-        cutter: { type: 'flat', diameter: p.toolDiameter },
-        feedRate: p.feedRate, plungeRate: 30,
-        moves: g.moves,
-        target: g.target ?? { type: 'region', rings: [ring], depth: p.depth },
-        previewRegions: [{ outer: ring, holes: [] }],
-      }];
-      if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
-        const rg = generateRestPocket(region, p.toolDiameter, { diameter: p.restDiameter }, params);
-        if (rg.moves.length) {
-          ops.push({
-            subName: 'rest corners',
-            allowOverlap: true,
-            tool: { name: `${p.restDiameter}" endmill`, diameter: p.restDiameter },
-            feedRate: p.feedRate, plungeRate: 30,
-            moves: rg.moves,
-            target: rg.target ?? { type: 'region', rings: [ring], depth: p.depth },
-          });
+      const ops = [];
+      for (const { d, prev } of chain) {
+        const g = prev == null
+          ? generatePocket(region, { diameter: d }, params)
+          : generateRestPocket(region, prev, { diameter: d }, params);
+        if (prev == null && !g.moves.length) {
+          return { error: `a ${d}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
         }
+        if (!g.moves.length) continue;
+        ops.push({
+          subName: prev == null ? 'bulk' : `rest ${formatDiameter(d)}`,
+          allowOverlap: prev != null,
+          tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
+          cutter: { type: 'flat', diameter: d },
+          feedRate: p.feedRate, plungeRate: 30,
+          moves: g.moves,
+          target: g.target ?? { type: 'region', rings: [ring], depth: p.depth },
+          ...(prev == null ? { previewRegions: [{ outer: ring, holes: [] }], warnings: autoWarnings } : {}),
+        });
       }
       return { ops, bbox: bb };
+    },
+  },
+
+  dish_shape: {
+    doc: 'Carve a smooth round DISH — a shallow spherical bowl that feathers to nothing at its rim (no wall, no flat floor): candy dishes, spoon rests, coaster wells that cradle a rounded glass. Use pocket_shape instead when the user wants a FLAT floor or a crisp wall. A ballnose bit rasters the surface with gouge-free compensation and the motion is checked against the declared 3D surface. Centers on the content machined so far, or stands alone. Depth must be modest relative to the diameter (a spherical cap, at most a hemisphere).',
+    params: {
+      diameter: { type: 'number', default: 2.5, min: 0.5, max: 8, doc: 'dish rim diameter, inches', bindable: true },
+      depth: { type: 'number', default: 0.25, min: 0.05, max: 1, doc: 'dish depth at the center, inches', bindable: true },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'BALLNOSE bit diameter, inches — this strategy requires a ballnose' },
+      stepoverPct: { type: 'number', default: 18, min: 5, max: 45, doc: 'stepover as a percentage of the bit diameter; smaller = smoother finish, longer cut' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+    },
+    run(p, ctx) {
+      const r = p.diameter / 2;
+      if (p.depth >= r - 1e-9) {
+        return { error: `a ${p.depth}" deep dish needs a diameter over ${(2 * p.depth).toFixed(2)}" (spherical cap, at most a hemisphere)` };
+      }
+      // sphere through the rim (z=0 at ρ=r) and the bottom (z=-depth at ρ=0)
+      const Rs = (r * r + p.depth * p.depth) / (2 * p.depth);
+      const R = p.toolDiameter / 2;
+      const warnings = [];
+      if (R > Rs) {
+        warnings.push(`a ${p.toolDiameter}" ball is blunter than the dish's ${(2 * Rs).toFixed(2)}"-sphere bottom — the center will come out ball-shaped, not dish-shaped`);
+      }
+      const c = contentCenter(ctx);
+      // heightmap: the intended dish surface, grid extending ≥ R past the rim
+      const ext = r + R + 0.05;
+      const cell = Math.max(0.008, (2 * ext) / 400);
+      const cols = Math.ceil((2 * ext) / cell) + 1;
+      const rows = cols;
+      const heights = new Float64Array(cols * rows);
+      const originX = c.x - ext, originY = c.y - ext;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const rho = Math.hypot(originX + col * cell - c.x, originY + row * cell - c.y);
+          heights[row * cols + col] = rho >= r ? 0 : Math.min(0, (Rs - p.depth) - Math.sqrt(Rs * Rs - rho * rho));
+        }
+      }
+      const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX, originY };
+      const maskRing = circleRing(c.x, c.y, r);
+      const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
+        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        mask: { outer: maskRing, holes: [] }, outsideZ: 0,
+      });
+      if (!g.moves.length) {
+        return { error: `dish produced no cutting moves — ${g.warnings[0] ?? 'surface at stock top everywhere'}` };
+      }
+      noteContent(ctx, [maskRing]);
+      return {
+        tool: { name: `${p.toolDiameter}" ballnose`, diameter: p.toolDiameter, kind: 'ball' },
+        cutter: { type: 'ball', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: g.moves,
+        warnings: [...warnings, ...g.warnings],
+        target: g.target,
+        bbox: { minX: c.x - r, minY: c.y - r, maxX: c.x + r, maxY: c.y + r },
+        previewRegions: [{ outer: maskRing, holes: [] }],
+      };
+    },
+  },
+
+  bore_hole: {
+    doc: 'Drill a round HOLE — a hang hole for a tag, mounting/screw holes, dowel holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so the hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). Positions itself relative to the content machined so far: "above" is the classic hang hole over the text; "corners" places FOUR holes around the content (a later cutout will wrap them into the part\'s corners).',
+    params: {
+      diameter: { type: 'number', default: 0.25, min: 0.05, max: 1, doc: 'finished hole diameter, inches', bindable: true },
+      position: { type: 'string', default: 'above', doc: '"above", "below", "left", "right", or "center" of the content so far, or "corners" (4 holes around it)' },
+      gap: { type: 'number', default: 0.125, min: 0, doc: 'clearance from the content edge to the hole edge, inches (ignored for center)', bindable: true },
+      depth: { type: 'number', default: 0, doc: '0 = through the full stock thickness; otherwise hole depth in inches' },
+      toolDiameter: { type: 'number', default: 0.125, doc: 'endmill diameter, inches' },
+      feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
+    },
+    run(p, ctx) {
+      const r = p.diameter / 2;
+      if (p.diameter > 3 * p.toolDiameter + 1e-9) {
+        return { error: `a ${p.diameter}" hole is more than 3× the ${p.toolDiameter}" bit — one bore orbit would leave a core standing; use a bigger bit, or pocket_shape for a wide recess` };
+      }
+      const b = ctx.contentBBox;
+      const c = contentCenter(ctx);
+      let centers;
+      if (p.position === 'center' || !b) {
+        centers = [c];
+      } else if (p.position === 'above') {
+        centers = [{ x: c.x, y: b.maxY + p.gap + r }];
+      } else if (p.position === 'below') {
+        centers = [{ x: c.x, y: b.minY - p.gap - r }];
+      } else if (p.position === 'left') {
+        centers = [{ x: b.minX - p.gap - r, y: c.y }];
+      } else if (p.position === 'right') {
+        centers = [{ x: b.maxX + p.gap + r, y: c.y }];
+      } else if (p.position === 'corners') {
+        const o = p.gap + r;
+        centers = [
+          { x: b.minX - o, y: b.minY - o }, { x: b.maxX + o, y: b.minY - o },
+          { x: b.maxX + o, y: b.maxY + o }, { x: b.minX - o, y: b.maxY + o },
+        ];
+      } else {
+        return { error: `bore_hole: unknown position "${p.position}" (above, below, left, right, center, corners)` };
+      }
+      const depth = p.depth > 0 ? p.depth : ctx.stock.thickness;
+      const moves = [];
+      const rings = [];
+      const warnings = [];
+      for (const q of centers) {
+        const g = generateBore({ centerX: q.x, centerY: q.y, radius: r }, { diameter: p.toolDiameter }, {
+          totalDepth: depth, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        });
+        if (!g.moves.length) {
+          return { error: `bore_hole: ${g.warnings[0] ?? 'nothing to cut'} — use a smaller bit or a bigger hole` };
+        }
+        moves.push(...g.moves);
+        rings.push(...g.target.rings);
+        warnings.push(...g.warnings);
+      }
+      noteContent(ctx, rings);
+      const bbox = rings.flat().reduce((a, q) => ({
+        minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+        maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+      }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      return {
+        tool: { name: `${formatDiameter(p.toolDiameter)} endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves, warnings,
+        target: { type: 'region', rings, depth },
+        bbox,
+        previewHoles: centers.map(q => ({ x: q.x, y: q.y, r })),
+      };
     },
   },
 
@@ -319,6 +544,7 @@ export const CATALOG = {
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
       tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
       tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches; at least 4 regardless' },
+      chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the disc\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
@@ -333,18 +559,28 @@ export const CATALOG = {
         safeZ: ctx.safeZ, entry: 'ramp',
         tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
       });
-      return {
-        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+      const ops = [];
+      if (p.chamfer > 0) {
+        const ch = chamferRimOp(ring, p.chamfer, p.feedRate, ctx.safeZ);
+        if (ch.error) return ch;
+        ops.push(ch.op);
+      }
+      ops.push({
+        subName: ops.length ? 'cut free' : undefined,
+        tool: { name: `${formatDiameter(p.toolDiameter)} endmill`, diameter: p.toolDiameter },
         cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: prof.moves,
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
+        previewRing: ring,
+        previewTabs: prof.tabs,
+      });
+      return {
+        ops,
         bbox: {
           minX: c.x - R - p.toolDiameter / 2, minY: c.y - R - p.toolDiameter / 2,
           maxX: c.x + R + p.toolDiameter / 2, maxY: c.y + R + p.toolDiameter / 2,
         },
-        previewRing: ring,
-        previewTabs: prof.tabs,
       };
     },
   },
@@ -359,6 +595,7 @@ export const CATALOG = {
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
       tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches (capped at half the stock thickness)' },
       tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs along the profile, inches; at least 4 tabs regardless' },
+      chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the tag\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
     },
     run(p, ctx) {
       const b = ctx.contentBBox; // union of prior ops' bboxes
@@ -370,18 +607,28 @@ export const CATALOG = {
         safeZ: ctx.safeZ, entry: 'ramp',
         tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
       });
-      return {
-        tool: { name: `${p.toolDiameter}" endmill`, diameter: p.toolDiameter },
+      const ops = [];
+      if (p.chamfer > 0) {
+        const ch = chamferRimOp(ring, p.chamfer, p.feedRate, ctx.safeZ);
+        if (ch.error) return ch;
+        ops.push(ch.op);
+      }
+      ops.push({
+        subName: ops.length ? 'cut free' : undefined,
+        tool: { name: `${formatDiameter(p.toolDiameter)} endmill`, diameter: p.toolDiameter },
         cutter: { type: 'flat', diameter: p.toolDiameter },
         feedRate: p.feedRate, plungeRate: 30,
         moves: prof.moves,
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
+        previewRing: ring,
+        previewTabs: prof.tabs,
+      });
+      return {
+        ops,
         bbox: {
           minX: b.minX - p.buffer - p.toolDiameter / 2, minY: b.minY - p.buffer - p.toolDiameter / 2,
           maxX: b.maxX + p.buffer + p.toolDiameter / 2, maxY: b.maxY + p.buffer + p.toolDiameter / 2,
         },
-        previewRing: ring,
-        previewTabs: prof.tabs,
       };
     },
   },

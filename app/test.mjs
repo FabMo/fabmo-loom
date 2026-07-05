@@ -404,5 +404,178 @@ console.log('--- simulation: the 3D preview surface, measured ---');
   else fail(`vee sim off: ${z}`);
 }
 
+// ---------------- 12. bore_hole: the "add a hole" decline, converted ----------------
+// From the funnel log (2026-06-11, step app): "Add another hole in a random
+// spot" — declined. bore_hole is the fill: positioned holes, through by
+// default, honest about bits that can't cut the designed size.
+
+console.log('--- bore_hole: hang hole + corner holes + honest refusals ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1 } },
+      { id: 'hole', strategy: 'bore_hole', params: { diameter: 0.25, position: 'above' } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.25 } },
+    ],
+  };
+  const r = run(rec);
+  const holeT = r.report?.stats.targets?.find(t => t.name.startsWith('hole'));
+  if (r.ok && holeT?.gouges === 0 && holeT.depthViolations === 0) pass(`hang-hole tag verified (${holeT.samples} samples, 0 gouges)`);
+  else fail(`hang hole failed: ok=${r.ok} ${r.errors?.join(' | ')}`);
+
+  // the hole is THROUGH and the tag wrapped it: simulate and probe
+  const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+  const hole = r.preview.built.find(x => x.op.id === 'hole').r.previewHoles[0];
+  const z = surfaceAt(sim, hole.x + r.preview.placement.x, hole.y + r.preview.placement.y);
+  if (z <= -0.5 + 1e-6) pass(`hole is through the 0.5" stock at its center (sim z=${z.toFixed(3)})`);
+  else fail(`hole not through: sim z=${z}`);
+
+  // 4 mounting holes around the content
+  const rc = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Shop', letterHeight: 1 } },
+      { id: 'holes', strategy: 'bore_hole', params: { diameter: 0.1875, position: 'corners' } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.25 } },
+    ],
+  });
+  const nHoles = rc.preview?.built?.find(x => x.op.id === 'holes')?.r.previewHoles?.length;
+  if (rc.ok && nHoles === 4) pass('corners: 4 mounting holes, tag wraps them, verified');
+  else fail(`corners failed: ok=${rc.ok} holes=${nHoles} ${rc.errors?.join(' | ')}`);
+
+  // a hole smaller than the bit is a designed fit we must not oversize
+  const small = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'h', strategy: 'bore_hole', params: { diameter: 0.08, position: 'center', toolDiameter: 0.125 } }],
+  });
+  if (!small.ok && small.errors[0]?.includes('not machinable without oversizing')) pass(`too-small hole refused: "${small.errors[0].slice(0, 60)}..."`);
+  else fail(`too-small hole leaked: ${JSON.stringify(small.errors)}`);
+
+  // a hole much bigger than the bit would leave a standing core
+  const big = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'h', strategy: 'bore_hole', params: { diameter: 0.75, position: 'center', toolDiameter: 0.125 } }],
+  });
+  if (!big.ok && big.errors[0]?.includes('standing')) pass(`too-big hole refused with advice: "${big.errors[0].slice(0, 60)}..."`);
+  else fail(`too-big hole leaked: ${JSON.stringify(big.errors)}`);
+}
+
+// ---------------- 13. chamfer: "chamfer the edges", converted ----------------
+// From the funnel log (2026-06-11): "chamfer all edges" / "round all edges"
+// — declined. The cutouts now take a chamfer param: a 90° V-bit eases the
+// top rim before the part is freed, with the INTENDED surface (flat stock
+// imprinted with the cone) as an independently checked heightmap target.
+
+console.log('--- chamfer: eased rim on cutouts, measured in the simulation ---');
+{
+  const r = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.375 },
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125 } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 3, tabs: true, chamfer: 0.06 } },
+    ],
+  });
+  const ch = r.report?.stats.targets?.find(t => t.name.includes('chamfer'));
+  const mounts = (r.sbp?.match(/C9/g) ?? []).length;
+  if (r.ok && ch?.type === 'heightmap' && ch.gouges === 0 && ch.maskViolations === 0 && mounts === 3) {
+    pass(`chamfered coaster verified: heightmap target ${ch.samples} samples, 0 gouges, V-bit is mount 3 of 3`);
+  } else fail(`chamfer failed: ok=${r.ok} ch=${JSON.stringify(ch)} mounts=${mounts} ${r.errors?.join(' | ')}`);
+
+  // the 45° face, measured mid-band in the simulated surface
+  const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+  const cx = r.preview.stock.w / 2, cy = r.preview.stock.h / 2;
+  const mid = surfaceAt(sim, cx + 1.5 - 0.03, cy); // halfway down a 0.06 face
+  const inside = surfaceAt(sim, cx + 1.3, cy);     // inboard of the band
+  if (Math.abs(mid + 0.03) < 0.012 && inside === 0) {
+    pass(`45° face measured: mid-band ${mid.toFixed(3)} (expect ≈ -0.030), inboard untouched`);
+  } else fail(`face wrong: mid=${mid} inside=${inside}`);
+
+  // tag rim chamfers too
+  const tag = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Anna', letterHeight: 1 } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.3, chamfer: 0.05 } },
+    ],
+  });
+  if (tag.ok && tag.report.stats.targets.some(t => t.type === 'heightmap' && t.gouges === 0)) pass('chamfered tag rim verified');
+  else fail(`chamfered tag failed: ${tag.errors?.join(' | ')}`);
+}
+
+// ---------------- 14. dish_shape: the ballnose bowl, measured against the sphere ----------------
+
+console.log('--- dish_shape: spherical dish, sim vs analytic sphere ---');
+{
+  const r = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'dish', strategy: 'dish_shape', params: { diameter: 2.5, depth: 0.25 } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 3.25, tabs: true } },
+    ],
+  });
+  const t = r.report?.stats.targets?.find(x => x.name.startsWith('dish'));
+  if (r.ok && t?.type === 'heightmap' && t.gouges === 0 && t.maskViolations === 0) {
+    pass(`dished coaster verified: ${t.samples} samples against the declared surface, 0 gouges`);
+  } else fail(`dish failed: ok=${r.ok} ${r.errors?.join(' | ')}`);
+
+  // the simulated bowl matches the sphere the strategy promised
+  const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+  const cx = r.preview.stock.w / 2, cy = r.preview.stock.h / 2;
+  const Rs = (1.25 * 1.25 + 0.25 * 0.25) / (2 * 0.25);
+  const zAt = (rho) => (Rs - 0.25) - Math.sqrt(Rs * Rs - rho * rho);
+  const zc = surfaceAt(sim, cx, cy), zm = surfaceAt(sim, cx + 0.6, cy);
+  if (Math.abs(zc - zAt(0)) < 0.005 && Math.abs(zm - zAt(0.6)) < 0.005) {
+    pass(`sphere measured: center ${zc.toFixed(4)} (theory ${zAt(0).toFixed(4)}), ρ=0.6 ${zm.toFixed(4)} (theory ${zAt(0.6).toFixed(4)})`);
+  } else fail(`sphere off: center=${zc} vs ${zAt(0)}, mid=${zm} vs ${zAt(0.6)}`);
+
+  // deeper than a hemisphere is not a dish
+  const deep = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'd', strategy: 'dish_shape', params: { diameter: 1, depth: 0.6 } }],
+  });
+  if (!deep.ok && deep.errors[0]?.includes('hemisphere')) pass(`hemisphere guard: "${deep.errors[0].slice(0, 60)}..."`);
+  else fail(`hemisphere guard missing: ${JSON.stringify(deep.errors)}`);
+}
+
+// ---------------- 15. auto tool selection: toolDiameter 0 shops the drawer ----------------
+
+console.log('--- auto tool: coverage knee picks the chain, pick is reported ---');
+{
+  const r = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'pocket', strategy: 'pocket_text', params: { text: 'Anna', letterHeight: 1.5, toolDiameter: 0 } }],
+  });
+  const note = r.warnings.find(w => w.includes('auto tool:'));
+  const nOps = r.report?.stats.targets?.length ?? 0;
+  if (r.ok && nOps >= 2 && note?.includes('1/4"')) {
+    pass(`text chain picked and reported: "${note.slice(note.indexOf('auto'), note.indexOf('auto') + 60)}..." (${nOps} ops)`);
+  } else fail(`auto text failed: ok=${r.ok} ops=${nOps} note=${note} ${r.errors?.join(' | ')}`);
+
+  // a plain circle needs exactly one bit — no gratuitous toolchanges
+  const circle = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.125, toolDiameter: 0 } }],
+  });
+  if (circle.ok && circle.report.stats.targets.length === 1) pass('round pocket: knee stops at the 1/4" (no rest pass invented)');
+  else fail(`auto circle failed: targets=${circle.report?.stats.targets?.length}`);
+
+  // sharp rectangle corners earn a rest bit
+  const tray = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'tray', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 3, height: 2, cornerRadius: 0, depth: 0.25, toolDiameter: 0 } }],
+  });
+  if (tray.ok && tray.report.stats.targets.length === 2) pass('sharp-cornered tray: corner blobs earn a rest pass');
+  else fail(`auto tray failed: targets=${tray.report?.stats.targets?.length} ${tray.errors?.join(' | ')}`);
+
+  // when nothing earns a cut, say so with the drawer in hand
+  const none = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'w', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 0.04, depth: 0.5, toolDiameter: 0 } }],
+  });
+  if (!none.ok && none.errors[0]?.includes('drawer')) pass(`nothing earns: "${none.errors[0].slice(0, 70)}..."`);
+  else fail(`no-bit case leaked: ${JSON.stringify(none.errors)}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

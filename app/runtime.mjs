@@ -79,6 +79,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
 
   // ---- run each strategy in local coords, growing the content bbox ----
   const built = [];
+  const strategyWarnings = [];
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
@@ -89,7 +90,10 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
     // pocket + a smaller-bit rest pass = two tools); each sub-op carries
     // its own tool, moves, and declared target
-    for (const sub of (r.ops ?? [r])) built.push({ op, r: sub });
+    for (const sub of (r.ops ?? [r])) {
+      built.push({ op, r: sub });
+      for (const w of sub.warnings ?? []) strategyWarnings.push(`op "${op.id}": ${w}`);
+    }
     ctx.contentBBox = ctx.contentBBox
       ? {
           minX: Math.min(ctx.contentBBox.minX, r.bbox.minX), minY: Math.min(ctx.contentBBox.minY, r.bbox.minY),
@@ -126,7 +130,12 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
     if (!toolNumber.has(key)) {
       const n = toolNumber.size + 1;
       toolNumber.set(key, n);
-      tools[n] = { name: r.tool.name, diameter: r.tool.diameter };
+      // kind/angleDeg ride along: the verifier's heightmap check models
+      // the cutter (ball/vee/flat) from the tool table entry
+      const t = { name: r.tool.name, diameter: r.tool.diameter };
+      if (r.tool.kind) t.kind = r.tool.kind;
+      if (r.tool.angleDeg) t.angleDeg = r.tool.angleDeg;
+      tools[n] = t;
     }
   }
 
@@ -156,7 +165,7 @@ export function runRecipe(recipe, controlValues, fontBuffer) {
   const result = {
     ok: report.ok,
     errors: report.errors,
-    warnings: report.warnings,
+    warnings: [...strategyWarnings, ...report.warnings],
     report, job, composed,
     preview: { built, placement, stock: autoStock },
   };

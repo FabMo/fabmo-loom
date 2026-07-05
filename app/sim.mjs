@@ -8,6 +8,8 @@
 //   flat  — cylinder end: full depth within the radius
 //   vee   — cone: tip depth at the centerline, rising d/tan(halfAngle)
 //           with radial distance d (60° included → 30° half-angle)
+//   ball  — sphere end: tip depth at the centerline, surface rising
+//           R − sqrt(R² − d²) with radial distance d
 //
 // DOM-free and dependency-free: runs in the browser (feeding Three.js)
 // and in Node (feeding the gauntlet). Sampling steps at half a cell so a
@@ -48,6 +50,27 @@ export function simulateJob(built, placement, stock, opts = {}) {
     }
   };
 
+  const stampBall = (x, y, z, radius) => {
+    if (z > -1e-9) return;
+    const c0 = Math.max(0, Math.ceil((x - radius) / dx));
+    const c1 = Math.min(cols - 1, Math.floor((x + radius) / dx));
+    const r0 = Math.max(0, Math.ceil((y - radius) / dx));
+    const r1 = Math.min(rows - 1, Math.floor((y + radius) / dx));
+    const rr = radius * radius;
+    for (let r = r0; r <= r1; r++) {
+      const dy = r * dx - y;
+      for (let c = c0; c <= c1; c++) {
+        const dxx = c * dx - x;
+        const dsq = dxx * dxx + dy * dy;
+        if (dsq > rr) continue;
+        const zc = Math.max(z + radius - Math.sqrt(rr - dsq), floorZ);
+        if (zc > -1e-9) continue;
+        const i = r * cols + c;
+        if (zc < grid[i]) { grid[i] = zc; if (zc < minZ) minZ = zc; }
+      }
+    }
+  };
+
   const stampVee = (x, y, z, tanHalf) => {
     const depth = -Math.max(z, floorZ);
     if (depth <= 0) return;
@@ -72,6 +95,7 @@ export function simulateJob(built, placement, stock, opts = {}) {
   for (const { r } of built) {
     const cutter = r.cutter ?? { type: 'flat', diameter: r.tool?.diameter || 0.01 };
     const isVee = cutter.type === 'vee';
+    const isBall = cutter.type === 'ball';
     const tanHalf = isVee ? Math.tan(((cutter.includedAngle ?? 60) / 2) * Math.PI / 180) : 0;
     const radius = isVee ? 0 : (cutter.diameter ?? 0.01) / 2;
 
@@ -88,7 +112,9 @@ export function simulateJob(built, placement, stock, opts = {}) {
         const z = from.z + (to.z - from.z) * t;
         if (z > -1e-9) continue;
         const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
-        isVee ? stampVee(x, y, z, tanHalf) : stampFlat(x, y, z, radius);
+        isVee ? stampVee(x, y, z, tanHalf)
+          : isBall ? stampBall(x, y, z, radius)
+          : stampFlat(x, y, z, radius);
       }
     });
   }
