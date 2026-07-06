@@ -23,10 +23,19 @@ import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
 
 export const EMPTY_RECIPE = {
+  version: 2,                  // recipe grammar version (migrations key on this)
   name: 'Untitled',
   stock: { thickness: 0.5 },   // W×H are DERIVED: stock auto-sizes to the content
   margin: 0.375,
   controls: [],
+  // named intermediate values: ordered [{ id, expr }], each expr an
+  // arithmetic expression over controls and EARLIER derived ids. One
+  // definition, referenced as {id} anywhere expressions are allowed —
+  // the antidote to re-deriving "r - t/2" in five places.
+  derived: [],
+  // named geometry: ordered [{ id, path, open? }], authored in the SHARED
+  // frame (inches, y flips, no recentering); ops reference by id
+  shapes: [],
   pipeline: [],
   // uploaded images/graphics, embedded so recipes stay self-contained:
   // { id, name, kind: 'image'|'svg', data (dataURL or svg text), width?, height? }
@@ -35,13 +44,38 @@ export const EMPTY_RECIPE = {
   assets: [],
 };
 
+// old saved recipes load forever: fill in the fields their era lacked
+export function migrateRecipe(recipe) {
+  recipe.version ??= 2;
+  recipe.derived ??= [];
+  recipe.shapes ??= [];
+  recipe.assets ??= [];
+  return recipe;
+}
+
+const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// controls + derived, evaluated in order → the namespace every
+// {expression} sees. Returns { vars } or { error }.
+export function buildVars(recipe, controlValues) {
+  const vars = { ...controlValues };
+  for (const d of recipe.derived ?? []) {
+    if (!ID_RE.test(d.id ?? '')) return { error: `derived value has a bad id "${d.id}"` };
+    if (d.id in controlValues) return { error: `derived "${d.id}" clashes with a control of the same name` };
+    const ex = expandTemplate(`{${d.expr}}`, vars);
+    if (ex.error) return { error: `derived "${d.id}": ${ex.error}` };
+    vars[d.id] = parseFloat(ex.value);
+  }
+  return { vars };
+}
+
 export function controlDefaults(recipe) {
   const values = {};
   for (const c of recipe.controls) values[c.id] = c.default;
   return values;
 }
 
-function resolveParams(entry, params, controlValues, errors, opId) {
+function resolveParams(entry, params, controlValues, vars, errors, opId) {
   const out = {};
   for (const [key, spec] of Object.entries(entry.params)) {
     let v = params?.[key];
@@ -51,11 +85,12 @@ function resolveParams(entry, params, controlValues, errors, opId) {
     }
     if (v === undefined || v === null || v === '') v = spec.default;
     if (v === undefined) { errors.push(`op "${opId}": required param ${key} missing`); continue; }
-    // template params (spec.template) may hold {expressions} of control
-    // ids — how a shape's internal geometry binds to sliders. Opt-in per
-    // param spec: ordinary string params (engraved text!) keep literal braces.
+    // template params (spec.template) may hold {expressions} over the
+    // controls + derived namespace — how a shape's internal geometry
+    // binds to sliders. Opt-in per param spec: ordinary string params
+    // (engraved text!) keep literal braces.
     if (spec.template && typeof v === 'string' && v.includes('{')) {
-      const ex = expandTemplate(v, controlValues);
+      const ex = expandTemplate(v, vars);
       if (ex.error) { errors.push(`op "${opId}": param ${key}: ${ex.error}`); continue; }
       v = ex.value;
     }
@@ -85,8 +120,16 @@ export function runRecipe(recipe, controlValues, fonts) {
     return { ok: false, errors: ['the recipe has no operations yet — ask for something'], warnings: [], preview: { empty: true } };
   }
 
+  // ---- namespace: controls + derived values, evaluated in order ----
+  const bv = buildVars(recipe, controlValues);
+  if (bv.error) {
+    return { ok: false, errors: [bv.error], warnings: [], preview: { empty: true } };
+  }
+  const vars = bv.vars;
+
   const ctx = {
     fonts,
+    vars,
     stock: { thickness: stock.thickness },   // W×H not known until content runs
     safeZ: 0.5,
     rpm: 14000,
@@ -99,7 +142,7 @@ export function runRecipe(recipe, controlValues, fonts) {
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
-    const p = resolveParams(entry, op.params, controlValues, errors, op.id);
+    const p = resolveParams(entry, op.params, controlValues, vars, errors, op.id);
     if (errors.length) break;
     const r = entry.run(p, ctx);
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }

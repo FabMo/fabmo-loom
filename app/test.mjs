@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
@@ -1134,6 +1134,99 @@ console.log('--- five holes along the arch centerline ---');
   if (!rb.ok && rb.errors.some(e => e.includes('could not read hole center'))) {
     pass(`malformed at fails clean: "${rb.errors[0]}"`);
   } else fail(`malformed at not caught: ${rb.errors?.join(' | ')}`);
+}
+
+// ---------------- 23. derived values: name it once, use it everywhere ----------------
+// Structural upgrade 1 of the language work: recipe.derived is an
+// ordered list of named expressions over controls (and earlier derived
+// ids). Re-deriving "r - t/2" in five params is where the model's
+// arithmetic drifts; a let-binding removes the repetition.
+
+console.log('--- derived values ---');
+{
+  if (EMPTY_RECIPE.version === 2 && Array.isArray(EMPTY_RECIPE.derived) && Array.isArray(EMPTY_RECIPE.shapes)) {
+    pass('recipe grammar v2: version + derived + shapes fields present');
+  } else fail(`EMPTY_RECIPE shape wrong: ${JSON.stringify(Object.keys(EMPTY_RECIPE))}`);
+  const old = migrateRecipe({ name: 'vintage', stock: { thickness: 0.5 }, controls: [], pipeline: [] });
+  if (old.version === 2 && Array.isArray(old.derived) && Array.isArray(old.shapes) && Array.isArray(old.assets)) {
+    pass('a v1-era recipe migrates in place (version, derived, shapes, assets filled)');
+  } else fail(`migration incomplete: ${JSON.stringify(old)}`);
+
+  // the arch app, rewritten with derived values — chained (mid uses inner)
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Arch (derived)',
+    controls: [
+      { id: 'r', type: 'number', label: 'Radius', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Thickness', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+    ],
+    derived: [
+      { id: 'inner', expr: 'r - t' },
+      { id: 'mid', expr: 'inner + t/2' },   // chained: uses a derived id
+    ],
+    pipeline: [
+      { id: 'holes', strategy: 'bore_hole', params: {
+        at: '{-0.951*mid} {0.309*mid}; {-0.588*mid} {0.809*mid}; 0 {mid}; {0.588*mid} {0.809*mid}; {0.951*mid} {0.309*mid}',
+        diameter: 0.25, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: {
+        path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z',
+        width: 0, height: 0, tabs: true } },
+    ],
+  };
+  const r = run(rec);
+  if (r.ok && r.sbp) pass('derived-value arch VERIFIED → SBP ({inner}, chained {mid})');
+  else fail(`derived arch rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const crown = surfaceAt(sim, p2.x, 1.7 + p2.y);   // mid = 2 - 0.3
+    if (crown < -0.49) pass('equivalence: crown hole through at mid = 1.7", same as the inline-expression recipe');
+    else fail(`derived crown hole missing: ${crown}`);
+  }
+
+  // failure modes are data, not crashes
+  const loose = structuredClone(rec);
+  loose.derived[1].expr = 'inner + q/2';
+  const rl = run(loose);
+  if (!rl.ok && rl.errors[0].includes('derived "mid"') && rl.errors[0].includes('unknown name "q"')) {
+    pass(`unknown name in a derived expr fails clean: "${rl.errors[0]}"`);
+  } else fail(`derived error wrong: ${rl.errors?.join(' | ')}`);
+  const clash = structuredClone(rec);
+  clash.derived.push({ id: 'r', expr: '1' });
+  const rc = run(clash);
+  if (!rc.ok && rc.errors[0].includes('clashes with a control')) pass('derived id clashing with a control refused');
+  else fail(`clash not caught: ${rc.errors?.join(' | ')}`);
+}
+
+console.log('--- derived values through the intent layer ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.controls.push({ id: 'r', type: 'number', label: 'R', default: 2 }, { id: 't', type: 'number', label: 'T', default: 0.6 });
+  const res = applyActions(rec, { summary: 'derive', actions: [
+    { kind: 'set_derived', derived: { id: 'inner', expr: 'r - t' } },
+    { kind: 'set_derived', derived: { id: 'mid', expr: 'inner + t/2' } },
+    { kind: 'set_derived', derived: { id: 'oops', expr: 'nope * 2' } },      // unknown name
+    { kind: 'set_derived', derived: { id: 'r', expr: '5' } },                // control clash
+  ], declined: [] });
+  if (res.applied.length === 2 && res.recipe.derived.length === 2 && res.skipped.length === 2
+      && res.skipped[0].includes('unknown name "nope"') && res.skipped[1].includes('already a control')) {
+    pass(`set_derived validates at apply time: 2 applied, 2 skipped with reasons`);
+  } else fail(`set_derived apply wrong: applied=${JSON.stringify(res.applied)} skipped=${JSON.stringify(res.skipped)}`);
+
+  // updating in place keeps order; removal is blocked while referenced
+  const upd = applyActions(res.recipe, { summary: 'u', actions: [
+    { kind: 'set_derived', derived: { id: 'inner', expr: 'r - t*1' } },
+    { kind: 'remove_derived', id: 'inner' },
+  ], declined: [] });
+  if (upd.recipe.derived[0].id === 'inner' && upd.recipe.derived[0].expr === 'r - t*1'
+      && upd.skipped.some(s => s.includes('referenced by another'))) {
+    pass('update-in-place keeps chain order; removal blocked while "mid" references it');
+  } else fail(`derived update/remove wrong: ${JSON.stringify(upd.recipe.derived)} ${JSON.stringify(upd.skipped)}`);
+
+  const sys = buildParseRequest(upd.recipe, 'x').system;
+  if (sys.includes('set_derived') && sys.includes('"expr": "r - t*1"')) {
+    pass('prompt carries the derived rules and the current derived chain');
+  } else fail('derived missing from the prompt');
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

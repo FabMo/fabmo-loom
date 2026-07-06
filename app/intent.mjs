@@ -10,6 +10,7 @@
 // a future server proxy.
 
 import { CATALOG, catalogDoc } from './catalog.mjs';
+import { expandTemplate } from './shape.mjs';
 
 // ---------------------------------------------------------------- schema
 
@@ -25,7 +26,7 @@ export const ACTION_TOOL = {
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'add_operation', 'set_operation', 'remove_operation'] },
+            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'add_operation', 'set_operation', 'remove_operation'] },
             name: { type: 'string', description: 'set_name: the new recipe/app name' },
             thickness: { type: 'number', description: 'set_thickness: the stock material thickness, inches (through-cuts use it)' },
             control: {
@@ -53,7 +54,15 @@ export const ACTION_TOOL = {
                 after: { type: 'string', description: 'optional op id to insert after (add_operation)' },
               },
             },
-            id: { type: 'string', description: 'remove_control / remove_operation / set_*: the target id' },
+            derived: {
+              type: 'object', description: 'set_derived: a named intermediate value, usable as {id} in any expression',
+              properties: {
+                id: { type: 'string', description: 'the name (letters/digits/_, not a control id)' },
+                expr: { type: 'string', description: 'arithmetic over controls and EARLIER derived ids, e.g. "r - t/2"' },
+              },
+              required: ['id', 'expr'],
+            },
+            id: { type: 'string', description: 'remove_control / remove_derived / remove_operation / set_*: the target id' },
           },
           required: ['kind'],
         },
@@ -104,6 +113,7 @@ RULES:
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
 - An outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield…) is NOT a decline: AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc.
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
+- Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: it is a pocket_shape "custom" band hugging that edge (edgeTreatment true, before the cutout) — the recipe is in pocket_shape's doc.
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "at" param takes any number of explicit centers, {arithmetic} of control ids allowed — the arch-centerline example is in bore_hole's doc.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
@@ -199,6 +209,42 @@ export function applyActions(recipe, payload) {
         const before = next.controls.length;
         next.controls = next.controls.filter(c => c.id !== a.id);
         before === next.controls.length ? skipped.push(`remove_control: no "${a.id}"`) : applied.push(`removed control "${a.id}"`);
+        break;
+      }
+      case 'set_derived': {
+        const d = a.derived;
+        if (!d?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.id) || typeof d.expr !== 'string' || !d.expr.trim()) {
+          skipped.push('set_derived: needs an id (letters/digits/_) and an expr'); break;
+        }
+        if (ctrlIds().has(d.id)) { skipped.push(`set_derived: "${d.id}" is already a control`); break; }
+        // dry-evaluate the FINAL chain in stored order against control
+        // defaults, so a broken expression is skipped here, not at weave
+        next.derived ??= [];
+        const existing = next.derived.find(x => x.id === d.id);
+        const finalChain = existing
+          ? next.derived.map(x => (x.id === d.id ? { id: d.id, expr: d.expr } : x))
+          : [...next.derived, { id: d.id, expr: d.expr }];
+        const probe = {};
+        for (const c of next.controls) probe[c.id] = c.default;
+        let bad = null;
+        for (const x of finalChain) {
+          const ex = expandTemplate(`{${x.expr}}`, probe);
+          if (ex.error && x.id === d.id) { bad = ex.error; break; }
+          probe[x.id] = ex.error ? NaN : parseFloat(ex.value);
+        }
+        if (bad) { skipped.push(`set_derived "${d.id}": ${bad}`); break; }
+        if (existing) existing.expr = d.expr;
+        else next.derived.push({ id: d.id, expr: d.expr });
+        applied.push(`derived "${d.id}" = ${d.expr}`);
+        break;
+      }
+      case 'remove_derived': {
+        next.derived ??= [];
+        const usedBy = next.derived.some(x => x.id !== a.id && new RegExp(`\\b${a.id}\\b`).test(x.expr));
+        if (usedBy) { skipped.push(`remove_derived: "${a.id}" is referenced by another derived value`); break; }
+        const before = next.derived.length;
+        next.derived = next.derived.filter(x => x.id !== a.id);
+        before === next.derived.length ? skipped.push(`remove_derived: no "${a.id}"`) : applied.push(`removed derived "${a.id}"`);
         break;
       }
       case 'add_operation': {

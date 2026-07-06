@@ -3,7 +3,7 @@
 // The LLM (user's own key, browser-direct) emits recipe actions only —
 // no code, no motion. See intent.mjs for the trust boundary.
 
-import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
@@ -33,7 +33,7 @@ const quiet = (fn) => {
 function loadRecipe() {
   try {
     const s = localStorage.getItem('loom:recipe');
-    if (s) return JSON.parse(s);
+    if (s) return migrateRecipe(JSON.parse(s));
   } catch { /* fresh start */ }
   return structuredClone(EMPTY_RECIPE);
 }
@@ -489,7 +489,7 @@ $('openFile').addEventListener('change', async () => {
   const f = $('openFile').files[0];
   if (!f) return;
   try {
-    recipe = JSON.parse(await f.text());
+    recipe = migrateRecipe(JSON.parse(await f.text()));
     controlValues = controlDefaults(recipe);
     persist();
     renderControls();
