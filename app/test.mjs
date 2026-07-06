@@ -1884,5 +1884,94 @@ console.log('--- fit failure modes stay honest ---');
   else fail(`remove_shape fit guard failed: ${JSON.stringify(rm.skipped)}`);
 }
 
+// ---------------- 29. guest strategies: a sibling app as a catalog verb ----------------
+// The mount mechanism, proven with a mock guest (the real guests — e.g.
+// the furniture designer — live in the private workspace and test
+// there). Contract: entries registered at boot, document params with
+// expression-string numbers via ctx.evalNumber, output in the WORKING
+// FRAME with internal placements baked, same verify gate.
+
+console.log('--- guest mount: register, weave, verify ---');
+{
+  const { CATALOG, registerCatalogEntries, catalogDoc } = await import('./catalog.mjs');
+  const { generatePocket } = await import('../strategies/pocket.js');
+
+  const mockGuest = {
+    two_pads: {
+      doc: 'MOCK GUEST for tests: two square pads pocketed side by side.',
+      params: {
+        size: { type: 'string', default: '1', doc: 'pad size, inches — expression over controls allowed', bindable: true },
+        depth: { type: 'number', default: 0.2, doc: 'pad depth' },
+      },
+      run(p, ctx) {
+        const s = ctx.evalNumber(p.size, { u: 1.5 });   // extras: guest-supplied namespace
+        if (s.error) return { error: s.error };
+        const sz = s.value;
+        const square = (x0) => ({ outer: [
+          { x: x0, y: 0 }, { x: x0 + sz, y: 0 }, { x: x0 + sz, y: sz }, { x: x0, y: sz },
+        ], holes: [] });
+        const ops = [];
+        for (const x0 of [0, sz + 0.5]) {   // internal layout, baked into coords
+          const g = generatePocket(square(x0), { diameter: 0.25 }, {
+            stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125, safeZ: ctx.safeZ, feedRate: 80, plungeRate: 30,
+          });
+          ops.push({
+            subName: `pad@${x0}`,
+            tool: { name: '1/4" endmill', diameter: 0.25 },
+            cutter: { type: 'flat', diameter: 0.25 },
+            feedRate: 80, plungeRate: 30,
+            moves: g.moves, target: g.target,
+          });
+        }
+        return { ops, bbox: { minX: 0, minY: 0, maxX: 2 * sz + 0.5, maxY: sz } };
+      },
+    },
+  };
+  const added = registerCatalogEntries(mockGuest);
+  if (added.length === 1 && CATALOG.two_pads) pass('guest entry registered into the live catalog');
+  else fail(`registration failed: ${JSON.stringify(added)}`);
+  if (catalogDoc().includes('MOCK GUEST')) pass('guest doc joins the grounding prompt automatically');
+  else fail('guest doc missing from catalogDoc');
+
+  // the intent layer accepts guest verbs like native ones
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, { summary: 'pads', actions: [
+    { kind: 'add_control', control: { id: 'u2', type: 'number', label: 'Pad', default: 2, min: 1, max: 3, step: 0.5 } },
+    { kind: 'add_operation', operation: { id: 'pads', strategy: 'two_pads', params: { size: 'u2', depth: 0.2 } } },
+  ], declined: [] });
+  if (res.applied.length === 2) pass('intent layer validates a guest op like a native one');
+  else fail(`guest apply wrong: ${JSON.stringify(res.skipped)}`);
+
+  const r = run(res.recipe);
+  if (r.ok && r.sbp) pass('guest-woven recipe VERIFIED → SBP through the unchanged gate');
+  else fail(`guest recipe rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    // baked layout survives: two distinct pads at the guest's offsets
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const padA = surfaceAt(sim, p2.x + 1.0, p2.y + 1.0);
+    const padB = surfaceAt(sim, p2.x + 3.5, p2.y + 1.0);
+    const gapZ = surfaceAt(sim, p2.x + 2.25, p2.y + 1.0);
+    if (Math.abs(padA + 0.2) < 0.01 && Math.abs(padB + 0.2) < 0.01 && Math.abs(gapZ) < 1e-6) {
+      pass(`working-frame baking measured: pads at -0.2, untouched gap between (${padA.toFixed(3)} / ${gapZ} / ${padB.toFixed(3)})`);
+    } else fail(`pad layout wrong: ${padA} ${gapZ} ${padB}`);
+    // ctx.evalNumber: control u2=2 wins over the guest extra u; expression re-evaluates
+    const r3 = run(res.recipe, { u2: 3 });
+    const w3 = r3.ok ? r3.preview.built.at(-1).r.target.rings ? 1 : 1 : 0;
+    if (r3.ok && r3.preview.stock.w > r.preview.stock.w) {
+      pass(`guest expression param rides the slider: stock ${r.preview.stock.w}" → ${r3.preview.stock.w}" at size 3`);
+    } else fail(`guest slider response wrong: ${w3} ${r3.errors?.join(' | ')}`);
+  }
+
+  // guardrails: no shadowing native verbs, no malformed entries
+  const dup = registerCatalogEntries({ pocket_shape: { doc: 'evil', params: {}, run: () => ({}) } });
+  const bad = registerCatalogEntries({ broken: { doc: 'no run' } });
+  if (!dup.length && !bad.length && CATALOG.pocket_shape.doc !== 'evil') {
+    pass('guest cannot shadow a native verb or register malformed');
+  } else fail('registration guardrails failed');
+
+  delete CATALOG.two_pads;   // leave the catalog clean for other sections
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

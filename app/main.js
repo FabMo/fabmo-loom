@@ -4,6 +4,7 @@
 // no code, no motion. See intent.mjs for the trust boundary.
 
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
+import { registerCatalogEntries } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
@@ -558,6 +559,29 @@ $('thickness').addEventListener('input', () => {
   }
 });
 
+// Guest apps: an optional, uncommitted guests.local.mjs lists module
+// URLs; each module exports catalog `entries` (see AGENTS.md "Mounting a
+// guest app"). Guests load BEFORE the first weave and before any prompt,
+// so their verbs are indistinguishable from native ones. A public
+// checkout has no guests file — the import fails quietly and Loom runs
+// on the native catalog alone.
+async function loadGuests() {
+  let list;
+  try {
+    list = (await import('./guests.local.mjs')).default ?? [];
+  } catch { return; }
+  for (const url of list) {
+    try {
+      const mod = await import(url);
+      const added = registerCatalogEntries(mod.entries);
+      if (added.length) console.log(`guest ${url}: registered ${added.join(', ')}`);
+    } catch (e) {
+      console.warn(`guest ${url} failed to load:`, e);
+      addTurn(`A guest app failed to load (${escapeHtml(String(url))}) — its verbs are unavailable this session.`, true);
+    }
+  }
+}
+
 (async function boot() {
   const loaded = {};
   await Promise.all(FONTS.map(async (f) => {
@@ -566,6 +590,7 @@ $('thickness').addEventListener('input', () => {
     loaded[f.id] = await res.arrayBuffer();
   }));
   LOADED_FONTS = loaded;
+  await loadGuests();
   renderControls();
   runAndRender();
 })();

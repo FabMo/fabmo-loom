@@ -10,6 +10,13 @@
 // A recipe references entries by key; anything not in this file is
 // undoable by prompt and must be DECLINED (the decline is the gap report
 // that grows this file).
+//
+// GUEST entries: a whole sibling app can mount itself as one catalog
+// verb (see AGENTS.md "Mounting a guest app"). registerCatalogEntries
+// merges a guest module's entries at boot — same contract as a native
+// entry: typed params, doc written for the model, run() → ops on the
+// canonical rail with declared targets, in the WORKING FRAME (bake any
+// internal placements — translation of moves/targets — before returning).
 
 import { textToContours } from '../examples/engraver/text-to-regions.mjs';
 import { computeMedialAxis } from '../vendor/v_engraver/medial-axis.js';
@@ -970,6 +977,24 @@ export const CATALOG = {
     },
   },
 };
+
+// Merge guest entries (a sibling app mounted as catalog verbs) into the
+// live catalog. Everything downstream — the grounding prompt, intent
+// validation, the runtime — reads CATALOG, so registration at boot is
+// all a guest needs. Never let a guest silently replace a native verb.
+export function registerCatalogEntries(entries) {
+  const added = [];
+  for (const [key, e] of Object.entries(entries ?? {})) {
+    if (CATALOG[key]) { console.warn(`guest entry "${key}" ignored: a catalog entry with that name exists`); continue; }
+    if (!e || typeof e.run !== 'function' || typeof e.doc !== 'string' || !e.params) {
+      console.warn(`guest entry "${key}" ignored: needs { doc, params, run }`);
+      continue;
+    }
+    CATALOG[key] = e;
+    added.push(key);
+  }
+  return added;
+}
 
 // Human/LLM-readable catalog documentation, assembled for the grounding prompt.
 export function catalogDoc() {

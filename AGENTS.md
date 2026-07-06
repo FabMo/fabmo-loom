@@ -116,6 +116,34 @@ yet in the catalog) → catalog integration here. The integration checklist:
 Declines logged by users are the backlog for this section — a decline
 converts to a feature by exactly this list.
 
+## Mounting a guest app
+
+A whole sibling app can register itself as catalog verbs — the biggest
+possible macro-strategy. The contract a guest must satisfy:
+
+1. **A declarative document** the model can author (the guest entry's
+   big param), with numeric fields optionally given as expression
+   strings over the recipe's controls (`"h - t/2"`) resolved via
+   `ctx.evalNumber(str, extras)`.
+2. **A deterministic, DOM-free interpreter** from that document to
+   moves + declared verifier targets on the canonical rail. The LLM
+   authors the document; the guest's own tested kernels make motion.
+3. **Working-frame output**: `run()` returns Loom sub-ops (`{ subName,
+   tool: {name, diameter}, cutter, feedRate, plungeRate, moves, target,
+   allowOverlap? }`) with any internal layout ALREADY baked into the
+   moves/targets (translate rings and move endpoints; rotation is not
+   yet supported for baking). Loom composes, verifies, and posts exactly
+   as for native ops — the export gate is unchanged.
+
+Wiring: the guest ships a module exporting `entries` (catalog-shaped);
+an uncommitted `app/guests.local.mjs` lists guest module URLs per
+deployment (`export default ['/c/<user>/<app>/shared/loom-guest.mjs']`);
+`main.js` registers them at boot via `registerCatalogEntries`. Guests
+never enter this public repo — the mechanism is public, the mounts are
+per-deployment. Entry docs are the model's ONLY knowledge of the guest
+format: condense the guest's document spec into the doc string, with a
+worked example, exactly as native entries do.
+
 ## Testing
 
 - `npm test` — self-contained gauntlets; must stay green.

@@ -3,3 +3,5 @@ test/diff/target/
 test/diff/out/
 out/
 examples/out/
+# per-deployment guest-app registry (see AGENTS.md "Mounting a guest app")
+app/guests.local.mjs
