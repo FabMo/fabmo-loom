@@ -607,10 +607,11 @@ export const CATALOG = {
   },
 
   bore_hole: {
-    doc: 'Drill a round HOLE — a hang hole for a tag, mounting/screw holes, dowel holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so the hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). Positions itself relative to the content machined so far: "above" is the classic hang hole over the text; "corners" places FOUR holes around the content (a later cutout will wrap them into the part\'s corners).',
+    doc: 'Drill round HOLES — a hang hole for a tag, mounting/screw holes, dowel holes, or a whole PATTERN of holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so each hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). Two ways to place: (1) position — relative to the content machined so far ("above" is the classic hang hole; "corners" places FOUR around it); (2) at — EXPLICIT centers, any number of holes, as semicolon-separated "x y" pairs in the working frame (the same frame anchored parametric shapes use; prior content is centered near the origin). "at" accepts {arithmetic} of control ids, and fixed direction cosines are just numbers you bake in — five holes evenly along an arch\'s centerline arc (radius m = r-t/2, angles 18°..162°) is at: "{-0.951*(r-t/2)} {0.309*(r-t/2)}; {-0.588*(r-t/2)} {0.809*(r-t/2)}; 0 {r-t/2}; {0.588*(r-t/2)} {0.809*(r-t/2)}; {0.951*(r-t/2)} {0.309*(r-t/2)}" — and the holes ride the same sliders as the arch. Evenly spaced holes on a straight line are just evenly stepped x values. Holes must land INSIDE the part a later cutout frees (its fit check will refuse strays).',
     params: {
       diameter: { type: 'number', default: 0.25, min: 0.05, max: 1, doc: 'finished hole diameter, inches', bindable: true },
-      position: { type: 'string', default: 'above', doc: '"above", "below", "left", "right", or "center" of the content so far, or "corners" (4 holes around it)' },
+      position: { type: 'string', default: 'above', doc: '"above", "below", "left", "right", or "center" of the content so far, or "corners" (4 holes around it); ignored when "at" is set' },
+      at: { type: 'string', default: '', template: true, doc: 'explicit hole centers: semicolon-separated "x y" pairs in the working frame, {arithmetic} of control ids allowed — see the entry doc for the arch example' },
       gap: { type: 'number', default: 0.125, min: 0, doc: 'clearance from the content edge to the hole edge, inches (ignored for center)', bindable: true },
       depth: { type: 'number', default: 0, doc: '0 = through the full stock thickness; otherwise hole depth in inches' },
       toolDiameter: { type: 'number', default: 0.125, doc: 'endmill diameter, inches' },
@@ -624,7 +625,18 @@ export const CATALOG = {
       const b = ctx.contentBBox;
       const c = contentCenter(ctx);
       let centers;
-      if (p.position === 'center' || !b) {
+      if (p.at && p.at.trim()) {
+        centers = [];
+        for (const pair of p.at.split(';')) {
+          if (!pair.trim()) continue;
+          const nums = pair.trim().split(/[\s,]+/).map(parseFloat);
+          if (nums.length !== 2 || nums.some(n => !Number.isFinite(n))) {
+            return { error: `bore_hole: could not read hole center "${pair.trim()}" — each entry in "at" is one "x y" pair` };
+          }
+          centers.push({ x: nums[0], y: nums[1] });
+        }
+        if (!centers.length) return { error: 'bore_hole: "at" contains no hole centers' };
+      } else if (p.position === 'center' || !b) {
         centers = [c];
       } else if (p.position === 'above') {
         centers = [{ x: c.x, y: b.maxY + p.gap + r }];

@@ -1062,5 +1062,79 @@ console.log('--- rabbet on the arch inside edge ---');
   } else fail(`gross misplacement slipped through the fit grace: ok=${ro.ok} ${ro.errors?.join(' | ')}`);
 }
 
+// ---------------- 22. hole patterns: explicit centers with expressions ----------------
+// The "five evenly spaced holes along the arch centerline" decline,
+// converted: bore_hole "at" takes any number of explicit centers in the
+// working frame; direction cosines are baked constants and the radius is
+// {r-t/2}, so the whole pattern rides the arch's sliders.
+
+console.log('--- five holes along the arch centerline ---');
+{
+  const m = '(r-t/2)';   // centerline radius
+  const at = [
+    `{-0.951*${m}} {0.309*${m}}`,
+    `{-0.588*${m}} {0.809*${m}}`,
+    `0 {${m}}`,
+    `{0.588*${m}} {0.809*${m}}`,
+    `{0.951*${m}} {0.309*${m}}`,
+  ].join('; ');
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Arch with holes',
+    controls: [
+      { id: 'r', type: 'number', label: 'Arch radius (in)', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Band thickness (in)', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+    ],
+    pipeline: [
+      { id: 'holes', strategy: 'bore_hole', params: { at, diameter: 0.25, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: {
+        path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z',
+        width: 0, height: 0, tabs: true,
+      } },
+    ],
+  };
+  const r = run(rec);
+  const nHoles = r.preview?.built?.find(x => x.r.previewHoles)?.r.previewHoles.length ?? 0;
+  if (r.ok && r.sbp && nHoles === 5) pass(`arch + 5 centerline holes VERIFIED → SBP (${nHoles} holes placed)`);
+  else fail(`hole pattern rejected: ok=${r.ok} holes=${nHoles} ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const mid = 2 - 0.3;   // centerline radius at defaults
+    const crownHole = surfaceAt(sim, p2.x, mid + p2.y);                       // hole at 90°
+    const sideHole = surfaceAt(sim, 0.588 * mid + p2.x, 0.809 * mid + p2.y); // hole at 54°
+    const between = surfaceAt(sim, Math.cos(Math.PI * 0.4) * mid + p2.x, Math.sin(Math.PI * 0.4) * mid + p2.y); // 72°, between holes
+    if (crownHole < -0.49 && sideHole < -0.49 && between === 0) {
+      pass(`holes measured: crown ${crownHole.toFixed(3)} and 54° ${sideHole.toFixed(3)} through, band between holes ${between}`);
+    } else fail(`hole surface wrong: crown=${crownHole} side=${sideHole} between=${between}`);
+  }
+
+  // the pattern rides the sliders: bigger arch, holes at the new centerline
+  const r2 = run(rec, { r: 3, t: 0.8 });
+  if (r2.ok) {
+    const sim2 = simulateJob(r2.preview.built, r2.preview.placement, r2.preview.stock);
+    const p2 = r2.preview.placement;
+    const crown2 = surfaceAt(sim2, p2.x, (3 - 0.4) + p2.y);
+    if (crown2 < -0.49) pass(`pattern rides the sliders: crown hole through at the new centerline (r-t/2 = 2.6")`);
+    else fail(`pattern did not follow sliders: ${crown2}`);
+  } else fail(`holes at r=3 rejected: ${r2.errors?.join(' | ')}`);
+
+  // a stray hole off the part is refused by the cutout's fit check
+  const stray = structuredClone(rec);
+  stray.pipeline[0].params.at = at + '; 0 {r+0.5}';
+  const rs = run(stray);
+  if (!rs.ok && rs.errors.some(e => e.includes('pokes outside'))) {
+    pass('a 6th hole floated off the part → cutout refuses the layout');
+  } else fail(`stray hole not caught: ok=${rs.ok} ${rs.errors?.join(' | ')}`);
+
+  // malformed "at" fails as data
+  const badAt = structuredClone(rec);
+  badAt.pipeline[0].params.at = '1 2; 3';
+  const rb = run(badAt);
+  if (!rb.ok && rb.errors.some(e => e.includes('could not read hole center'))) {
+    pass(`malformed at fails clean: "${rb.errors[0]}"`);
+  } else fail(`malformed at not caught: ${rb.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
