@@ -1727,5 +1727,162 @@ console.log('--- asset shape failure modes stay honest ---');
   else fail(`both-forms message wrong: ${both}`);
 }
 
+// ---------------- 28. fit: self-sizing outlines around content ----------------
+// Brian's heart report, part two: the model guessed the heart's absolute
+// size and the text overflowed it. fit {of, margin} moves the sizing
+// into code — the shape scales uniformly about the origin until all
+// content clears its edge by margin, so a longer name makes a BIGGER
+// heart, the tag_cutout ergonomic for any outline.
+
+console.log('--- the heart that fits the name ---');
+{
+  const heart100 = 'M 50 88 C 20 60 0 40 0 25 C 0 10 12 0 25 0 C 35 0 45 8 50 18 C 55 8 65 0 75 0 C 88 0 100 10 100 25 C 100 40 80 60 50 88 Z';
+  const centered = heart100.replace(/([\d.]+) ([\d.]+)/g, (m, a, b) => (a - 50).toFixed(0) + ' ' + (b - 44).toFixed(0));
+  const distToRing = (q, ring) => {
+    let d = Infinity;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+      d = Math.min(d, Math.hypot(q.x - (a.x + t * dx), q.y - (a.y + t * dy)));
+    }
+    return d;
+  };
+  const ringWidth = (ring) => {
+    const xs = ring.map(q => q.x);
+    return Math.max(...xs) - Math.min(...xs);
+  };
+
+  // built through the intent layer, margin bound like tag_cutout's buffer
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, { summary: 'name in a heart', actions: [
+    { kind: 'add_control', control: { id: 'name', type: 'text', label: 'Name', default: 'BKO' } },
+    { kind: 'add_control', control: { id: 'm', type: 'number', label: 'Margin', default: 0.25, min: 0.1, max: 1, step: 0.05 } },
+    { kind: 'set_shape', shape: { id: 'heart', path: centered } },
+    { kind: 'set_shape', shape: { id: 'tag', fit: { of: 'heart', margin: 'm' } } },
+    { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 0.7 } } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag', tabs: true } } },
+  ], declined: [] });
+  if (res.applied.length === 6 && !res.skipped.length) pass('fit shape applies through the intent layer (dry-run resolves at scale 1)');
+  else fail(`fit apply wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+  rec = res.recipe;
+
+  const measure = (values) => {
+    const r = run(rec, values);
+    if (!r.ok) return { r };
+    const ring = r.preview.built.find(x => x.op.id === 'cut').r.previewRing;
+    const cutXY = r.preview.built
+      .filter(x => x.op.id === 'engrave')
+      .flatMap(x => x.r.moves)
+      .filter(mv => Number.isFinite(mv.x) && Number.isFinite(mv.y));
+    const clear = Math.min(...cutXY.map(q => distToRing(q, ring)));
+    return { r, ring, clear, w: ringWidth(ring) };
+  };
+
+  const short = measure({ name: 'BO', m: 0.25 });
+  if (short.r.ok && short.r.sbp) pass('name-in-a-fitted-heart VERIFIED → SBP');
+  else fail(`fitted heart rejected: ${short.r.errors?.join(' | ')}`);
+  if (short.r.ok) {
+    // THE bug: text must clear the heart's edge — measure it
+    if (short.clear >= 0.25 * 0.9 && short.clear < 1.5) {
+      pass(`engraving clears the fitted edge by ${short.clear.toFixed(3)}" (margin 0.25", snug not bloated)`);
+    } else fail(`clearance wrong: ${short.clear}`);
+    const long = measure({ name: 'BARTHOLOMEW', m: 0.25 });
+    if (long.r.ok && long.w > short.w * 1.5 && long.clear >= 0.25 * 0.9) {
+      pass(`longer name grows the heart: ${short.w.toFixed(2)}" → ${long.w.toFixed(2)}" wide, clearance still ${long.clear.toFixed(3)}"`);
+    } else fail(`long-name fit wrong: ok=${long.r.ok} w=${long.w} vs ${short.w} clear=${long.clear}`);
+    const roomy = measure({ name: 'BO', m: 0.8 });
+    if (roomy.r.ok && roomy.w > short.w * 1.3 && roomy.clear >= 0.8 * 0.9) {
+      pass(`margin slider is the size the user means: 0.8" margin → ${roomy.w.toFixed(2)}"-wide heart`);
+    } else fail(`margin response wrong: ok=${roomy.r.ok} w=${roomy.w} clear=${roomy.clear}`);
+  }
+}
+
+console.log('--- fit composes: rabbet band on the fitted heart ---');
+{
+  const heart = 'M 0 44 C -30 16 -50 -4 -50 -19 C -50 -34 -38 -44 -25 -44 C -15 -44 -5 -36 0 -26 C 5 -36 15 -44 25 -44 C 38 -44 50 -34 50 -19 C 50 -4 30 16 0 44 Z';
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Heart tag, rabbeted',
+    controls: [{ id: 'name', type: 'text', label: 'Name', default: 'ADA' }],
+    shapes: [
+      { id: 'heart', path: heart },
+      { id: 'tag', fit: { of: 'heart', margin: 0.3 } },
+      { id: 'rim', band: { of: 'tag', width: 0.2, overrun: 0.05 } },
+    ],
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 0.7 } },
+      { id: 'rabbet', strategy: 'pocket_shape', params: { shape: 'rim', depth: 0.15, toolDiameter: 0.125, edgeTreatment: true } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag' } },
+    ],
+  };
+  const r = run(rec);
+  if (r.ok && r.sbp) pass('band-of-fitted-shape chain resolves and VERIFIES (rabbet rides the self-sized heart)');
+  else fail(`fitted rabbet rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const rabbet = r.job.operations.find(o => o.name.startsWith('rabbet'));
+    if (rabbet?.allowOverlapWith?.some(n => n.startsWith('cut'))) {
+      pass('overlap allowance still scoped through the fit lineage (rabbet ↔ its cutout only)');
+    } else fail(`fit lineage broken: allowOverlapWith=${JSON.stringify(rabbet?.allowOverlapWith)} allowOverlap=${rabbet?.allowOverlap}`);
+    // the band actually follows the fitted size: its outline must hug
+    // the fitted ring, not the unit-less base heart
+    const cutRing = r.preview.built.find(x => x.op.id === 'cut').r.previewRing;
+    const rimRings = r.preview.shapeOutlines.find(o => o.id === 'rim')?.rings ?? [];
+    const cutXs = cutRing.map(q => q.x);
+    const rimXs = rimRings.flat().map(q => q.x);
+    const cutW = Math.max(...cutXs) - Math.min(...cutXs);
+    const rimW = Math.max(...rimXs) - Math.min(...rimXs);
+    if (Math.abs(rimW - (cutW + 0.1)) < 0.02) {
+      pass(`band hugs the fitted edge: rim ${rimW.toFixed(3)}" vs cutout ${cutW.toFixed(3)}" + 2×0.05 overrun`);
+    } else fail(`band did not follow the fit: rim=${rimW} cut=${cutW}`);
+  }
+}
+
+console.log('--- fit failure modes stay honest ---');
+{
+  const heartCentered = 'M 0 44 C -30 16 -50 -4 -50 -19 C -50 -34 -38 -44 -25 -44 C -15 -44 -5 -36 0 -26 C 5 -36 15 -44 25 -44 C 38 -44 50 -34 50 -19 C 50 -4 30 16 0 44 Z';
+  const heartOffOrigin = 'M 50 88 C 20 60 0 40 0 25 C 0 10 12 0 25 0 C 35 0 45 8 50 18 C 55 8 65 0 75 0 C 88 0 100 10 100 25 C 100 40 80 60 50 88 Z';
+  const base = (shapes, pipeline) => ({ ...structuredClone(EMPTY_RECIPE), shapes, pipeline });
+
+  // nothing before the referencing op → there is nothing to wrap
+  const empty = base(
+    [{ id: 'heart', path: heartCentered }, { id: 'tag', fit: { of: 'heart', margin: 0.25 } }],
+    [{ id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag' } }],
+  );
+  const r1 = run(empty);
+  if (!r1.ok && r1.errors[0].includes('BEFORE')) pass(`fit with no content refused: "${r1.errors[0]}"`);
+  else fail(`empty-fit error wrong: ${r1.errors?.join(' | ')}`);
+
+  // base authored off-origin (viewbox coords) can never wrap origin-centered content
+  const off = base(
+    [{ id: 'heart', path: heartOffOrigin }, { id: 'tag', fit: { of: 'heart', margin: 0.25 } }],
+    [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'AB', letterHeight: 0.7 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag' } },
+    ],
+  );
+  const r2 = run(off);
+  if (!r2.ok && r2.errors[0].includes('ORIGIN')) pass('off-origin base refused with the origin lesson, not an endless search');
+  else fail(`off-origin fit error wrong: ${r2.errors?.join(' | ')}`);
+
+  // apply-time validation: bad references and expressions skip with reasons
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, { summary: 's', actions: [
+    { kind: 'set_shape', shape: { id: 'line', path: 'M -1 0 L 1 0', open: true } },
+    { kind: 'set_shape', shape: { id: 'a', fit: { of: 'line', margin: 0.2 } } },
+    { kind: 'set_shape', shape: { id: 'b', fit: { of: 'nope', margin: 0.2 } } },
+    { kind: 'set_shape', shape: { id: 'heart', path: 'M 0 1 L -1 -1 L 1 -1 Z' } },
+    { kind: 'set_shape', shape: { id: 'c', fit: { of: 'heart', margin: '{q+}' } } },
+    { kind: 'set_shape', shape: { id: 'tag', fit: { of: 'heart', margin: 0.25 } } },
+  ], declined: [] });
+  const want = [['open curve'], ['not defined ABOVE'], ['margin']];
+  if (res.applied.length === 3 && res.skipped.length === 3 && want.every((w, i) => w.every(x => res.skipped[i].includes(x)))) {
+    pass('fit validated at apply time: open-curve base, unknown base, bad margin all skipped with reasons');
+  } else fail(`fit apply validation wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+  const rm = applyActions(res.recipe, { summary: 'rm', actions: [{ kind: 'remove_shape', id: 'heart' }], declined: [] });
+  if (rm.skipped.some(s => s.includes('referenced'))) pass('remove_shape blocked while a fit derives from it');
+  else fail(`remove_shape fit guard failed: ${JSON.stringify(rm.skipped)}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

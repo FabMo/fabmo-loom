@@ -18,7 +18,7 @@
 // exist.
 
 import { CATALOG } from './catalog.mjs';
-import { expandTemplate, pathToRegions, pathToCurve, offsetRegions, booleanRegions } from './shape.mjs';
+import { expandTemplate, pathToRegions, pathToCurve, offsetRegions, booleanRegions, fitRegionsSnug } from './shape.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
@@ -72,7 +72,7 @@ export function buildVars(recipe, controlValues) {
 
 // Lower the shapes section once per weave: template-expand with the
 // full namespace, then parse (path shapes) or derive (algebra shapes:
-// inset/outset/band/union/difference/intersect over EARLIER shapes —
+// inset/outset/band/union/difference/intersect/fit over EARLIER shapes —
 // document order is definition order). Shapes always live in the SHARED
 // frame (inches, y-flip, no recentering) — that is what makes an op
 // referencing "arch" and a curve derived alongside it align by
@@ -81,7 +81,15 @@ export function buildVars(recipe, controlValues) {
 // lineage that lets a rabbet band and the cutout that consumes the same
 // base shape be recognized as related. Returns { shapes, warnings } or
 // { error }.
-export function buildShapes(recipe, vars) {
+//
+// `fit` derivations self-size around CONTENT, which does not exist until
+// the pipeline runs — so with { defer: true } a fit entry (and anything
+// derived from it) is left out of `shapes` and listed in `pending`;
+// runRecipe resolves each via resolve(id, ctx) at the first op that
+// references it, when content-so-far is exactly what it must wrap.
+// Without defer (the intent layer's dry-run), fit resolves as the base
+// at scale 1: structure and expressions are what validation checks.
+export function buildShapes(recipe, vars, { defer = false } = {}) {
   const shapes = {};
   const warnings = [];
   const num = (v, what, id) => {
@@ -99,8 +107,9 @@ export function buildShapes(recipe, vars) {
     if (b.kind !== 'region') return { error: `shape "${id}": ${what} needs a closed shape, but "${ref}" is an open curve` };
     return { base: b };
   };
-  for (const s of recipe.shapes ?? []) {
-    if (!ID_RE.test(s.id ?? '')) return { error: `shape has a bad id "${s.id}"` };
+  // per-entry lowering; success mutates shapes/warnings, failure returns
+  // { error }. ctx (content machined so far) is consulted only by fit.
+  const lowerEntry = (s, ctx) => {
     if (s.path !== undefined) {
       const ex = expandTemplate(s.path ?? '', vars);
       if (ex.error) return { error: `shape "${s.id}": ${ex.error}` };
@@ -174,11 +183,87 @@ export function buildShapes(recipe, vars) {
       // boolean results have mixed ancestry; the first operand's root
       // stands in (difference keeps the body it carves from)
       shapes[s.id] = { kind: 'region', regions: out.regions, root: shapes[refs[0]].root };
+    } else if (s.fit) {
+      // self-sizing: scale the base uniformly about the ORIGIN until all
+      // content clears its edge by margin — the tag_cutout ergonomic for
+      // any outline. The base's absolute size is irrelevant; its CENTER
+      // matters (content centers at the origin).
+      const b = baseOf(s.fit.of, s.id, 'fit');
+      if (b.error) return b;
+      const m = num(s.fit.margin ?? 0, 'margin', s.id);
+      if (m.error) return m;
+      if (!(m.value >= 0)) return { error: `shape "${s.id}": fit margin must be a number ≥ 0` };
+      if (!ctx) {
+        // validation dry-run: content does not exist yet — the base at
+        // scale 1 stands in; references and expressions are what's checked
+        shapes[s.id] = { kind: 'region', regions: b.base.regions, root: b.base.root, fitted: true };
+        return;
+      }
+      const pts = contentPoints(ctx);
+      if (!pts.length) {
+        return { error: `shape "${s.id}": fit has nothing to wrap yet — the operations it must contain (engraving, pockets, holes) go BEFORE the operation that references it` };
+      }
+      const f = fitRegionsSnug(b.base.regions, m.value, pts);
+      if (f.error) return { error: `shape "${s.id}": fit of "${s.fit.of}" ${f.error}` };
+      shapes[s.id] = { kind: 'region', regions: f.regions, root: b.base.root, fitted: true, scale: f.scale };
     } else {
-      return { error: `shape "${s.id}" needs a path, an asset, or a derivation (inset/outset/band/union/difference/intersect)` };
+      return { error: `shape "${s.id}" needs a path, an asset, or a derivation (inset/outset/band/union/difference/intersect/fit)` };
     }
+  };
+
+  const refsOf = (s) =>
+    s.inset ? [s.inset.of]
+    : s.outset ? [s.outset.of]
+    : s.band ? [s.band.of]
+    : s.fit ? [s.fit.of]
+    : (s.union ?? s.difference ?? s.intersect ?? []);
+
+  const pending = new Map();   // id → entry, waiting for content
+  for (const s of recipe.shapes ?? []) {
+    if (!ID_RE.test(s.id ?? '')) return { error: `shape has a bad id "${s.id}"` };
+    const refs = refsOf(s);
+    if (defer && (s.fit !== undefined || (Array.isArray(refs) && refs.some(r => pending.has(r))))) {
+      pending.set(s.id, s);
+      continue;
+    }
+    const e = lowerEntry(s, null);
+    if (e?.error) return e;
   }
-  return { shapes, warnings };
+
+  // resolve one pending shape (and its pending dependencies, which are
+  // earlier in document order) against the content machined so far
+  const resolve = (id, ctx) => {
+    const s = pending.get(id);
+    if (!s) return null;
+    const refs = refsOf(s);
+    if (Array.isArray(refs)) {
+      for (const r of refs) {
+        const e = resolve(r, ctx);
+        if (e) return e;
+      }
+    }
+    const e = lowerEntry(s, ctx);
+    if (e?.error) return e;
+    pending.delete(id);
+    return null;
+  };
+
+  return { shapes, warnings, pending, resolve };
+}
+
+// every cut point the pipeline has produced so far — what a fit-derived
+// shape must wrap. True outlines when strategies recorded them, bbox
+// perimeter as the fallback (same preference order as the cutout's own
+// fit check, which independently confirms the result).
+function contentPoints(ctx) {
+  if (ctx.contentRings?.length) return ctx.contentRings.flat();
+  const b = ctx.contentBBox;
+  if (!b) return [];
+  const pts = [];
+  const step = 0.05;
+  for (let x = b.minX; x <= b.maxX + 1e-9; x += step) { pts.push({ x, y: b.minY }, { x, y: b.maxY }); }
+  for (let y = b.minY; y <= b.maxY + 1e-9; y += step) { pts.push({ x: b.minX, y }, { x: b.maxX, y }); }
+  return pts;
 }
 
 export function controlDefaults(recipe) {
@@ -239,16 +324,19 @@ export function runRecipe(recipe, controlValues, fonts) {
   }
   const vars = bv.vars;
 
-  const bs = buildShapes(recipe, vars);
+  const bs = buildShapes(recipe, vars, { defer: true });
   if (bs.error) {
     return { ok: false, errors: [bs.error], warnings: [], preview: { empty: true } };
   }
   // construction geometry for the preview (drawn even when an op fails,
   // so a fit conflict shows WHERE instead of a blank canvas), plus
-  // authoring sanity warnings
+  // authoring sanity warnings. fit-derived shapes are added as they
+  // resolve mid-pipeline, so the array is filled by addOutline.
   const shapeOutlines = [];
-  const shapesWarnings = [...(bs.warnings ?? [])];
-  for (const [id, sh] of Object.entries(bs.shapes)) {
+  const shapesWarnings = bs.warnings;
+  const outlined = new Set();
+  const addOutline = (id, sh) => {
+    outlined.add(id);
     const rings = sh.kind === 'region'
       ? sh.regions.flatMap(r => [r.outer, ...r.holes])
       : sh.polylines.map(p => p.points);
@@ -266,7 +354,8 @@ export function runRecipe(recipe, controlValues, fonts) {
     if (off > Math.max(2, span * 0.5)) {
       shapesWarnings.push(`shape "${id}" is centered ${off.toFixed(1)}" from the origin — prior content centers AT the origin; author shapes around it`);
     }
-  }
+  };
+  for (const [id, sh] of Object.entries(bs.shapes)) addOutline(id, sh);
 
   const ctx = {
     fonts,
@@ -286,6 +375,14 @@ export function runRecipe(recipe, controlValues, fonts) {
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
     const p = resolveParams(entry, op.params, controlValues, vars, errors, op.id);
     if (errors.length) break;
+    // fit-derived shapes lower HERE, at first reference: the content
+    // machined so far is exactly what they must wrap
+    for (const v of Object.values(p)) {
+      if (typeof v !== 'string' || !bs.pending.has(v)) continue;
+      const e = bs.resolve(v, ctx);
+      if (e) { errors.push(`op "${op.id}": ${e.error}`); break; }
+    }
+    if (errors.length) break;
     const r = entry.run(p, ctx);
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
@@ -301,6 +398,11 @@ export function runRecipe(recipe, controlValues, fonts) {
           maxX: Math.max(ctx.contentBBox.maxX, r.bbox.maxX), maxY: Math.max(ctx.contentBBox.maxY, r.bbox.maxY),
         }
       : { ...r.bbox };
+  }
+  // shapes resolved mid-pipeline (fit chains) join the construction
+  // preview — on failure too, so a bad fit still shows where it landed
+  for (const [id, sh] of Object.entries(bs.shapes)) {
+    if (!outlined.has(id)) addOutline(id, sh);
   }
   if (errors.length || !built.length) {
     // degrade gracefully: the JOB is refused, but the user still gets a

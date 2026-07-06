@@ -84,6 +84,14 @@ export const ACTION_TOOL = {
                 union: { type: 'array', items: { type: 'string' }, description: 'shape ids to merge' },
                 difference: { type: 'array', items: { type: 'string' }, description: 'first shape minus the rest' },
                 intersect: { type: 'array', items: { type: 'string' } },
+                fit: {
+                  type: 'object', description: 'derive a SELF-SIZING outline: the base shape scaled uniformly about the origin until everything machined BEFORE the first op that references this shape clears its edge by margin. THE way to put content inside a shaped outline (a name in a heart) — never guess the shape\'s absolute size',
+                  properties: {
+                    of: { type: 'string', description: 'the base shape id — authored at any convenient size but CENTERED ON THE ORIGIN (only its center matters; fit supplies the size)' },
+                    margin: { type: 'string', description: 'clearance between content and the shape edge, inches or {arithmetic} — bind it to a control, like tag_cutout\'s buffer' },
+                  },
+                  required: ['of'],
+                },
               },
               required: ['id'],
             },
@@ -141,7 +149,9 @@ RULES:
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame and re-lower on every slider move. CRITICAL: shape coordinates are INCHES, CENTERED ON THE ORIGIN (where prior content like engraved text centers). NEVER paste an SVG-viewbox path unscaled — a heart in a 0..100 box becomes a 100-INCH part 50 inches off-center. A 3" heart spans roughly -1.5..1.5 around the origin; rescale and re-center the coordinates yourself (or use {arithmetic} of a size control) before authoring the path. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
-- Shapes can also be DERIVED from earlier shapes instead of authored: inset/outset {of, by} (offset), band {of, width, overrun} (a band hugging the whole outline — frames, whole-rim rabbets and ledges: pocket the band with edgeTreatment true before the cutout of the same base shape), union/difference/intersect [ids]. Derivations are computed geometry — prefer them over re-authoring offset outlines by hand.
+- Shapes can also be DERIVED from earlier shapes instead of authored: inset/outset {of, by} (offset), band {of, width, overrun} (a band hugging the whole outline — frames, whole-rim rabbets and ledges: pocket the band with edgeTreatment true before the cutout of the same base shape), union/difference/intersect [ids], fit {of, margin} (self-sizing, below). Derivations are computed geometry — prefer them over re-authoring offset outlines by hand.
+- Content INSIDE a shaped outline ("engrave a name and cut it out as a heart") is a FIT, not a guess: author the base outline at any convenient size CENTERED ON THE ORIGIN, then set_shape tag = fit {of: base, margin: m} and cut/pocket THAT. fit scales the base uniformly (about the origin) until everything machined before the referencing op clears its edge by margin — so a longer name simply makes a bigger heart, exactly like tag_cutout's buffer. Bind margin to a control; put the content operations FIRST in the pipeline. Never size such a shape with a fixed width — a width the user's text has outgrown is a fit conflict.
+- Give every authored shape the controls a user would naturally grab, and pick the shape's OWN parameters over generic stretch: an arch gets radius and band thickness, a rounded shape gets its corner radius, a star gets inner/outer radius. Organic outlines (hearts, shields, leaves) distort badly under independent width/height — give them ONE uniform size control, or better, fit + a margin control when content sits inside. Independent width/height stretch is right only for boxy shapes (plaques, frames, rectangles).
 - A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: whole-rim = a band-derived shape pocketed with edgeTreatment true; a PARTIAL edge (one side only) = a pocket_shape "custom" band you author hugging that edge — the recipe is in pocket_shape's doc.
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
@@ -281,9 +291,9 @@ export function applyActions(recipe, payload) {
           skipped.push('set_shape: needs an id (letters/digits/_)'); break;
         }
         // the stored entry: a path, an asset, or exactly one derivation
-        const forms = ['path', 'asset', 'inset', 'outset', 'band', 'union', 'difference', 'intersect'].filter(k => s[k] !== undefined);
+        const forms = ['path', 'asset', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit'].filter(k => s[k] !== undefined);
         if (forms.length !== 1) {
-          skipped.push(`set_shape "${s.id}": give a path, an asset, OR one derivation (inset/outset/band/union/difference/intersect)`); break;
+          skipped.push(`set_shape "${s.id}": give a path, an asset, OR one derivation (inset/outset/band/union/difference/intersect/fit)`); break;
         }
         const entry = { id: s.id, [forms[0]]: s[forms[0]], ...(forms[0] === 'path' && s.open ? { open: true } : {}) };
         // dry-lower the FINAL shapes list through the real buildShapes so
@@ -310,7 +320,7 @@ export function applyActions(recipe, payload) {
           o.params && (o.params.shape === a.id || o.params.along === a.id));
         if (used) { skipped.push(`remove_shape: "${a.id}" is still referenced by an operation`); break; }
         const usedByShape = next.shapes.some(x => x.id !== a.id && (
-          x.inset?.of === a.id || x.outset?.of === a.id || x.band?.of === a.id
+          x.inset?.of === a.id || x.outset?.of === a.id || x.band?.of === a.id || x.fit?.of === a.id
           || x.union?.includes(a.id) || x.difference?.includes(a.id) || x.intersect?.includes(a.id)));
         if (usedByShape) { skipped.push(`remove_shape: "${a.id}" is referenced by another shape's derivation`); break; }
         const before = next.shapes.length;

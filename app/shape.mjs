@@ -108,6 +108,67 @@ export function booleanRegions(op, regionSets) {
 }
 
 // ---------------------------------------------------------------------
+// Snug fit — the tag_cutout ergonomic for ANY outline. Given a base
+// shape (authored around the origin, absolute size irrelevant) and the
+// points of everything already machined, find the smallest uniform
+// scale about the origin at which all content clears the shape's edge
+// by `margin`. The control a user actually means when they put a name
+// inside a heart is the MARGIN, not the heart's width — this moves the
+// sizing search out of the model's guess and into code the verifier's
+// fit check will independently confirm.
+
+const pointInRing = (x, y, ring) => {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+};
+const pointInRegion = (x, y, r) => pointInRing(x, y, r.outer) && !r.holes.some(h => pointInRing(x, y, h));
+
+const scaleRegions = (regions, s) => regions.map(r => ({
+  outer: r.outer.map(q => ({ x: q.x * s, y: q.y * s })),
+  holes: r.holes.map(h => h.map(q => ({ x: q.x * s, y: q.y * s }))),
+}));
+
+/**
+ * @param {Array} regions  base shape, authored around the origin
+ * @param {number} margin  required clearance, inches (≥ 0)
+ * @param {Array<{x,y}>} points  content that must end up inside
+ * @returns {{regions, scale} | {error}}  the scaled shape, snug
+ */
+export function fitRegionsSnug(regions, margin, points) {
+  if (!points.length) return { error: 'there is no content to fit around' };
+  const fits = (s) => {
+    const inset = margin > 0 ? offsetRegions(scaleRegions(regions, s), -margin) : scaleRegions(regions, s);
+    if (!inset.length) return false;
+    return points.every(q => inset.some(r => pointInRegion(q.x, q.y, r)));
+  };
+  // grow until the content fits (a shape that never contains it —
+  // ring-shaped, or authored off-origin — must fail honestly, not spin)
+  let hi = 1, guard = 0;
+  while (!fits(hi)) {
+    hi *= 2;
+    if (++guard > 12) {
+      return { error: 'never contains the content at any size — the base shape must be authored AROUND THE ORIGIN (content centers there), and must be solid where the content sits' };
+    }
+  }
+  // shrink to bracket the snug scale from below
+  let lo = hi / 2;
+  if (guard === 0) {
+    while (fits(lo) && lo > 1 / 4096) { hi = lo; lo /= 2; }
+  }
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if (fits(mid)) hi = mid; else lo = mid;
+  }
+  return { regions: scaleRegions(regions, hi), scale: hi };
+}
+
+// ---------------------------------------------------------------------
 // Parametric paths: {expressions} of control ids inside a template
 // string, evaluated against the current control values at weave time.
 // This is what makes a shape's INTERNAL geometry adjustable — an arch

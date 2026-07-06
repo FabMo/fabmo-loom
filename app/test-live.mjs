@@ -115,5 +115,25 @@ console.log('--- live prompt 4: "cut out the uploaded logo" → asset shape ---'
   } else fail(`prompt 4: declined=${out.declined.length} assetShape=${!!assetShape} cutout=${!!cut} verified=${r.ok} errors=${r.errors?.join(' | ')}`);
 }
 
+console.log('--- live prompt 5: "engrave a name and cut it out as a heart" → fit ---');
+{
+  // the heart field report: the model used to guess the heart's size and
+  // the text overflowed. It must now reach for the fit derivation.
+  recipe = structuredClone(EMPTY_RECIPE);
+  const payload = await parse(recipe, 'an app to engrave a name and cut it out as a heart-shaped tag');
+  const out = applyActions(recipe, payload);
+  recipe = out.recipe;
+  console.log(`    model: "${payload.summary}" | applied: ${out.applied.join('; ')}${out.skipped.length ? ` | skipped: ${out.skipped.join('; ')}` : ''}${out.declined.length ? ` | declined: ${out.declined.map(d => d.what).join('; ')}` : ''}`);
+  const fitShape = (recipe.shapes ?? []).find(s => s.fit);
+  const r = quiet(() => runRecipe(recipe, controlDefaults(recipe), FONT));
+  // the strong assertion is the fit derivation; the fallback is at least
+  // a verified heart with the text inside (fit check passed)
+  if (fitShape && r.ok && r.sbp) {
+    pass(`heart self-sizes around the name live: fit {of: ${fitShape.fit.of}}, verified → SBP`);
+  } else if (r.ok && r.sbp) {
+    fail(`verified, but WITHOUT fit — the model still guessed a size (shapes: ${JSON.stringify(recipe.shapes)})`);
+  } else fail(`prompt 5: fit=${!!fitShape} verified=${r.ok} errors=${r.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LIVE INTENT CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
