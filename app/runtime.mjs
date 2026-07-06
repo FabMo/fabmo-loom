@@ -18,6 +18,7 @@
 // exist.
 
 import { CATALOG } from './catalog.mjs';
+import { expandTemplate } from './shape.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
 
@@ -50,6 +51,14 @@ function resolveParams(entry, params, controlValues, errors, opId) {
     }
     if (v === undefined || v === null || v === '') v = spec.default;
     if (v === undefined) { errors.push(`op "${opId}": required param ${key} missing`); continue; }
+    // template params (spec.template) may hold {expressions} of control
+    // ids — how a shape's internal geometry binds to sliders. Opt-in per
+    // param spec: ordinary string params (engraved text!) keep literal braces.
+    if (spec.template && typeof v === 'string' && v.includes('{')) {
+      const ex = expandTemplate(v, controlValues);
+      if (ex.error) { errors.push(`op "${opId}": param ${key}: ${ex.error}`); continue; }
+      v = ex.value;
+    }
     if (spec.type === 'boolean') {
       v = v === true || v === 'true' || v === 'yes';
     }

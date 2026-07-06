@@ -457,7 +457,7 @@ export const CATALOG = {
     doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
       shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", or "custom" (author the outline in the path param)' },
-      path: { type: 'string', default: '', doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path' },
+      path: { type: 'string', default: '', template: true, doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path, {arithmetic} of control ids included (set width and height 0 for parametric paths)' },
       diameter: { type: 'number', default: 2, doc: 'circle only: pocket diameter, inches', bindable: true },
       width: { type: 'number', default: 2, doc: 'rectangle/custom: pocket width, inches', bindable: true },
       height: { type: 'number', default: 0, doc: 'rectangle/custom: pocket height, inches; 0 = default (rectangle 1.5"; custom scales uniformly from width, keeping the shape\'s aspect)', bindable: true },
@@ -709,11 +709,11 @@ export const CATALOG = {
   },
 
   shape_cutout: {
-    doc: 'Cut out a part with ANY outline — ellipse, star, heart, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
+    doc: 'Cut out a part with ANY outline — ellipse, star, heart, arch, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. PARAMETRIC shapes — when a DIMENSION OF THE SHAPE ITSELF must be adjustable (an arch with radius and band-thickness sliders): write {arithmetic} of number-control ids inside the path, set width AND height to 0 (path units are then inches as authored), and create the controls. The arch: path "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z" with controls r and t — every slider move re-evaluates, re-lowers, re-verifies. (A part dimension like that band thickness is a shape control — it is NOT the stock thickness.) Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
     params: {
-      path: { type: 'string', default: '', doc: 'the outline as one SVG path "d" string (any coordinate box; scaled to width/height)' },
-      width: { type: 'number', default: 4, doc: 'finished part width, inches', bindable: true },
-      height: { type: 'number', default: 0, doc: 'finished part height, inches; 0 = scale uniformly from width (aspect preserved)', bindable: true },
+      path: { type: 'string', default: '', template: true, doc: 'the outline as one SVG path "d" string (any coordinate box; scaled to width/height); may contain {arithmetic} of control ids for parametric shapes' },
+      width: { type: 'number', default: 4, doc: 'finished part width, inches; 0 = the path is already in inches (REQUIRED for parametric {…} paths — do not fight the shape controls with a second scale)', bindable: true },
+      height: { type: 'number', default: 0, doc: 'finished part height, inches; 0 = scale uniformly from width (aspect preserved), or true size if width is also 0', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
@@ -737,7 +737,7 @@ export const CATALOG = {
       // pocket fits a star cutout even though its bounding BOX does not);
       // fall back to walking the bbox perimeter — perimeter, not just
       // corners, so a concavity (star waist) between corners is caught too
-      const fitError = { error: `the content so far pokes outside that ${p.width}"-wide shape — enlarge width/height, or reshape the outline` };
+      const fitError = { error: `the content so far pokes outside that ${p.width > 0 ? `${p.width}"-wide ` : ''}shape — enlarge ${p.width > 0 ? 'width/height' : 'its controls'}, or reshape the outline` };
       if (ctx.contentRings?.length) {
         for (const cr of ctx.contentRings) {
           if (cr.some(q => !pointInPolygon(q.x, q.y, shapeRegion))) return fitError;

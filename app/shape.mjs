@@ -55,6 +55,86 @@ export function weldContours(contours) {
 }
 
 // ---------------------------------------------------------------------
+// Parametric paths: {expressions} of control ids inside a template
+// string, evaluated against the current control values at weave time.
+// This is what makes a shape's INTERNAL geometry adjustable — an arch
+// whose radius and band thickness are sliders is
+//   M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z
+// re-lowered through parse→weld→verify on every slider move. The
+// evaluator is a closed arithmetic grammar (numbers, control ids,
+// + - * / and parens) — no eval, no ambient names, so a template stays
+// data, exactly like the rest of the recipe.
+
+function evalExpr(src, vars) {
+  let i = 0;
+  const ws = () => { while (i < src.length && src[i] === ' ') i++; };
+  const primary = () => {
+    ws();
+    if (src[i] === '(') {
+      i++;
+      const v = sum();
+      ws();
+      if (src[i] !== ')') throw new Error(`missing ")" in "${src}"`);
+      i++;
+      return v;
+    }
+    if (src[i] === '-') { i++; return -primary(); }
+    if (src[i] === '+') { i++; return primary(); }
+    const m = /^(?:\d+\.?\d*|\.\d+)/.exec(src.slice(i));
+    if (m) { i += m[0].length; return parseFloat(m[0]); }
+    const id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
+    if (id) {
+      i += id[0].length;
+      const v = vars[id[0]];
+      const n = typeof v === 'number' ? v : parseFloat(v);
+      if (v === undefined) throw new Error(`unknown name "${id[0]}" (controls: ${Object.keys(vars).join(', ') || 'none'})`);
+      if (!Number.isFinite(n)) throw new Error(`control "${id[0]}" is not a number`);
+      return n;
+    }
+    throw new Error(`expected a number, name, or "(" at "${src.slice(i) || 'end'}" in "${src}"`);
+  };
+  const product = () => {
+    let v = primary();
+    for (ws(); src[i] === '*' || src[i] === '/'; ws()) {
+      const op = src[i++];
+      const r = primary();
+      v = op === '*' ? v * r : v / r;
+    }
+    return v;
+  };
+  const sum = () => {
+    let v = product();
+    for (ws(); src[i] === '+' || src[i] === '-'; ws()) {
+      const op = src[i++];
+      const r = product();
+      v = op === '+' ? v + r : v - r;
+    }
+    return v;
+  };
+  const v = sum();
+  ws();
+  if (i < src.length) throw new Error(`unexpected "${src.slice(i)}" in "${src}"`);
+  if (!Number.isFinite(v)) throw new Error(`"${src}" does not evaluate to a finite number`);
+  return v;
+}
+
+/** Expand {expr} placeholders in a template string. Returns {value}|{error}. */
+export function expandTemplate(str, vars) {
+  try {
+    const value = String(str).replace(/\{([^{}]*)\}/g, (_, expr) => {
+      const v = evalExpr(expr, vars ?? {});
+      return String(Math.round(v * 1e6) / 1e6);
+    });
+    if (value.includes('{') || value.includes('}')) {
+      throw new Error('unbalanced braces');
+    }
+    return { value };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ---------------------------------------------------------------------
 // SVG path parsing. Full command set (MLHVCSQTAZ, absolute and
 // relative), implicit repeats, S/T control-point reflection, W3C
 // endpoint-to-center arc conversion. Curves flatten at fixed densities

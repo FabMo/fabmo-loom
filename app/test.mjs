@@ -16,7 +16,7 @@ import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
-import { pathToRegions } from './shape.mjs';
+import { pathToRegions, expandTemplate } from './shape.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FONT_SHELF = {};
@@ -875,6 +875,109 @@ console.log('--- elliptical plaque (the decline, converted end-to-end) ---');
   if (dn.ok && dn.warnings.some(w => w.includes('interior holes'))) {
     pass('donut path: hole ignored for the cutout, warned honestly');
   } else fail(`donut handling wrong: ok=${dn.ok} warnings=${JSON.stringify(dn.warnings)}`);
+}
+
+// ---------------- 20. parametric shapes: {expressions} bind geometry to sliders ----------------
+// The "arch with adjustable thickness and radius" decline, converted:
+// path coordinates may be {arithmetic} of control ids, so the shape's
+// INTERNAL geometry — not just its overall scale — rides the sliders.
+
+console.log('--- template expressions ---');
+{
+  const vars = { r: 2, t: 0.5 };
+  const cases = [
+    ['{r}', '2'],
+    ['{-r}', '-2'],
+    ['{r-t}', '1.5'],
+    ['{t-r}', '-1.5'],
+    ['{r+t*2}', '3'],           // precedence: * before +
+    ['{(r+t)*2}', '5'],
+    ['{r/2 - t}', '0.5'],
+    ['M {-r} 0 A {r} {r} 0 0 1 {r} 0', 'M -2 0 A 2 2 0 0 1 2 0'],
+  ];
+  let bad = 0;
+  for (const [tpl, want] of cases) {
+    const got = expandTemplate(tpl, vars);
+    if (got.value !== want) { bad++; fail(`template ${tpl} → ${JSON.stringify(got)}, want "${want}"`); }
+  }
+  if (!bad) pass(`${cases.length} template expressions evaluate (precedence, parens, unary minus)`);
+
+  const unknown = expandTemplate('{radius}', vars);
+  if (unknown.error?.includes('unknown name "radius"') && unknown.error.includes('r, t')) {
+    pass(`unknown control named with the available list: "${unknown.error}"`);
+  } else fail(`unknown-name error wrong: ${JSON.stringify(unknown)}`);
+  const mangled = expandTemplate('{r+}', vars);
+  if (mangled.error) pass(`malformed expression fails clean: "${mangled.error}"`);
+  else fail(`malformed expression not caught: ${JSON.stringify(mangled)}`);
+  const nonNum = expandTemplate('{name}', { name: 'Brian' });
+  if (nonNum.error?.includes('not a number')) pass('text control in arithmetic refused');
+  else fail(`text control not caught: ${JSON.stringify(nonNum)}`);
+}
+
+console.log('--- the arch app: adjustable radius and band thickness ---');
+{
+  const archPath = 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z';
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Arch cutter',
+    controls: [
+      { id: 'r', type: 'number', label: 'Arch radius (in)', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Band thickness (in)', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+    ],
+    pipeline: [{ id: 'cut', strategy: 'shape_cutout', params: { path: archPath, width: 0, height: 0, tabs: true } }],
+  };
+  const r = run(rec);
+  if (r.ok && r.sbp) pass('arch VERIFIED → SBP at defaults (r=2, t=0.6)');
+  else fail(`arch rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    // true size: no width/height scaling — the sliders own the geometry
+    const cut = r.preview.built.find(x => x.r.previewRing);
+    const ring = cut.r.previewRing;
+    const w = Math.max(...ring.map(q => q.x)) - Math.min(...ring.map(q => q.x));
+    const h = Math.max(...ring.map(q => q.y)) - Math.min(...ring.map(q => q.y));
+    if (Math.abs(w - 4) < 0.01 && Math.abs(h - 2) < 0.01) {
+      pass(`arch is true-size: ${w.toFixed(2)}" span × ${h.toFixed(2)}" rise (2r × r)`);
+    } else fail(`arch size wrong: ${w} × ${h}`);
+
+    // the band is a band: solid at mid-band on the crown, open in the middle
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const cx = (Math.max(...ring.map(q => q.x)) + Math.min(...ring.map(q => q.x))) / 2 + p2.x;
+    const baseY = Math.min(...ring.map(q => q.y)) + p2.y;
+    const crownBand = surfaceAt(sim, cx, baseY + 2 - 0.3);   // mid-band at the crown
+    const opening = surfaceAt(sim, cx, baseY + 0.3);         // under the arch
+    const kerf = surfaceAt(sim, cx, baseY + 2 + 0.125);      // outside the crown
+    if (crownBand === 0 && opening === 0 && kerf < -0.49) {
+      pass(`band measured: crown face ${crownBand}, opening ${opening} (both faces), kerf ${kerf.toFixed(3)} (through)`);
+    } else fail(`band wrong: crown=${crownBand} opening=${opening} kerf=${kerf}`);
+  }
+
+  // ADJUSTABLE: move the sliders, the part follows
+  const r2 = run(rec, { r: 3, t: 1 });
+  if (r2.ok) {
+    const ring2 = r2.preview.built.find(x => x.r.previewRing).r.previewRing;
+    const w2 = Math.max(...ring2.map(q => q.x)) - Math.min(...ring2.map(q => q.x));
+    if (Math.abs(w2 - 6) < 0.01) pass(`sliders drive geometry: r 2→3 makes the span ${w2.toFixed(2)}" (was 4")`);
+    else fail(`slider change wrong span: ${w2}`);
+  } else fail(`arch at r=3,t=1 rejected: ${r2.errors?.join(' | ')}`);
+
+  // degenerate slider combos fail as data, not as a bad cut
+  const r3 = run(rec, { r: 0.75, t: 2 });   // t > r: band swallows the arch
+  if (!r3.ok || r3.ok) {
+    // whatever the geometry does, the gate holds: either a clean error or a verified job
+    const clean = !r3.ok ? r3.errors.length > 0 : r3.report.ok;
+    if (clean) pass(`degenerate combo (t > r) stays gated: ${!r3.ok ? `error "${r3.errors[0]}"` : 'still verifies as a disc'}`);
+    else fail('degenerate combo escaped the gate');
+  }
+
+  // literal braces in NON-template params stay literal (engraved text)
+  const lit = {
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'e', strategy: 'vcarve_text', params: { text: '{r}', letterHeight: 1 } }],
+  };
+  const rl = run(lit);
+  if (rl.ok) pass('literal "{r}" engraves as text — template expansion is opt-in per param');
+  else fail(`literal braces broke text: ${rl.errors?.join(' | ')}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
