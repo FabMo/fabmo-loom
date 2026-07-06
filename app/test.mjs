@@ -16,6 +16,7 @@ import { EMPTY_RECIPE, runRecipe, controlDefaults } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
+import { pathToRegions } from './shape.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FONT_SHELF = {};
@@ -732,6 +733,148 @@ console.log('--- assets: in the document, out of the prompt ---');
   if (out.recipe.assets.length === 2 && out.recipe.assets[1].data.length === rec.assets[1].data.length) {
     pass('assets ride through applyActions intact');
   } else fail('applyActions disturbed assets');
+}
+
+// ---------------- 19. custom shapes: any outline as an SVG path ----------------
+// The "elliptical plaque" decline, converted — and every other outline
+// with it: the model AUTHORS the shape as an svg path (the one 2D
+// language it speaks natively); pathToRegions lowers it
+// deterministically to the same welded regions everything else uses.
+
+console.log('--- custom shapes from svg paths ---');
+{
+  // parsing: relative commands, implicit lineto, uniform scale from width
+  const rect = pathToRegions('m 0 0 l 10 0 0 5 l -10 0 z', { width: 4 });
+  if (!rect.error && rect.regions.length === 1 && Math.abs(rect.w - 4) < 1e-9 && Math.abs(rect.h - 2) < 1e-9) {
+    pass(`relative/implicit path parses: 10×5 box → ${rect.w}" × ${rect.h}" at width 4 (aspect kept)`);
+  } else fail(`rect path wrong: ${JSON.stringify({ error: rect.error, w: rect.w, h: rect.h })}`);
+
+  // an ellipse from two arcs, stretched to 5×3 — area must match πab
+  const ell = pathToRegions('M 0 30 A 50 30 0 1 1 100 30 A 50 30 0 1 1 0 30 Z', { width: 5, height: 3 });
+  const area = (ring) => Math.abs(ring.reduce((a, q, i) => {
+    const j = (i + 1) % ring.length;
+    return a + q.x * ring[j].y - ring[j].x * q.y;
+  }, 0) / 2);
+  const wantA = Math.PI * 2.5 * 1.5;
+  if (!ell.error && ell.regions.length === 1 && Math.abs(area(ell.regions[0].outer) - wantA) / wantA < 0.02) {
+    pass(`ellipse via A arcs: area ${area(ell.regions[0].outer).toFixed(3)} vs πab ${wantA.toFixed(3)} (<2% off)`);
+  } else fail(`ellipse wrong: ${ell.error ?? `${ell.regions.length} regions, area ${area(ell.regions[0]?.outer ?? [])}`}`);
+
+  // a self-crossing pentagram welds SOLID under nonzero (no phantom hole)
+  const star5 = [];
+  for (let k = 0; k < 5; k++) {
+    const a = -Math.PI / 2 + (k * 4 * Math.PI) / 5;   // connect every 2nd point
+    star5.push(`${(50 + 45 * Math.cos(a)).toFixed(3)} ${(50 + 45 * Math.sin(a)).toFixed(3)}`);
+  }
+  const gram = pathToRegions(`M ${star5.join(' L ')} Z`, { width: 3 });
+  // nonzero keeps the core filled: the welded region must match the
+  // SOLID star (10-gon alternating tip/crossing radius), not the
+  // even-odd star-with-a-pentagonal-hole
+  const rIn = 45 * Math.cos(2 * Math.PI / 5) / Math.cos(Math.PI / 5);
+  const solid10 = [];
+  for (let k = 0; k < 10; k++) {
+    const a = -Math.PI / 2 + (k * Math.PI) / 5;
+    const rr = k % 2 === 0 ? 45 : rIn;
+    solid10.push({ x: 50 + rr * Math.cos(a), y: 50 + rr * Math.sin(a) });
+  }
+  const xs = solid10.map(q => q.x);
+  const sxg = 3 / (Math.max(...xs) - Math.min(...xs));
+  const wantStar = area(solid10) * sxg * sxg;
+  const gotStar = gram.error ? 0 : area(gram.regions[0].outer);
+  if (!gram.error && gram.regions.length === 1 && gram.regions[0].holes.length === 0
+      && Math.abs(gotStar - wantStar) / wantStar < 0.01) {
+    pass(`self-crossing pentagram welds SOLID: area ${gotStar.toFixed(3)} vs filled star ${wantStar.toFixed(3)} (nonzero, no phantom hole)`);
+  } else fail(`pentagram weld wrong: ${JSON.stringify({ error: gram.error, n: gram.regions?.length, holes: gram.regions?.[0]?.holes.length, got: gotStar, want: wantStar })}`);
+
+  // garbage in → a readable error out, not a throw
+  const bad = pathToRegions('M 1 2 L', { width: 3 });
+  if (bad.error && bad.error.includes('path')) pass(`bad path fails clean: "${bad.error}"`);
+  else fail(`bad path: ${JSON.stringify(bad)}`);
+}
+
+console.log('--- 7-pointed star pocket (shape "custom") ---');
+{
+  const pts = [];
+  for (let k = 0; k < 14; k++) {
+    const r = k % 2 === 0 ? 48 : 22;
+    const a = -Math.PI / 2 + (k * Math.PI) / 7;
+    pts.push(`${(50 + r * Math.cos(a)).toFixed(3)} ${(50 + r * Math.sin(a)).toFixed(3)}`);
+  }
+  const starPath = `M ${pts.join(' L ')} Z`;
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'star', strategy: 'pocket_shape', params: { shape: 'custom', path: starPath, width: 3, depth: 0.2, toolDiameter: 0.125 } }],
+  };
+  const r = run(rec);
+  if (r.ok) pass('7-pointed star pocket verifies');
+  else fail(`star pocket rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const cx = r.preview.stock.w / 2, cy = r.preview.stock.h / 2;
+    const center = surfaceAt(sim, cx, cy);
+    // the y-flip puts the path's -90° TIP at shop +y, so the VALLEY
+    // bisector (k=7, +90° in path coords) lands at shop -y; a point
+    // beyond the valley radius but inside the tip radius is UNCUT
+    const scale = 3 / 96;   // path box spans 96 units → 3"
+    const between = surfaceAt(sim, cx, cy - 35 * scale);
+    if (Math.abs(center + 0.2) < 0.003 && between === 0) {
+      pass(`star measured: center ${center.toFixed(3)} (declared -0.2), between points ${between} (uncut)`);
+    } else fail(`star surface wrong: center=${center} between=${between}`);
+  }
+}
+
+console.log('--- elliptical plaque (the decline, converted end-to-end) ---');
+{
+  const ellipse = 'M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z';
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    controls: [{ id: 'name', type: 'text', label: 'Name', default: 'Amelia' }],
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 0.8 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { path: ellipse, width: 5, height: 3, tabs: true, chamfer: 0.06 } },
+    ],
+  };
+  const r = run(rec);
+  const cut = r.preview?.built?.find(x => x.op.id === 'cut' && x.r.previewRing);
+  if (r.ok && cut && r.sbp) pass(`elliptical plaque VERIFIED → SBP (${r.report.stats.targets.length} targets checked)`);
+  else fail(`elliptical plaque rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok && cut) {
+    const nTabs = cut.r.previewTabs?.length ?? 0;
+    if (nTabs >= 4) pass(`tabs ride the elliptical profile: ${nTabs} placed`);
+    else fail(`tabs missing on ellipse: ${nTabs}`);
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const ring = cut.r.previewRing;
+    const cx = ring.reduce((s, q) => s + q.x, 0) / ring.length + p2.x;
+    const cy = ring.reduce((s, q) => s + q.y, 0) / ring.length + p2.y;
+    // kerf centerline: ellipse right edge + tool/2 → cut through
+    const kerf = surfaceAt(sim, cx + 2.5 + 0.125, cy);
+    // inside the ellipse above the text: untouched top
+    const inside = surfaceAt(sim, cx, cy + 1.2);
+    if (kerf < -0.49 && inside === 0) {
+      pass(`surface measured: kerf ${kerf.toFixed(3)} (through), inside face ${inside} (untouched)`);
+    } else fail(`plaque surface wrong: kerf=${kerf} inside=${inside}`);
+  }
+
+  // content that doesn't fit the shape → clean refusal, not a bad cut
+  const tiny = structuredClone(rec);
+  tiny.pipeline[1].params.width = 1.2;
+  tiny.pipeline[1].params.height = 0.7;
+  const t = run(tiny);
+  if (!t.ok && t.errors.some(e => e.includes('pokes outside'))) {
+    pass(`undersized shape refused: "${t.errors.find(e => e.includes('pokes outside'))}"`);
+  } else fail(`undersized shape not caught: ok=${t.ok} ${t.errors?.join(' | ')}`);
+
+  // interior holes are ignored for a cutout, with a warning
+  const donut = structuredClone(rec);
+  donut.pipeline[1].params.path =
+    'M 0 50 A 50 50 0 1 1 100 50 A 50 50 0 1 1 0 50 Z M 30 50 A 20 20 0 1 0 70 50 A 20 20 0 1 0 30 50 Z';
+  donut.pipeline[1].params.width = 5;
+  donut.pipeline[1].params.height = 5;
+  const dn = run(donut);
+  if (dn.ok && dn.warnings.some(w => w.includes('interior holes'))) {
+    pass('donut path: hole ignored for the cutout, warned honestly');
+  } else fail(`donut handling wrong: ok=${dn.ok} warnings=${JSON.stringify(dn.warnings)}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

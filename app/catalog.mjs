@@ -24,6 +24,7 @@ import { generateSurfaceRaster } from '../strategies/surface-raster.js';
 import { coverageCurve, pickChainSlotAware, regionArea, formatDiameter } from '../strategies/tool-select.js';
 import ClipperLib from '../vendor/clipper.js';
 import { FONTS, DEFAULT_FONT } from './fonts.mjs';
+import { weldContours, pathToRegions } from './shape.mjs';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -90,34 +91,30 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   return ring;
 }
 
-// Weld raw font contours into clean {outer, holes} regions under the
-// font's own NONZERO fill rule — the same rule every rasterizer applies
-// to these outlines. The contours arrive AS AUTHORED (textToContours):
-// outers and counters wind opposite ways, so nonzero keeps counters as
-// holes, keeps self-crossing script strokes filled, and welds the joins
-// where connected letters overlap. Do NOT pre-classify outer/hole by
-// containment here — script glyphs overlap instead of nesting, and that
-// misclassification is exactly what used to delete strokes and counters.
-// Output normalized to the downstream convention (outers CCW, holes CCW).
-const CLIP_SCALE = 1e6;
-function weldContours(contours) {
-  if (!contours.length) return { regions: [], merged: false };
-  const toClip = ring => ring.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) }));
-  const fromClip = path => path.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE }));
-  const c = new ClipperLib.Clipper();
-  for (const ring of contours) {
-    c.AddPath(toClip(ring), ClipperLib.PolyType.ptSubject, true);
+// Font contours weld under the NONZERO fill rule — the same rule every
+// rasterizer applies to these outlines. The contours arrive AS AUTHORED
+// (textToContours): outers and counters wind opposite ways, so nonzero
+// keeps counters as holes, keeps self-crossing script strokes filled,
+// and welds the joins where connected letters overlap. Do NOT
+// pre-classify outer/hole by containment — script glyphs overlap instead
+// of nesting, and that misclassification is exactly what used to delete
+// strokes and counters. The weld itself lives in shape.mjs, shared with
+// the svg-path shape source.
+
+// A custom shape lowered from an svg path, largest region by outer area
+// (the LLM occasionally authors stray slivers; the plaque is the big one)
+function customShapeRegion(p) {
+  const sized = pathToRegions(p.path ?? '', {
+    width: p.width > 0 ? p.width : 0,
+    height: p.height > 0 ? p.height : 0,
+  });
+  if (sized.error) return sized;
+  const regions = [...sized.regions].sort((a, b) => Math.abs(ringArea(b.outer)) - Math.abs(ringArea(a.outer)));
+  const warnings = [];
+  if (regions.length > 1) {
+    warnings.push(`that shape welds to ${regions.length} separate pieces — using the largest; the rest are ignored`);
   }
-  const tree = new ClipperLib.PolyTree();
-  c.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
-  const ex = ClipperLib.JS.PolyTreeToExPolygons(tree);
-  const regions = ex
-    .filter(e => e.outer?.length >= 3)
-    .map(e => ({ outer: ccw(fromClip(e.outer)), holes: (e.holes ?? []).map(h => ccw(fromClip(h))) }));
-  // merged = the weld changed the ring structure (fused joins, absorbed
-  // overlaps). Cleanly nested text maps 1:1: ring counts match.
-  const outRings = regions.reduce((n, r) => n + 1 + r.holes.length, 0);
-  return { regions, merged: outRings !== contours.length };
+  return { region: regions[0], w: sized.w, h: sized.h, warnings };
 }
 
 // Enforce the medial axis's own invariant against the exact region
@@ -457,12 +454,13 @@ export const CATALOG = {
   },
 
   pocket_shape: {
-    doc: 'Pocket a GEOMETRIC shape into the surface — a round or rounded-rectangle recess at constant depth (coaster wells, trays, dishes, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for rectangle corners (circles have none).',
+    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
-      shape: { type: 'string', default: 'circle', doc: '"circle" or "rectangle"' },
+      shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", or "custom" (author the outline in the path param)' },
+      path: { type: 'string', default: '', doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path' },
       diameter: { type: 'number', default: 2, doc: 'circle only: pocket diameter, inches', bindable: true },
-      width: { type: 'number', default: 2, doc: 'rectangle only: pocket width, inches', bindable: true },
-      height: { type: 'number', default: 1.5, doc: 'rectangle only: pocket height, inches', bindable: true },
+      width: { type: 'number', default: 2, doc: 'rectangle/custom: pocket width, inches', bindable: true },
+      height: { type: 'number', default: 0, doc: 'rectangle/custom: pocket height, inches; 0 = default (rectangle 1.5"; custom scales uniformly from width, keeping the shape\'s aspect)', bindable: true },
       cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches' },
       depth: { type: 'number', default: 0.125, doc: 'pocket floor depth, inches', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
@@ -471,16 +469,24 @@ export const CATALOG = {
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
-      let ring;
+      let region;
+      const shapeWarnings = [];
       if (p.shape === 'circle') {
-        ring = circleRing(c.x, c.y, p.diameter / 2);
+        region = { outer: circleRing(c.x, c.y, p.diameter / 2), holes: [] };
       } else if (p.shape === 'rectangle') {
-        ring = roundedRectRing(c.x - p.width / 2, c.y - p.height / 2, c.x + p.width / 2, c.y + p.height / 2, p.cornerRadius);
+        const rh = p.height > 0 ? p.height : 1.5;
+        region = { outer: roundedRectRing(c.x - p.width / 2, c.y - rh / 2, c.x + p.width / 2, c.y + rh / 2, p.cornerRadius), holes: [] };
+      } else if (p.shape === 'custom') {
+        const cs = customShapeRegion(p);
+        if (cs.error) return cs;
+        shapeWarnings.push(...cs.warnings);
+        const shift = ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
+        region = { outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) };
       } else {
-        return { error: `pocket_shape: unknown shape "${p.shape}" (circle or rectangle)` };
+        return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, or custom)` };
       }
+      const ring = region.outer;
       noteContent(ctx, [ring]);
-      const region = { outer: ring };
       const params = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
@@ -517,8 +523,8 @@ export const CATALOG = {
           cutter: { type: 'flat', diameter: d },
           feedRate: p.feedRate, plungeRate: 30,
           moves: g.moves,
-          target: g.target ?? { type: 'region', rings: [ring], depth: p.depth },
-          ...(prev == null ? { previewRegions: [{ outer: ring, holes: [] }], warnings: autoWarnings } : {}),
+          target: g.target ?? { type: 'region', rings: [ccw(ring), ...region.holes.map(cwr)], depth: p.depth },
+          ...(prev == null ? { previewRegions: [region], warnings: [...shapeWarnings, ...autoWarnings] } : {}),
         });
       }
       return { ops, bbox: bb };
@@ -697,6 +703,84 @@ export const CATALOG = {
         bbox: {
           minX: c.x - R - p.toolDiameter / 2, minY: c.y - R - p.toolDiameter / 2,
           maxX: c.x + R + p.toolDiameter / 2, maxY: c.y + R + p.toolDiameter / 2,
+        },
+      };
+    },
+  },
+
+  shape_cutout: {
+    doc: 'Cut out a part with ANY outline — ellipse, star, heart, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
+    params: {
+      path: { type: 'string', default: '', doc: 'the outline as one SVG path "d" string (any coordinate box; scaled to width/height)' },
+      width: { type: 'number', default: 4, doc: 'finished part width, inches', bindable: true },
+      height: { type: 'number', default: 0, doc: 'finished part height, inches; 0 = scale uniformly from width (aspect preserved)', bindable: true },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
+      tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches; at least 4 regardless' },
+      chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the part\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
+    },
+    run(p, ctx) {
+      if (!p.path) return { error: 'shape_cutout needs an outline in the path param (an SVG path "d" string)' };
+      const cs = customShapeRegion(p);
+      if (cs.error) return cs;
+      const warnings = [...cs.warnings];
+      if (cs.region.holes.length) {
+        warnings.push('interior holes in the shape are ignored for a cutout — add pocket/bore operations for interior features');
+      }
+      const c = contentCenter(ctx);
+      const ring = cs.region.outer.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
+      const shapeRegion = { outer: ring, holes: [] };
+      // content-fit: everything machined so far must sit INSIDE the shape.
+      // Check the TRUE content outlines when entries recorded them (a star
+      // pocket fits a star cutout even though its bounding BOX does not);
+      // fall back to walking the bbox perimeter — perimeter, not just
+      // corners, so a concavity (star waist) between corners is caught too
+      const fitError = { error: `the content so far pokes outside that ${p.width}"-wide shape — enlarge width/height, or reshape the outline` };
+      if (ctx.contentRings?.length) {
+        for (const cr of ctx.contentRings) {
+          if (cr.some(q => !pointInPolygon(q.x, q.y, shapeRegion))) return fitError;
+        }
+      } else if (ctx.contentBBox) {
+        const b = ctx.contentBBox;
+        const step = 0.05;
+        const walk = [[b.maxX, b.minY], [b.maxX, b.maxY]];
+        for (let x = b.minX; x <= b.maxX + 1e-9; x += step) { walk.push([x, b.minY], [x, b.maxY]); }
+        for (let y = b.minY; y <= b.maxY + 1e-9; y += step) { walk.push([b.minX, y], [b.maxX, y]); }
+        if (walk.some(([x, y]) => !pointInPolygon(x, y, shapeRegion))) return fitError;
+      }
+      const prof = generateProfile(shapeRegion, { diameter: p.toolDiameter }, {
+        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
+        safeZ: ctx.safeZ, entry: 'ramp',
+        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+      });
+      const ops = [];
+      if (p.chamfer > 0) {
+        const ch = chamferRimOp(ring, p.chamfer, p.feedRate, ctx.safeZ);
+        if (ch.error) return ch;
+        ops.push(ch.op);
+      }
+      ops.push({
+        subName: ops.length ? 'cut free' : undefined,
+        tool: { name: `${formatDiameter(p.toolDiameter)} endmill`, diameter: p.toolDiameter },
+        cutter: { type: 'flat', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: prof.moves,
+        target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
+        previewRing: ring,
+        previewTabs: prof.tabs,
+        warnings,
+      });
+      const bb = ring.reduce((a, q) => ({
+        minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+        maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+      }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      return {
+        ops,
+        bbox: {
+          minX: bb.minX - p.toolDiameter / 2, minY: bb.minY - p.toolDiameter / 2,
+          maxX: bb.maxX + p.toolDiameter / 2, maxY: bb.maxY + p.toolDiameter / 2,
         },
       };
     },
