@@ -1478,5 +1478,77 @@ console.log('--- algebra through the intent layer ---');
   } else fail(`derivation removal guard failed: ${JSON.stringify(rm.skipped)}`);
 }
 
+// ---------------- 26. failure is a picture, not a blank ----------------
+// Brian's heart report: "prompt appeared to succeed but the preview is
+// totally empty." Three compounding failure modes, all from pasting an
+// SVG-viewbox path as inches: fit conflicts blanked the preview and
+// mislabeled the badge EMPTY; a viewbox-sized shape verified honestly
+// as a 100-inch part and previewed as a giant blank board.
+
+console.log('--- degraded previews and authoring-scale warnings ---');
+{
+  const heart100 = 'M 50 88 C 20 60 0 40 0 25 C 0 10 12 0 25 0 C 35 0 45 8 50 18 C 55 8 65 0 75 0 C 88 0 100 10 100 25 C 100 40 80 60 50 88 Z';
+  const base = {
+    ...structuredClone(EMPTY_RECIPE),
+    controls: [{ id: 'initials', type: 'text', label: 'Initials', default: 'BKO' }],
+  };
+
+  // off-origin viewbox heart in the shapes section: fit conflict — but
+  // the preview must still carry the picture (text built + outlines)
+  const conflict = {
+    ...structuredClone(base),
+    shapes: [{ id: 'heart', path: heart100 }],
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'initials' }, letterHeight: 1 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'heart', tabs: true } },
+    ],
+  };
+  const r1 = run(conflict);
+  if (!r1.ok && !r1.preview.empty && r1.preview.failed
+      && r1.preview.built.length >= 1 && r1.preview.shapeOutlines?.length === 1
+      && r1.preview.stock && r1.errors[0].includes('pokes outside')) {
+    pass(`fit conflict degrades to a picture: ${r1.preview.built.length} built op + heart outline + ${r1.preview.stock.w.toFixed(1)}"-wide diagnostic stock`);
+  } else fail(`degraded preview wrong: empty=${r1.preview?.empty} failed=${r1.preview?.failed} built=${r1.preview?.built?.length} outlines=${r1.preview?.shapeOutlines?.length} ${r1.errors?.join(' | ')}`);
+  if (r1.warnings.some(w => w.includes('from the origin'))) {
+    pass(`off-origin authoring warned: "${r1.warnings.find(w => w.includes('from the origin'))}"`);
+  } else fail(`no off-origin warning: ${JSON.stringify(r1.warnings)}`);
+
+  // centered but still viewbox-sized: verifies as a 100-inch part —
+  // must warn loudly instead of silently previewing a barren board
+  const centered = heart100.replace(/([\d.]+) ([\d.]+)/g, (m, a, b) => (a - 50).toFixed(0) + ' ' + (b - 44).toFixed(0));
+  const giant = {
+    ...structuredClone(base),
+    shapes: [{ id: 'heart', path: centered }],
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'initials' }, letterHeight: 1 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'heart', tabs: true } },
+    ],
+  };
+  const r2 = run(giant);
+  if (r2.ok && r2.warnings.some(w => w.includes('INCHES') && w.includes('viewbox'))) {
+    pass(`viewbox-scale part warned: "${r2.warnings.find(w => w.includes('INCHES')).slice(0, 90)}…"`);
+  } else fail(`giant part not warned: ok=${r2.ok} ${JSON.stringify(r2.warnings)}`);
+
+  // the CORRECT authoring — a 3.6" heart centered on the origin —
+  // engraves the initials inside it and verifies clean
+  const scaled = heart100.replace(/([\d.]+) ([\d.]+)/g, (m, a, b) => ((a - 50) * 0.036).toFixed(3) + ' ' + ((b - 44) * 0.036).toFixed(3));
+  const good = {
+    ...structuredClone(base),
+    shapes: [{ id: 'heart', path: scaled }],
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'initials' }, letterHeight: 0.7 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'heart', tabs: true } },
+    ],
+  };
+  const r3 = run(good);
+  if (r3.ok && r3.preview.stock.w < 6 && !r3.warnings.some(w => w.includes('viewbox') || w.includes('from the origin'))) {
+    pass(`initials in a heart, authored right: VERIFIED on a ${r3.preview.stock.w}" × ${r3.preview.stock.h}" board, no warnings`);
+  } else fail(`good heart wrong: ok=${r3.ok} stock=${JSON.stringify(r3.preview?.stock)} warnings=${JSON.stringify(r3.warnings)}`);
+
+  // shape outlines ride along on SUCCESS too (construction geometry)
+  if (r3.ok && r3.preview.shapeOutlines?.length === 1) pass('construction outlines present in successful previews');
+  else fail(`outlines missing on success: ${r3.preview?.shapeOutlines?.length}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

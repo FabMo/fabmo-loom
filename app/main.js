@@ -206,12 +206,16 @@ function render() {
     const st = r.preview?.stock;
     $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"` : '';
   } else {
-    setBadge('bad', r.preview?.empty ? 'EMPTY' : 'REJECTED');
-    $('verdictText').textContent = r.preview?.empty ? 'describe an app to begin' : 'the verifier refused this state';
+    // EMPTY is only the nothing-here state; every real failure is
+    // REJECTED with its reason — a fit conflict must never read as
+    // "empty app"
+    const nothingYet = r.preview?.empty && r.errors[0]?.includes('no operations');
+    setBadge('bad', nothingYet ? 'EMPTY' : 'REJECTED');
+    $('verdictText').textContent = nothingYet ? 'describe an app to begin' : 'the verifier refused this state';
     $('numbers').innerHTML = targetLines;
     $('minStock').textContent = '';
   }
-  $('errors').textContent = r.preview?.empty ? '' : r.errors.join('\n');
+  $('errors').textContent = (r.preview?.empty && r.errors[0]?.includes('no operations')) ? '' : r.errors.join('\n');
   $('warnings').textContent = r.warnings.join('\n');
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
@@ -219,7 +223,10 @@ function render() {
 }
 
 function refreshPreview() {
-  const is3d = viewMode === '3d';
+  // a failed weave shows the 2D diagnostic (dashed shape outlines +
+  // whatever built) regardless of the chosen mode — the 3D view has
+  // nothing useful to say about a refused state
+  const is3d = viewMode === '3d' && !result?.preview?.failed;
   $('preview').style.display = is3d ? 'none' : 'block';
   $('preview3d').style.display = is3d ? 'block' : 'none';
   $('btn3d').className = is3d ? 'small' : 'small ghost';
@@ -289,10 +296,31 @@ function draw() {
   ctx.strokeRect(X(0), Y(stock.h), stock.w * s, stock.h * s);
 
   const pre = result?.preview;
-  if (!pre?.built?.length) return;
+  if (!pre || (!pre.built?.length && !pre.shapeOutlines?.length)) return;
   const place = pre.placement ?? { x: 0, y: 0 };
 
-  for (const { r } of pre.built) {
+  // construction geometry (the shapes section), faint and dashed —
+  // drawn even when the weave FAILED so a fit conflict shows where the
+  // shape and the content disagree instead of a blank board
+  if (pre.shapeOutlines?.length) {
+    ctx.strokeStyle = pre.failed ? 'rgba(179,38,30,0.55)' : 'rgba(123,163,212,0.55)';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([4, 4]);
+    for (const so of pre.shapeOutlines) {
+      for (const ring of so.rings) {
+        ctx.beginPath();
+        ring.forEach((pt, i) => {
+          const px = X(pt.x + place.x), py = Y(pt.y + place.y);
+          i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        });
+        if (!so.open) ctx.closePath();
+        ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
+  }
+
+  for (const { r } of (pre.built ?? [])) {
     if (r.previewRegions) {
       ctx.beginPath();
       for (const g of r.previewRegions) {

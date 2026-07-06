@@ -216,6 +216,30 @@ export function runRecipe(recipe, controlValues, fonts) {
   if (bs.error) {
     return { ok: false, errors: [bs.error], warnings: [], preview: { empty: true } };
   }
+  // construction geometry for the preview (drawn even when an op fails,
+  // so a fit conflict shows WHERE instead of a blank canvas), plus
+  // authoring sanity warnings
+  const shapeOutlines = [];
+  const shapesWarnings = [];
+  for (const [id, sh] of Object.entries(bs.shapes)) {
+    const rings = sh.kind === 'region'
+      ? sh.regions.flatMap(r => [r.outer, ...r.holes])
+      : sh.polylines.map(p => p.points);
+    shapeOutlines.push({ id, rings, open: sh.kind === 'curve' });
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ring of rings) for (const q of ring) {
+      if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x;
+      if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y;
+    }
+    const span = Math.max(maxX - minX, maxY - minY);
+    const off = Math.hypot((minX + maxX) / 2, (minY + maxY) / 2);
+    // shapes are authored in INCHES around the origin; both mistakes
+    // below come from pasting an SVG-viewbox path unscaled. A viewbox
+    // path sits ~0.7 spans off-origin; deliberate small offsets pass.
+    if (off > Math.max(2, span * 0.5)) {
+      shapesWarnings.push(`shape "${id}" is centered ${off.toFixed(1)}" from the origin — prior content centers AT the origin; author shapes around it`);
+    }
+  }
 
   const ctx = {
     fonts,
@@ -252,7 +276,38 @@ export function runRecipe(recipe, controlValues, fonts) {
       : { ...r.bbox };
   }
   if (errors.length || !built.length) {
-    return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [], preview: { empty: true } };
+    // degrade gracefully: the JOB is refused, but the user still gets a
+    // picture. Preview whatever built before the failure plus the
+    // construction shapes — a fit conflict then shows WHERE.
+    // diagnostic extent = built content UNION the shapes section, so a
+    // misplaced shape and the content it missed are both in frame
+    let bb = ctx.contentBBox ? { ...ctx.contentBBox } : null;
+    if (shapeOutlines.length) {
+      bb ??= { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+      for (const so of shapeOutlines) for (const ring of so.rings) for (const q of ring) {
+        bb.minX = Math.min(bb.minX, q.x); bb.maxX = Math.max(bb.maxX, q.x);
+        bb.minY = Math.min(bb.minY, q.y); bb.maxY = Math.max(bb.maxY, q.y);
+      }
+    }
+    if (!bb) {
+      return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [...shapesWarnings], preview: { empty: true } };
+    }
+    const margin = recipe.margin ?? 0.375;
+    const failStock = {
+      w: Math.max(1, bb.maxX - bb.minX + 2 * margin),
+      h: Math.max(1, bb.maxY - bb.minY + 2 * margin),
+      thickness: stock.thickness,
+    };
+    const failPlace = {
+      x: (failStock.w - (bb.maxX - bb.minX)) / 2 - bb.minX,
+      y: (failStock.h - (bb.maxY - bb.minY)) / 2 - bb.minY,
+    };
+    return {
+      ok: false,
+      errors: errors.length ? errors : ['nothing to machine'],
+      warnings: [...shapesWarnings, ...strategyWarnings],
+      preview: { built, placement: failPlace, stock: failStock, shapeOutlines, failed: true },
+    };
   }
 
   // ---- stock auto-sizes to the content: minimum board, quarter-inch
@@ -320,6 +375,13 @@ export function runRecipe(recipe, controlValues, fonts) {
     else job.operations[i].allowOverlap = true;   // no cutout consumes it (yet) — fall back
   });
 
+  // a shop-scale sanity check: a shape pasted from a 100-unit SVG
+  // viewbox comes out 100 INCHES wide, verifies honestly, and previews
+  // as a giant blank-looking board — say so
+  if (autoStock.w > 60 || autoStock.h > 60) {
+    shapesWarnings.push(`this part needs a ${autoStock.w}" × ${autoStock.h}" board — shapes are authored in INCHES; a path pasted from an SVG viewbox unscaled comes out viewbox-units wide`);
+  }
+
   const composed = composeJob(job);
   // coverage residual is meaningless for line engraving (see engraver notes);
   // gouge/depth/intrusion stay hard errors.
@@ -328,9 +390,9 @@ export function runRecipe(recipe, controlValues, fonts) {
   const result = {
     ok: report.ok,
     errors: report.errors,
-    warnings: [...strategyWarnings, ...report.warnings],
+    warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
     report, job, composed,
-    preview: { built, placement, stock: autoStock },
+    preview: { built, placement, stock: autoStock, shapeOutlines },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });
