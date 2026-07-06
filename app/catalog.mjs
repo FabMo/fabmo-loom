@@ -115,6 +115,71 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
 // strokes and counters. The weld itself lives in shape.mjs, shared with
 // the svg-path shape source.
 
+// resolve a shapes-section reference to a closed region (largest);
+// returns { region, warnings, anchored: true } or { error }
+function namedShapeRegion(ctx, id, use) {
+  const sh = ctx.shapes?.[id];
+  if (!sh) {
+    const known = Object.keys(ctx.shapes ?? {});
+    return { error: `unknown shape "${id}" — defined shapes: ${known.length ? known.join(', ') : 'none'}` };
+  }
+  if (sh.kind !== 'region') return { error: `shape "${id}" is an open curve — ${use} needs a closed outline` };
+  const regions = [...sh.regions].sort((a, b) => Math.abs(ringArea(b.outer)) - Math.abs(ringArea(a.outer)));
+  const warnings = regions.length > 1
+    ? [`shape "${id}" welds to ${regions.length} separate pieces — using the largest`] : [];
+  return { region: regions[0], warnings, anchored: true };
+}
+
+// resolve a shapes-section reference to a polyline to follow: an open
+// curve directly, or a closed region's outer ring
+function namedShapePolyline(ctx, id) {
+  const sh = ctx.shapes?.[id];
+  if (!sh) {
+    const known = Object.keys(ctx.shapes ?? {});
+    return { error: `unknown shape "${id}" — defined shapes: ${known.length ? known.join(', ') : 'none'}` };
+  }
+  if (sh.kind === 'curve') {
+    const warnings = sh.polylines.length > 1 ? [`curve "${id}" has ${sh.polylines.length} subpaths — following the first`] : [];
+    return { ...sh.polylines[0], warnings };
+  }
+  const regions = [...sh.regions].sort((a, b) => Math.abs(ringArea(b.outer)) - Math.abs(ringArea(a.outer)));
+  return { points: regions[0].outer, closed: true, warnings: [] };
+}
+
+// evenly spaced points along a polyline by ARC LENGTH — the deterministic
+// replacement for the model baking direction cosines by hand. Open:
+// count points from endMargin to L-endMargin (count 1 → the middle).
+// Closed: count points around the loop starting at the first vertex.
+function pointsAlong(poly, count, endMargin = 0) {
+  const pts = poly.closed ? [...poly.points, poly.points[0]] : poly.points;
+  const seg = [0];
+  for (let i = 1; i < pts.length; i++) {
+    seg.push(seg[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  }
+  const L = seg[seg.length - 1];
+  if (L < 1e-9) return { error: 'that curve has no length to space holes along' };
+  let targets;
+  if (poly.closed) {
+    targets = Array.from({ length: count }, (_, k) => (k * L) / count);
+  } else {
+    const m = Math.min(endMargin, L / 2 - 1e-6);
+    targets = count === 1
+      ? [L / 2]
+      : Array.from({ length: count }, (_, k) => m + (k * (L - 2 * m)) / (count - 1));
+  }
+  const out = [];
+  let i = 1;
+  for (const s of targets) {
+    while (i < pts.length - 1 && seg[i] < s) i++;
+    const t = (s - seg[i - 1]) / Math.max(1e-12, seg[i] - seg[i - 1]);
+    out.push({
+      x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
+      y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t,
+    });
+  }
+  return { points: out };
+}
+
 // A custom shape lowered from an svg path, largest region by outer area
 // (the LLM occasionally authors stray slivers; the plaque is the big one)
 function customShapeRegion(p) {
@@ -470,7 +535,7 @@ export const CATALOG = {
   pocket_shape: {
     doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
-      shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", or "custom" (author the outline in the path param)' },
+      shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", "custom" (author the outline in the path param), or the id of a shapes-section entry (anchored in the shared frame)' },
       path: { type: 'string', default: '', template: true, doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path, {arithmetic} of control ids included (set width and height 0 for parametric paths)' },
       diameter: { type: 'number', default: 2, doc: 'circle only: pocket diameter, inches', bindable: true },
       width: { type: 'number', default: 2, doc: 'rectangle/custom: pocket width, inches', bindable: true },
@@ -491,16 +556,17 @@ export const CATALOG = {
       } else if (p.shape === 'rectangle') {
         const rh = p.height > 0 ? p.height : 1.5;
         region = { outer: roundedRectRing(c.x - p.width / 2, c.y - rh / 2, c.x + p.width / 2, c.y + rh / 2, p.cornerRadius), holes: [] };
-      } else if (p.shape === 'custom') {
-        const cs = customShapeRegion(p);
+      } else if (p.shape === 'custom' || ctx.shapes?.[p.shape]) {
+        const cs = p.shape === 'custom' ? customShapeRegion(p) : namedShapeRegion(ctx, p.shape, 'a pocket');
         if (cs.error) return cs;
         shapeWarnings.push(...cs.warnings);
-        // anchored (width/height 0) shapes stay in authored coordinates
-        // so parametric ops sharing a frame (arch + its rabbet) align
+        // anchored shapes (references, and width/height-0 paths) stay in
+        // authored coordinates so ops sharing a frame (arch + its
+        // rabbet) align by construction
         const shift = cs.anchored ? (ring => ring) : (ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y })));
         region = { outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) };
       } else {
-        return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, or custom)` };
+        return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, custom, or a defined shape id)` };
       }
       const ring = region.outer;
       noteContent(ctx, [ring]);
@@ -607,11 +673,14 @@ export const CATALOG = {
   },
 
   bore_hole: {
-    doc: 'Drill round HOLES — a hang hole for a tag, mounting/screw holes, dowel holes, or a whole PATTERN of holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so each hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). Two ways to place: (1) position — relative to the content machined so far ("above" is the classic hang hole; "corners" places FOUR around it); (2) at — EXPLICIT centers, any number of holes, as semicolon-separated "x y" pairs in the working frame (the same frame anchored parametric shapes use; prior content is centered near the origin). "at" accepts {arithmetic} of control ids, and fixed direction cosines are just numbers you bake in — five holes evenly along an arch\'s centerline arc (radius m = r-t/2, angles 18°..162°) is at: "{-0.951*(r-t/2)} {0.309*(r-t/2)}; {-0.588*(r-t/2)} {0.809*(r-t/2)}; 0 {r-t/2}; {0.588*(r-t/2)} {0.809*(r-t/2)}; {0.951*(r-t/2)} {0.309*(r-t/2)}" — and the holes ride the same sliders as the arch. Evenly spaced holes on a straight line are just evenly stepped x values. Holes must land INSIDE the part a later cutout frees (its fit check will refuse strays).',
+    doc: 'Drill round HOLES — a hang hole for a tag, mounting/screw holes, dowel holes, or a whole PATTERN of holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so each hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). THREE ways to place: (1) position — relative to the content machined so far ("above" is the classic hang hole; "corners" places FOUR around it); (2) along — a shape id from the shapes section: "count" holes spaced EVENLY BY ARC LENGTH along it (an open curve runs end to end, endMargin inset; a closed shape\'s outline goes evenly around — bolt circles). "Five holes along the arch centerline" is a one-line open curve shape (the mid-radius arc) plus along: that id, count: 5 — the machine does the spacing math, and the pattern rides the same sliders as the shape; (3) at — EXPLICIT centers as semicolon-separated "x y" pairs in the working frame, {arithmetic} allowed, for irregular layouts. Holes must land INSIDE the part a later cutout frees (its fit check refuses strays).',
     params: {
       diameter: { type: 'number', default: 0.25, min: 0.05, max: 1, doc: 'finished hole diameter, inches', bindable: true },
-      position: { type: 'string', default: 'above', doc: '"above", "below", "left", "right", or "center" of the content so far, or "corners" (4 holes around it); ignored when "at" is set' },
-      at: { type: 'string', default: '', template: true, doc: 'explicit hole centers: semicolon-separated "x y" pairs in the working frame, {arithmetic} of control ids allowed — see the entry doc for the arch example' },
+      position: { type: 'string', default: 'above', doc: '"above", "below", "left", "right", or "center" of the content so far, or "corners" (4 holes around it); ignored when "along" or "at" is set' },
+      along: { type: 'string', default: '', doc: 'a shape id to space holes along (open curve: end to end; closed shape: evenly around its outline)' },
+      count: { type: 'number', default: 5, min: 1, max: 100, doc: 'along only: how many holes', bindable: true },
+      endMargin: { type: 'number', default: 0, min: 0, doc: 'along an OPEN curve only: arc-length inset from each end, inches' },
+      at: { type: 'string', default: '', template: true, doc: 'explicit hole centers: semicolon-separated "x y" pairs in the working frame, {arithmetic} of control ids allowed' },
       gap: { type: 'number', default: 0.125, min: 0, doc: 'clearance from the content edge to the hole edge, inches (ignored for center)', bindable: true },
       depth: { type: 'number', default: 0, doc: '0 = through the full stock thickness; otherwise hole depth in inches' },
       toolDiameter: { type: 'number', default: 0.125, doc: 'endmill diameter, inches' },
@@ -625,7 +694,19 @@ export const CATALOG = {
       const b = ctx.contentBBox;
       const c = contentCenter(ctx);
       let centers;
-      if (p.at && p.at.trim()) {
+      const alongWarnings = [];
+      if (p.at?.trim() && p.along) {
+        return { error: 'bore_hole: give either "at" (explicit centers) or "along" (spaced on a curve), not both' };
+      }
+      if (p.along) {
+        const poly = namedShapePolyline(ctx, p.along);
+        if (poly.error) return poly;
+        alongWarnings.push(...poly.warnings);
+        const n = Math.max(1, Math.round(p.count));
+        const spaced = pointsAlong(poly, n, p.endMargin);
+        if (spaced.error) return spaced;
+        centers = spaced.points;
+      } else if (p.at && p.at.trim()) {
         centers = [];
         for (const pair of p.at.split(';')) {
           if (!pair.trim()) continue;
@@ -658,7 +739,7 @@ export const CATALOG = {
       const depth = p.depth > 0 ? p.depth : ctx.stock.thickness;
       const moves = [];
       const rings = [];
-      const warnings = [];
+      const warnings = [...alongWarnings];
       for (const q of centers) {
         const g = generateBore({ centerX: q.x, centerY: q.y, radius: r }, { diameter: p.toolDiameter }, {
           totalDepth: depth, depthPerPass: 0.125, safeZ: ctx.safeZ,
@@ -740,9 +821,10 @@ export const CATALOG = {
   shape_cutout: {
     doc: 'Cut out a part with ANY outline — ellipse, star, heart, arch, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. PARAMETRIC shapes — when a DIMENSION OF THE SHAPE ITSELF must be adjustable (an arch with radius and band-thickness sliders): write {arithmetic} of number-control ids inside the path, set width AND height to 0, and create the controls. The arch: path "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z" with controls r and t — every slider move re-evaluates, re-lowers, re-verifies. (A part dimension like that band thickness is a shape control — it is NOT the stock thickness.) Width/height 0 is ANCHORED mode: authored units are inches and authored coordinates are kept verbatim (y still flips), NOT auto-centered — so several parametric ops written in one frame align by construction (a rabbet band on the arch\'s inside edge shares the arch\'s own r and t), and prior content (which sits centered near the origin) must be enclosed by where YOU put the shape. Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
     params: {
-      path: { type: 'string', default: '', template: true, doc: 'the outline as one SVG path "d" string (any coordinate box; scaled to width/height); may contain {arithmetic} of control ids for parametric shapes' },
-      width: { type: 'number', default: 4, doc: 'finished part width, inches; 0 = the path is already in inches (REQUIRED for parametric {…} paths — do not fight the shape controls with a second scale)', bindable: true },
-      height: { type: 'number', default: 0, doc: 'finished part height, inches; 0 = scale uniformly from width (aspect preserved), or true size if width is also 0', bindable: true },
+      shape: { type: 'string', default: '', doc: 'PREFERRED: the id of a shapes-section entry to cut out (always anchored in the shared frame; width/height/path ignored)' },
+      path: { type: 'string', default: '', template: true, doc: 'inline alternative to shape: the outline as one SVG path "d" string (any coordinate box; scaled to width/height); may contain {arithmetic} of control ids' },
+      width: { type: 'number', default: 4, doc: 'inline path only: finished part width, inches; 0 = the path is already in inches (REQUIRED for parametric {…} paths — do not fight the shape controls with a second scale)', bindable: true },
+      height: { type: 'number', default: 0, doc: 'inline path only: finished part height, inches; 0 = scale uniformly from width (aspect preserved), or true size if width is also 0', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
@@ -751,8 +833,14 @@ export const CATALOG = {
       chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the part\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
     },
     run(p, ctx) {
-      if (!p.path) return { error: 'shape_cutout needs an outline in the path param (an SVG path "d" string)' };
-      const cs = customShapeRegion(p);
+      let cs;
+      if (p.shape) {
+        cs = namedShapeRegion(ctx, p.shape, 'a cutout');
+      } else if (p.path) {
+        cs = customShapeRegion(p);
+      } else {
+        return { error: 'shape_cutout needs a shape reference (shape param) or an outline (path param)' };
+      }
       if (cs.error) return cs;
       const warnings = [...cs.warnings];
       if (cs.region.holes.length) {
@@ -774,7 +862,8 @@ export const CATALOG = {
       const EDGE_GRACE = 0.1;
       const graceRing = expandRing(ring, EDGE_GRACE) ?? ring;
       const graceRegion = { outer: graceRing, holes: [] };
-      const fitError = { error: `the content so far pokes outside that ${p.width > 0 ? `${p.width}"-wide ` : ''}shape — enlarge ${p.width > 0 ? 'width/height' : 'its controls'}, or reshape the outline` };
+      const sized = !p.shape && p.width > 0;
+      const fitError = { error: `the content so far pokes outside that ${sized ? `${p.width}"-wide ` : ''}shape — enlarge ${sized ? 'width/height' : 'its controls'}, or reshape the outline` };
       if (ctx.contentRings?.length) {
         for (const cr of ctx.contentRings) {
           if (cr.some(q => !pointInPolygon(q.x, q.y, graceRegion))) return fitError;

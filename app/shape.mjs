@@ -146,6 +146,11 @@ const ARC_STEP = Math.PI / 48;  // radians per arc sample (96 per turn)
 
 /** @returns {Array<Array<{x,y}>>} closed polylines in authored coords */
 export function parseSvgPath(d) {
+  return parseSvgSubpaths(d).filter(s => s.points.length >= 3).map(s => s.points);
+}
+
+/** @returns {Array<{points:Array<{x,y}>, closed:boolean}>} flattened subpaths, open ones preserved */
+export function parseSvgSubpaths(d) {
   const tokens = String(d).match(/[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g);
   if (!tokens || !tokens.length) throw new Error('empty path');
   let i = 0;
@@ -170,8 +175,8 @@ export function parseSvgPath(d) {
     if (!last || Math.hypot(px - last.x, py - last.y) > 1e-12) cur.push({ x: px, y: py });
     x = px; y = py;
   };
-  const flushSubpath = () => {
-    if (cur && cur.length >= 3) subpaths.push(cur);
+  const flushSubpath = (closed = false) => {
+    if (cur && cur.length >= 2) subpaths.push({ points: cur, closed });
     cur = null;
   };
   const cubic = (x1, y1, x2, y2, x3, y3) => {
@@ -285,7 +290,7 @@ export function parseSvgPath(d) {
         break;
       }
       case 'Z': {
-        if (cur) { x = sx; y = sy; flushSubpath(); }
+        if (cur) { x = sx; y = sy; flushSubpath(true); }
         prevCubic = prevQuad = null;
         // Z takes no numbers; a following number means a missing command
         if (moreNums()) throw new Error(`number after Z — a new subpath needs M`);
@@ -294,8 +299,29 @@ export function parseSvgPath(d) {
       default: throw new Error(`unsupported path command "${cmd}"`);
     }
   }
-  flushSubpath();  // an unclosed trailing subpath closes implicitly
+  flushSubpath();  // trailing subpath stays open (regions close it implicitly)
   return subpaths;
+}
+
+/**
+ * Lower an SVG path to CURVES in the shared frame: flattened polylines,
+ * authored units are inches, y flips, no scaling or recentering. Open
+ * subpaths stay open — this is the source for "along the curve"
+ * derivations (hole patterns, and engraving-along later).
+ * @returns {{polylines:Array<{points, closed}>} | {error}}
+ */
+export function pathToCurve(d) {
+  let subs;
+  try {
+    subs = parseSvgSubpaths(d);
+  } catch (e) {
+    return { error: `could not read that curve path: ${e.message}` };
+  }
+  const polylines = subs
+    .filter(s => s.points.length >= 2)
+    .map(s => ({ points: s.points.map(q => ({ x: q.x, y: -q.y })), closed: s.closed }));
+  if (!polylines.length) return { error: 'that curve path contains no line to follow' };
+  return { polylines };
 }
 
 /**

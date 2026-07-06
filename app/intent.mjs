@@ -10,7 +10,7 @@
 // a future server proxy.
 
 import { CATALOG, catalogDoc } from './catalog.mjs';
-import { expandTemplate } from './shape.mjs';
+import { expandTemplate, pathToRegions, pathToCurve } from './shape.mjs';
 
 // ---------------------------------------------------------------- schema
 
@@ -26,7 +26,7 @@ export const ACTION_TOOL = {
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'add_operation', 'set_operation', 'remove_operation'] },
+            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'set_shape', 'remove_shape', 'add_operation', 'set_operation', 'remove_operation'] },
             name: { type: 'string', description: 'set_name: the new recipe/app name' },
             thickness: { type: 'number', description: 'set_thickness: the stock material thickness, inches (through-cuts use it)' },
             control: {
@@ -61,6 +61,15 @@ export const ACTION_TOOL = {
                 expr: { type: 'string', description: 'arithmetic over controls and EARLIER derived ids, e.g. "r - t/2"' },
               },
               required: ['id', 'expr'],
+            },
+            shape: {
+              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params',
+              properties: {
+                id: { type: 'string', description: 'the name (letters/digits/_)' },
+                path: { type: 'string', description: 'SVG path "d" string; coordinates in inches, {arithmetic} of controls/derived allowed' },
+                open: { type: 'boolean', description: 'true = an open CURVE (for hole patterns along it), false/absent = a closed outline' },
+              },
+              required: ['id', 'path'],
             },
             id: { type: 'string', description: 'remove_control / remove_derived / remove_operation / set_*: the target id' },
           },
@@ -114,8 +123,9 @@ RULES:
 - An outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield…) is NOT a decline: AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc.
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
+- Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame (inches, y flips, {arithmetic} allowed) and re-lower on every slider move. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
 - A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: it is a pocket_shape "custom" band hugging that edge (edgeTreatment true, before the cutout) — the recipe is in pocket_shape's doc.
-- A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "at" param takes any number of explicit centers, {arithmetic} of control ids allowed — the arch-centerline example is in bore_hole's doc.
+- A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
 - Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.
@@ -245,6 +255,40 @@ export function applyActions(recipe, payload) {
         const before = next.derived.length;
         next.derived = next.derived.filter(x => x.id !== a.id);
         before === next.derived.length ? skipped.push(`remove_derived: no "${a.id}"`) : applied.push(`removed derived "${a.id}"`);
+        break;
+      }
+      case 'set_shape': {
+        const s = a.shape;
+        if (!s?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.id) || typeof s.path !== 'string' || !s.path.trim()) {
+          skipped.push('set_shape: needs an id (letters/digits/_) and a path'); break;
+        }
+        // dry-lower with control defaults + derived so a broken path is
+        // skipped here with a reason, not at weave
+        const probe = {};
+        for (const c of next.controls) probe[c.id] = c.default;
+        for (const d of next.derived ?? []) {
+          const ex = expandTemplate(`{${d.expr}}`, probe);
+          probe[d.id] = ex.error ? NaN : parseFloat(ex.value);
+        }
+        const ex = expandTemplate(s.path, probe);
+        if (ex.error) { skipped.push(`set_shape "${s.id}": ${ex.error}`); break; }
+        const low = s.open ? pathToCurve(ex.value) : pathToRegions(ex.value, {});
+        if (low.error) { skipped.push(`set_shape "${s.id}": ${low.error}`); break; }
+        next.shapes ??= [];
+        const existing = next.shapes.find(x => x.id === s.id);
+        if (existing) { existing.path = s.path; existing.open = !!s.open; }
+        else next.shapes.push({ id: s.id, path: s.path, ...(s.open ? { open: true } : {}) });
+        applied.push(`shape "${s.id}"${s.open ? ' (curve)' : ''}`);
+        break;
+      }
+      case 'remove_shape': {
+        next.shapes ??= [];
+        const used = next.pipeline.some(o =>
+          o.params && (o.params.shape === a.id || o.params.along === a.id));
+        if (used) { skipped.push(`remove_shape: "${a.id}" is still referenced by an operation`); break; }
+        const before = next.shapes.length;
+        next.shapes = next.shapes.filter(x => x.id !== a.id);
+        before === next.shapes.length ? skipped.push(`remove_shape: no "${a.id}"`) : applied.push(`removed shape "${a.id}"`);
         break;
       }
       case 'add_operation': {

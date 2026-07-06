@@ -1229,5 +1229,132 @@ console.log('--- derived values through the intent layer ---');
   } else fail('derived missing from the prompt');
 }
 
+// ---------------- 24. named shapes: define geometry once, reference it ----------------
+// Structural upgrade 2: recipe.shapes holds named geometry in the SHARED
+// frame — closed outlines for cutouts/pockets, open CURVES for
+// along-the-curve derivations. The arch app in its final grammar:
+// no baked cosines, the machine does the arc-length spacing.
+
+console.log('--- the arch app in full v2 grammar ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Arch, v2 grammar',
+    controls: [
+      { id: 'r', type: 'number', label: 'Radius', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Thickness', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+    ],
+    derived: [
+      { id: 'inner', expr: 'r - t' },
+      { id: 'mid', expr: 'r - t/2' },
+    ],
+    shapes: [
+      { id: 'arch', path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z' },
+      { id: 'centerline', path: 'M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0', open: true },
+    ],
+    pipeline: [
+      { id: 'holes', strategy: 'bore_hole', params: { along: 'centerline', count: 5, endMargin: 0.3, diameter: 0.25, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'arch', tabs: true } },
+    ],
+  };
+  const r = run(rec);
+  const holes = r.preview?.built?.find(x => x.r.previewHoles)?.r.previewHoles ?? [];
+  if (r.ok && r.sbp && holes.length === 5) pass('v2-grammar arch VERIFIED → SBP, 5 holes spaced by the machine');
+  else fail(`v2 arch rejected: ok=${r.ok} holes=${holes.length} ${r.errors?.join(' | ')}`);
+  if (r.ok && holes.length === 5) {
+    // every hole rides the centerline radius exactly, spacing is even
+    const mid = 2 - 0.3;
+    const radiusErr = Math.max(...holes.map(h => Math.abs(Math.hypot(h.x, h.y) - mid)));
+    const angs = holes.map(h => Math.atan2(h.y, h.x)).sort((a, b) => a - b);
+    const gaps = angs.slice(1).map((a, i) => a - angs[i]);
+    const gapSpread = Math.max(...gaps) - Math.min(...gaps);
+    if (radiusErr < 0.002 && gapSpread < 0.002) {
+      pass(`holes measured: all on the centerline (radius err ${radiusErr.toFixed(4)}"), even angular gaps (spread ${gapSpread.toFixed(4)} rad)`);
+    } else fail(`hole layout wrong: radiusErr=${radiusErr} gapSpread=${gapSpread}`);
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const crown = surfaceAt(sim, p2.x, mid + p2.y);
+    if (crown < -0.49) pass('crown hole through — same physical part as the hand-cosine grammar');
+    else fail(`crown hole missing: ${crown}`);
+  }
+
+  // sliders re-lower shapes: the pattern and cutout follow together
+  const r2 = run(rec, { r: 3, t: 0.8 });
+  if (r2.ok) {
+    const h2 = r2.preview.built.find(x => x.r.previewHoles).r.previewHoles;
+    const radiusErr = Math.max(...h2.map(h => Math.abs(Math.hypot(h.x, h.y) - 2.6)));
+    if (radiusErr < 0.002) pass('sliders re-lower the shapes: holes on the new 2.6" centerline');
+    else fail(`shape re-lowering wrong: ${radiusErr}`);
+  } else fail(`v2 arch at r=3 rejected: ${r2.errors?.join(' | ')}`);
+}
+
+console.log('--- along a closed outline: the bolt circle ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Flange',
+    controls: [{ id: 'bc', type: 'number', label: 'Bolt circle radius', default: 1, min: 0.5, max: 2, step: 0.125 }],
+    shapes: [{ id: 'ring', path: 'M {-bc} 0 A {bc} {bc} 0 1 1 {bc} 0 A {bc} {bc} 0 1 1 {-bc} 0 Z' }],
+    pipeline: [
+      { id: 'bolts', strategy: 'bore_hole', params: { along: 'ring', count: 6, diameter: 0.25, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'disc_cutout', params: { diameter: 3 } },
+    ],
+  };
+  const r = run(rec);
+  const holes = r.preview?.built?.find(x => x.r.previewHoles)?.r.previewHoles ?? [];
+  if (r.ok && holes.length === 6) {
+    const radiusErr = Math.max(...holes.map(h => Math.abs(Math.hypot(h.x, h.y) - 1)));
+    if (radiusErr < 0.002) pass(`bolt circle: 6 holes evenly around a closed ring (radius err ${radiusErr.toFixed(4)}")`);
+    else fail(`bolt circle radius wrong: ${radiusErr}`);
+  } else fail(`bolt circle rejected: ok=${r.ok} holes=${holes.length} ${r.errors?.join(' | ')}`);
+}
+
+console.log('--- shape reference failure modes ---');
+{
+  const base = {
+    ...structuredClone(EMPTY_RECIPE),
+    controls: [{ id: 'r', type: 'number', label: 'R', default: 2 }],
+    shapes: [
+      { id: 'blob', path: 'M {-r} 0 A {r} {r} 0 1 1 {r} 0 A {r} {r} 0 1 1 {-r} 0 Z' },
+      { id: 'line', path: 'M {-r} 0 L {r} 0', open: true },
+    ],
+  };
+  const unknown = { ...structuredClone(base), pipeline: [{ id: 'c', strategy: 'shape_cutout', params: { shape: 'blobb' } }] };
+  const ru = run(unknown);
+  if (!ru.ok && ru.errors[0].includes('unknown shape "blobb"') && ru.errors[0].includes('blob, line')) {
+    pass(`unknown reference names the defined shapes: "${ru.errors[0]}"`);
+  } else fail(`unknown-shape error wrong: ${ru.errors?.join(' | ')}`);
+  const openCut = { ...structuredClone(base), pipeline: [{ id: 'c', strategy: 'shape_cutout', params: { shape: 'line' } }] };
+  const ro = run(openCut);
+  if (!ro.ok && ro.errors[0].includes('open curve')) pass('cutting out an open curve refused with the reason');
+  else fail(`open-curve cutout not caught: ${ro.errors?.join(' | ')}`);
+  const both = { ...structuredClone(base), pipeline: [{ id: 'h', strategy: 'bore_hole', params: { along: 'line', at: '0 0' } }] };
+  const rb = run(both);
+  if (!rb.ok && rb.errors[0].includes('not both')) pass('at + along together refused as ambiguous');
+  else fail(`at+along not caught: ${rb.errors?.join(' | ')}`);
+}
+
+console.log('--- shapes through the intent layer ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.controls.push({ id: 'r', type: 'number', label: 'R', default: 2 });
+  const res = applyActions(rec, { summary: 's', actions: [
+    { kind: 'set_derived', derived: { id: 'inner', expr: 'r - 0.5' } },
+    { kind: 'set_shape', shape: { id: 'arch', path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z' } },
+    { kind: 'set_shape', shape: { id: 'mid', path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0', open: true } },
+    { kind: 'set_shape', shape: { id: 'bad', path: 'M {q} 0 L 1 1 Z' } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'shape_cutout', params: { shape: 'arch' } } },
+  ], declined: [] });
+  if (res.applied.length === 4 && res.skipped.length === 1 && res.skipped[0].includes('unknown name "q"')) {
+    pass('set_shape validates paths at apply time (bad {q} skipped with reason)');
+  } else fail(`set_shape apply wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+  const rm = applyActions(res.recipe, { summary: 'rm', actions: [{ kind: 'remove_shape', id: 'arch' }], declined: [] });
+  if (rm.skipped.some(s => s.includes('still referenced'))) pass('remove_shape blocked while an op references it');
+  else fail(`remove_shape guard failed: ${JSON.stringify(rm.skipped)}`);
+  const rr = run(res.recipe);
+  if (rr.ok) pass('intent-built shape recipe weaves VERIFIED');
+  else fail(`intent-built shapes rejected: ${rr.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

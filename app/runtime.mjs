@@ -18,7 +18,7 @@
 // exist.
 
 import { CATALOG } from './catalog.mjs';
-import { expandTemplate } from './shape.mjs';
+import { expandTemplate, pathToRegions, pathToCurve } from './shape.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
 
@@ -67,6 +67,30 @@ export function buildVars(recipe, controlValues) {
     vars[d.id] = parseFloat(ex.value);
   }
   return { vars };
+}
+
+// Lower the shapes section once per weave: template-expand each path
+// with the full namespace, then parse. Shapes always live in the SHARED
+// frame (inches, y-flip, no recentering) — that is what makes an op
+// referencing "arch" and a curve derived alongside it align by
+// construction. Returns { shapes } or { error }.
+export function buildShapes(recipe, vars) {
+  const shapes = {};
+  for (const s of recipe.shapes ?? []) {
+    if (!ID_RE.test(s.id ?? '')) return { error: `shape has a bad id "${s.id}"` };
+    const ex = expandTemplate(s.path ?? '', vars);
+    if (ex.error) return { error: `shape "${s.id}": ${ex.error}` };
+    if (s.open) {
+      const c = pathToCurve(ex.value);
+      if (c.error) return { error: `shape "${s.id}": ${c.error}` };
+      shapes[s.id] = { kind: 'curve', polylines: c.polylines };
+    } else {
+      const r = pathToRegions(ex.value, {});   // anchored true-size
+      if (r.error) return { error: `shape "${s.id}": ${r.error}` };
+      shapes[s.id] = { kind: 'region', regions: r.regions };
+    }
+  }
+  return { shapes };
 }
 
 export function controlDefaults(recipe) {
@@ -127,9 +151,15 @@ export function runRecipe(recipe, controlValues, fonts) {
   }
   const vars = bv.vars;
 
+  const bs = buildShapes(recipe, vars);
+  if (bs.error) {
+    return { ok: false, errors: [bs.error], warnings: [], preview: { empty: true } };
+  }
+
   const ctx = {
     fonts,
     vars,
+    shapes: bs.shapes,
     stock: { thickness: stock.thickness },   // W×H not known until content runs
     safeZ: 0.5,
     rpm: 14000,
