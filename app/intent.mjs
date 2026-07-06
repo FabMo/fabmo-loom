@@ -10,7 +10,8 @@
 // a future server proxy.
 
 import { CATALOG, catalogDoc } from './catalog.mjs';
-import { expandTemplate, pathToRegions, pathToCurve } from './shape.mjs';
+import { expandTemplate } from './shape.mjs';
+import { buildVars, buildShapes } from './runtime.mjs';
 
 // ---------------------------------------------------------------- schema
 
@@ -63,13 +64,19 @@ export const ACTION_TOOL = {
               required: ['id', 'expr'],
             },
             shape: {
-              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params',
+              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
               properties: {
                 id: { type: 'string', description: 'the name (letters/digits/_)' },
                 path: { type: 'string', description: 'SVG path "d" string; coordinates in inches, {arithmetic} of controls/derived allowed' },
-                open: { type: 'boolean', description: 'true = an open CURVE (for hole patterns along it), false/absent = a closed outline' },
+                open: { type: 'boolean', description: 'path only: true = an open CURVE (for hole patterns along it), false/absent = a closed outline' },
+                inset: { type: 'object', properties: { of: { type: 'string' }, by: { type: 'string', description: 'inches or {arithmetic}' } }, required: ['of', 'by'] },
+                outset: { type: 'object', properties: { of: { type: 'string' }, by: { type: 'string' } }, required: ['of', 'by'] },
+                band: { type: 'object', description: 'edge band hugging a shape\'s whole outline', properties: { of: { type: 'string' }, width: { type: 'string', description: 'band width into the shape, inches or {arithmetic}' }, overrun: { type: 'string', description: 'overhang past the edge, inches (default 0; use ~0.05 for edge treatments)' } }, required: ['of', 'width'] },
+                union: { type: 'array', items: { type: 'string' }, description: 'shape ids to merge' },
+                difference: { type: 'array', items: { type: 'string' }, description: 'first shape minus the rest' },
+                intersect: { type: 'array', items: { type: 'string' } },
               },
-              required: ['id', 'path'],
+              required: ['id'],
             },
             id: { type: 'string', description: 'remove_control / remove_derived / remove_operation / set_*: the target id' },
           },
@@ -124,7 +131,8 @@ RULES:
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame (inches, y flips, {arithmetic} allowed) and re-lower on every slider move. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
-- A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: it is a pocket_shape "custom" band hugging that edge (edgeTreatment true, before the cutout) — the recipe is in pocket_shape's doc.
+- Shapes can also be DERIVED from earlier shapes instead of authored: inset/outset {of, by} (offset), band {of, width, overrun} (a band hugging the whole outline — frames, whole-rim rabbets and ledges: pocket the band with edgeTreatment true before the cutout of the same base shape), union/difference/intersect [ids]. Derivations are computed geometry — prefer them over re-authoring offset outlines by hand.
+- A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: whole-rim = a band-derived shape pocketed with edgeTreatment true; a PARTIAL edge (one side only) = a pocket_shape "custom" band you author hugging that edge — the recipe is in pocket_shape's doc.
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
@@ -259,26 +267,29 @@ export function applyActions(recipe, payload) {
       }
       case 'set_shape': {
         const s = a.shape;
-        if (!s?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.id) || typeof s.path !== 'string' || !s.path.trim()) {
-          skipped.push('set_shape: needs an id (letters/digits/_) and a path'); break;
+        if (!s?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.id)) {
+          skipped.push('set_shape: needs an id (letters/digits/_)'); break;
         }
-        // dry-lower with control defaults + derived so a broken path is
-        // skipped here with a reason, not at weave
-        const probe = {};
-        for (const c of next.controls) probe[c.id] = c.default;
-        for (const d of next.derived ?? []) {
-          const ex = expandTemplate(`{${d.expr}}`, probe);
-          probe[d.id] = ex.error ? NaN : parseFloat(ex.value);
+        // the stored entry: a path, or exactly one derivation
+        const forms = ['path', 'inset', 'outset', 'band', 'union', 'difference', 'intersect'].filter(k => s[k] !== undefined);
+        if (forms.length !== 1) {
+          skipped.push(`set_shape "${s.id}": give a path OR one derivation (inset/outset/band/union/difference/intersect)`); break;
         }
-        const ex = expandTemplate(s.path, probe);
-        if (ex.error) { skipped.push(`set_shape "${s.id}": ${ex.error}`); break; }
-        const low = s.open ? pathToCurve(ex.value) : pathToRegions(ex.value, {});
-        if (low.error) { skipped.push(`set_shape "${s.id}": ${low.error}`); break; }
+        const entry = { id: s.id, [forms[0]]: s[forms[0]], ...(forms[0] === 'path' && s.open ? { open: true } : {}) };
+        // dry-lower the FINAL shapes list through the real buildShapes so
+        // a broken path/derivation is skipped here with a reason
         next.shapes ??= [];
-        const existing = next.shapes.find(x => x.id === s.id);
-        if (existing) { existing.path = s.path; existing.open = !!s.open; }
-        else next.shapes.push({ id: s.id, path: s.path, ...(s.open ? { open: true } : {}) });
-        applied.push(`shape "${s.id}"${s.open ? ' (curve)' : ''}`);
+        const finalShapes = next.shapes.some(x => x.id === s.id)
+          ? next.shapes.map(x => (x.id === s.id ? entry : x))
+          : [...next.shapes, entry];
+        const probeVals = {};
+        for (const c of next.controls) probeVals[c.id] = c.default;
+        const bv = buildVars({ derived: next.derived ?? [] }, probeVals);
+        if (bv.error) { skipped.push(`set_shape "${s.id}": ${bv.error}`); break; }
+        const bs = buildShapes({ shapes: finalShapes }, bv.vars);
+        if (bs.error) { skipped.push(`set_shape "${s.id}": ${bs.error}`); break; }
+        next.shapes = finalShapes;
+        applied.push(`shape "${s.id}" (${forms[0] === 'path' ? (s.open ? 'curve' : 'outline') : forms[0]})`);
         break;
       }
       case 'remove_shape': {
@@ -286,6 +297,10 @@ export function applyActions(recipe, payload) {
         const used = next.pipeline.some(o =>
           o.params && (o.params.shape === a.id || o.params.along === a.id));
         if (used) { skipped.push(`remove_shape: "${a.id}" is still referenced by an operation`); break; }
+        const usedByShape = next.shapes.some(x => x.id !== a.id && (
+          x.inset?.of === a.id || x.outset?.of === a.id || x.band?.of === a.id
+          || x.union?.includes(a.id) || x.difference?.includes(a.id) || x.intersect?.includes(a.id)));
+        if (usedByShape) { skipped.push(`remove_shape: "${a.id}" is referenced by another shape's derivation`); break; }
         const before = next.shapes.length;
         next.shapes = next.shapes.filter(x => x.id !== a.id);
         before === next.shapes.length ? skipped.push(`remove_shape: no "${a.id}"`) : applied.push(`removed shape "${a.id}"`);

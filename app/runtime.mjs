@@ -18,7 +18,7 @@
 // exist.
 
 import { CATALOG } from './catalog.mjs';
-import { expandTemplate, pathToRegions, pathToCurve } from './shape.mjs';
+import { expandTemplate, pathToRegions, pathToCurve, offsetRegions, booleanRegions } from './shape.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
 
@@ -69,25 +69,86 @@ export function buildVars(recipe, controlValues) {
   return { vars };
 }
 
-// Lower the shapes section once per weave: template-expand each path
-// with the full namespace, then parse. Shapes always live in the SHARED
+// Lower the shapes section once per weave: template-expand with the
+// full namespace, then parse (path shapes) or derive (algebra shapes:
+// inset/outset/band/union/difference/intersect over EARLIER shapes —
+// document order is definition order). Shapes always live in the SHARED
 // frame (inches, y-flip, no recentering) — that is what makes an op
 // referencing "arch" and a curve derived alongside it align by
-// construction. Returns { shapes } or { error }.
+// construction. Each lowered shape carries `root`: the base path shape
+// its derivation chain started from (itself for path shapes) — the
+// lineage that lets a rabbet band and the cutout that consumes the same
+// base shape be recognized as related. Returns { shapes } or { error }.
 export function buildShapes(recipe, vars) {
   const shapes = {};
+  const num = (v, what, id) => {
+    if (typeof v === 'number') return { value: v };
+    // "0.2", "rw", "r - t/2", and "{rw}" all work — the model writes
+    // braces out of path habit, so strip an outer pair if present
+    const src = String(v).trim().replace(/^\{([^{}]*)\}$/, '$1');
+    const ex = expandTemplate(`{${src}}`, vars);
+    if (ex.error) return { error: `shape "${id}" ${what}: ${ex.error}` };
+    return { value: parseFloat(ex.value) };
+  };
+  const baseOf = (ref, id, what) => {
+    const b = shapes[ref];
+    if (!b) return { error: `shape "${id}": ${what} references "${ref}", which is not defined ABOVE it` };
+    if (b.kind !== 'region') return { error: `shape "${id}": ${what} needs a closed shape, but "${ref}" is an open curve` };
+    return { base: b };
+  };
   for (const s of recipe.shapes ?? []) {
     if (!ID_RE.test(s.id ?? '')) return { error: `shape has a bad id "${s.id}"` };
-    const ex = expandTemplate(s.path ?? '', vars);
-    if (ex.error) return { error: `shape "${s.id}": ${ex.error}` };
-    if (s.open) {
-      const c = pathToCurve(ex.value);
-      if (c.error) return { error: `shape "${s.id}": ${c.error}` };
-      shapes[s.id] = { kind: 'curve', polylines: c.polylines };
+    if (s.path !== undefined) {
+      const ex = expandTemplate(s.path ?? '', vars);
+      if (ex.error) return { error: `shape "${s.id}": ${ex.error}` };
+      if (s.open) {
+        const c = pathToCurve(ex.value);
+        if (c.error) return { error: `shape "${s.id}": ${c.error}` };
+        shapes[s.id] = { kind: 'curve', polylines: c.polylines, root: s.id };
+      } else {
+        const r = pathToRegions(ex.value, {});   // anchored true-size
+        if (r.error) return { error: `shape "${s.id}": ${r.error}` };
+        shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
+      }
+    } else if (s.inset || s.outset) {
+      const spec = s.inset ?? s.outset;
+      const b = baseOf(spec.of, s.id, s.inset ? 'inset' : 'outset');
+      if (b.error) return b;
+      const d = num(spec.by, 'by', s.id);
+      if (d.error) return d;
+      const regions = offsetRegions(b.base.regions, s.inset ? -d.value : d.value);
+      if (!regions.length) return { error: `shape "${s.id}": ${s.inset ? 'inset' : 'outset'} by ${d.value} leaves nothing of "${spec.of}"` };
+      shapes[s.id] = { kind: 'region', regions, root: b.base.root };
+    } else if (s.band) {
+      const b = baseOf(s.band.of, s.id, 'band');
+      if (b.error) return b;
+      const w = num(s.band.width, 'width', s.id);
+      if (w.error) return w;
+      const ov = num(s.band.overrun ?? 0, 'overrun', s.id);
+      if (ov.error) return ov;
+      const outer = offsetRegions(b.base.regions, ov.value);
+      const inner = offsetRegions(b.base.regions, -w.value);
+      const diff = inner.length ? booleanRegions('difference', [outer, inner]) : { regions: outer };
+      if (diff.error || !diff.regions.length) return { error: `shape "${s.id}": band of "${s.band.of}" is empty` };
+      shapes[s.id] = { kind: 'region', regions: diff.regions, root: b.base.root };
+    } else if (s.union || s.difference || s.intersect) {
+      const op = s.union ? 'union' : s.difference ? 'difference' : 'intersect';
+      const refs = s[op];
+      if (!Array.isArray(refs) || refs.length < 2) return { error: `shape "${s.id}": ${op} needs a list of at least two shape ids` };
+      const sets = [];
+      for (const ref of refs) {
+        const b = baseOf(ref, s.id, op);
+        if (b.error) return b;
+        sets.push(b.base.regions);
+      }
+      const out = booleanRegions(op, sets);
+      if (out.error) return { error: `shape "${s.id}": ${out.error}` };
+      if (!out.regions.length) return { error: `shape "${s.id}": ${op} of ${refs.join(', ')} is empty` };
+      // boolean results have mixed ancestry; the first operand's root
+      // stands in (difference keeps the body it carves from)
+      shapes[s.id] = { kind: 'region', regions: out.regions, root: shapes[refs[0]].root };
     } else {
-      const r = pathToRegions(ex.value, {});   // anchored true-size
-      if (r.error) return { error: `shape "${s.id}": ${r.error}` };
-      shapes[s.id] = { kind: 'region', regions: r.regions };
+      return { error: `shape "${s.id}" needs a path or a derivation (inset/outset/band/union/difference/intersect)` };
     }
   }
   return { shapes };
@@ -245,6 +306,19 @@ export function runRecipe(recipe, controlValues, fonts) {
       allowOverlap: !!r.allowOverlap,
     })),
   };
+
+  // scoped overlap allowances: an edge treatment derived from shape X
+  // may overlap ONLY the ops that cut X free — the verifier still flags
+  // it against anything unrelated (the blanket allowOverlap flag is the
+  // legacy fallback for edge treatments with no shape lineage)
+  built.forEach(({ r: a }, i) => {
+    if (!a.edgeScopeRoot) return;
+    const names = built
+      .map(({ r: b }, j) => (j !== i && b.cutsRoot === a.edgeScopeRoot ? job.operations[j].name : null))
+      .filter(Boolean);
+    if (names.length) job.operations[i].allowOverlapWith = names;
+    else job.operations[i].allowOverlap = true;   // no cutout consumes it (yet) — fall back
+  });
 
   const composed = composeJob(job);
   // coverage residual is meaningless for line engraving (see engraver notes);

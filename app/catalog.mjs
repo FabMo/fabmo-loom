@@ -550,6 +550,7 @@ export const CATALOG = {
     run(p, ctx) {
       const c = contentCenter(ctx);
       let region;
+      let shapeRoot = null;   // lineage: the base shape a reference derives from
       const shapeWarnings = [];
       if (p.shape === 'circle') {
         region = { outer: circleRing(c.x, c.y, p.diameter / 2), holes: [] };
@@ -559,6 +560,7 @@ export const CATALOG = {
       } else if (p.shape === 'custom' || ctx.shapes?.[p.shape]) {
         const cs = p.shape === 'custom' ? customShapeRegion(p) : namedShapeRegion(ctx, p.shape, 'a pocket');
         if (cs.error) return cs;
+        if (p.shape !== 'custom') shapeRoot = ctx.shapes[p.shape].root;
         shapeWarnings.push(...cs.warnings);
         // anchored shapes (references, and width/height-0 paths) stay in
         // authored coordinates so ops sharing a frame (arch + its
@@ -599,9 +601,14 @@ export const CATALOG = {
           return { error: `a ${d}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
         }
         if (!g.moves.length) continue;
+        // an edge treatment with KNOWN lineage gets a scoped allowance
+        // (wired to the cutout of the same base shape by the runtime)
+        // instead of the blanket flag — the verifier still catches it
+        // overlapping anything unrelated
         ops.push({
           subName: prev == null ? 'bulk' : `rest ${formatDiameter(d)}`,
-          allowOverlap: prev != null || p.edgeTreatment,
+          allowOverlap: prev != null || (p.edgeTreatment && !shapeRoot),
+          edgeScopeRoot: p.edgeTreatment && shapeRoot ? shapeRoot : undefined,
           tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
           cutter: { type: 'flat', diameter: d },
           feedRate: p.feedRate, plungeRate: 30,
@@ -902,6 +909,9 @@ export const CATALOG = {
         minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
         maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
       }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      // lineage: which base shape this cutout frees — edge treatments of
+      // the same root get their overlap allowance scoped to THIS op
+      if (p.shape) for (const o of ops) o.cutsRoot = ctx.shapes[p.shape].root;
       return {
         ops,
         bbox: {

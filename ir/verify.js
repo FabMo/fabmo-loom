@@ -145,6 +145,10 @@ export function verifyJob(job, composedMoves, opts = {}) {
     const polylines = cuttingPolylines(placed);
     const fp = {
       name, allowOverlap: !!op.allowOverlap,
+      // scoped alternative to the blanket flag: overlap permitted only
+      // with the NAMED ops (e.g. an edge treatment and the cutout that
+      // frees the same shape) — every other pairing is still checked
+      allowOverlapWith: Array.isArray(op.allowOverlapWith) ? op.allowOverlapWith : [],
       cuts: polylines.length > 0,
       bbox: polylineBbox(polylines),
       paths: null, area: null, method: 'bbox',
@@ -213,6 +217,7 @@ export function verifyJob(job, composedMoves, opts = {}) {
     for (let j = i + 1; j < footprints.length; j++) {
       const a = footprints[i], b = footprints[j];
       if (!a.cuts || !b.cuts || a.allowOverlap || b.allowOverlap) continue;
+      if (a.allowOverlapWith.includes(b.name) || b.allowOverlapWith.includes(a.name)) continue;
 
       if (a.paths && b.paths) {
         const c = new ClipperLib.Clipper();

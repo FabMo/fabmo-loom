@@ -1356,5 +1356,127 @@ console.log('--- shapes through the intent layer ---');
   else fail(`intent-built shapes rejected: ${rr.errors?.join(' | ')}`);
 }
 
+// ---------------- 25. shape algebra + reference-scoped overlap ----------------
+// Structural upgrades 2b and 3: shapes derive from earlier shapes
+// (inset/outset/band/booleans — geometry by code, not by the model
+// re-authoring offsets), and an edge treatment's overlap allowance is
+// SCOPED to the cutout of the same base shape instead of blanket.
+
+console.log('--- shape algebra: the whole-rim rabbet, derived ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Framed arch',
+    controls: [
+      { id: 'r', type: 'number', label: 'Radius', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Thickness', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+      { id: 'rw', type: 'number', label: 'Rabbet width', default: 0.2, min: 0.1, max: 0.4, step: 0.05 },
+    ],
+    derived: [{ id: 'inner', expr: 'r - t' }],
+    shapes: [
+      { id: 'arch', path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z' },
+      { id: 'rim', band: { of: 'arch', width: '{rw}', overrun: 0.05 } },
+    ],
+    pipeline: [
+      { id: 'rabbet', strategy: 'pocket_shape', params: { shape: 'rim', depth: 0.15, toolDiameter: 0.125, edgeTreatment: true } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'arch', tabs: true } },
+    ],
+  };
+  const r = run(rec);
+  if (r.ok && r.sbp) pass('band-derived whole-rim rabbet VERIFIED → SBP (scoped overlap, no blanket flag)');
+  else fail(`derived rabbet rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const rabbetOp = r.job.operations.find(o => o.name.includes('rabbet'));
+    if (rabbetOp && !rabbetOp.allowOverlap && rabbetOp.allowOverlapWith?.some(n => n.includes('cut'))) {
+      pass(`overlap allowance is scoped: rabbet ↔ [${rabbetOp.allowOverlapWith.join(', ')}] only`);
+    } else fail(`scoping wrong: allowOverlap=${rabbetOp?.allowOverlap} with=${JSON.stringify(rabbetOp?.allowOverlapWith)}`);
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    // whole-rim: ledge on the OUTER edge at the crown too (r - rw/2 in)
+    const outerLedge = surfaceAt(sim, p2.x, (2 - 0.1) + p2.y);
+    const innerLedge = surfaceAt(sim, p2.x, (2 - 0.6 + 0.1) + p2.y);
+    const bandFace = surfaceAt(sim, p2.x, (2 - 0.3) + p2.y);
+    if (Math.abs(outerLedge + 0.15) < 0.005 && Math.abs(innerLedge + 0.15) < 0.005 && bandFace === 0) {
+      pass(`whole-rim ledge measured: outer ${outerLedge.toFixed(3)}, inner ${innerLedge.toFixed(3)}, mid-band face ${bandFace}`);
+    } else fail(`rim ledge wrong: outer=${outerLedge} inner=${innerLedge} face=${bandFace}`);
+  }
+
+  // the scoping has teeth: an UNRELATED op overlapping the rabbet is
+  // still an error (the old blanket flag would have waved it through).
+  // An anchored pocket at the crown, inside the arch, straddling the rim
+  // band (band spans radius 1.8..2 there):
+  const sabotage = structuredClone(rec);
+  sabotage.pipeline.splice(1, 0, {
+    id: 'tray', strategy: 'pocket_shape',
+    params: { shape: 'custom', path: 'M -0.2 -1.9 L 0.2 -1.9 L 0.2 -1.7 L -0.2 -1.7 Z', width: 0, height: 0, depth: 0.05, toolDiameter: 0.125 },
+  });
+  const rs = run(sabotage);
+  if (!rs.ok && rs.errors.some(e => e.includes('overlap'))) {
+    pass(`unrelated overlap still caught: "${rs.errors.find(e => e.includes('overlap')).slice(0, 80)}…"`);
+  } else fail(`scoped overlap did not hold: ok=${rs.ok} ${rs.errors?.join(' | ')}`);
+}
+
+console.log('--- shape algebra: booleans and offsets ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Washer',
+    controls: [],
+    shapes: [
+      { id: 'disc', path: 'M -1.5 0 A 1.5 1.5 0 1 1 1.5 0 A 1.5 1.5 0 1 1 -1.5 0 Z' },
+      { id: 'bore', path: 'M -0.5 0 A 0.5 0.5 0 1 1 0.5 0 A 0.5 0.5 0 1 1 -0.5 0 Z' },
+      { id: 'washer', difference: ['disc', 'bore'] },
+      { id: 'wellRim', inset: { of: 'washer', by: '0.2' } },
+    ],
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'wellRim', depth: 0.1, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'washer' } },
+    ],
+  };
+  const r = run(rec);
+  if (r.ok) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p2 = r.preview.placement;
+    const well = surfaceAt(sim, 1.0 + p2.x, p2.y);        // mid-annulus: pocketed
+    const rim = surfaceAt(sim, 1.45 + p2.x, p2.y);        // outer rim: untouched (inset kept it)
+    const boreEdge = surfaceAt(sim, 0.55 + p2.x, p2.y);   // inner rim: untouched
+    if (Math.abs(well + 0.1) < 0.005 && rim === 0 && boreEdge === 0) {
+      pass(`washer: difference + inset compose (well ${well.toFixed(3)}, both rims untouched)`);
+    } else fail(`washer surface wrong: well=${well} rim=${rim} boreEdge=${boreEdge}`);
+  } else fail(`washer rejected: ${r.errors?.join(' | ')}`);
+
+  // derivation failure modes are data
+  const fwd = structuredClone(rec);
+  fwd.shapes = [{ id: 'x', band: { of: 'later', width: '0.2' } }, ...fwd.shapes.map(s => s.id === 'disc' ? { ...s, id: 'later' } : s)];
+  const rf = run(fwd);
+  if (!rf.ok && rf.errors[0].includes('not defined ABOVE')) pass('forward reference refused (document order is definition order)');
+  else fail(`forward ref not caught: ${rf.errors?.join(' | ')}`);
+  const eat = structuredClone(rec);
+  eat.shapes.push({ id: 'gone', inset: { of: 'bore', by: '0.6' } });
+  const re = run(eat);
+  if (!re.ok && re.errors[0].includes('leaves nothing')) pass('inset that consumes the whole shape refused with the reason');
+  else fail(`empty inset not caught: ${re.errors?.join(' | ')}`);
+}
+
+console.log('--- algebra through the intent layer ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.controls.push({ id: 'r', type: 'number', label: 'R', default: 2 });
+  const res = applyActions(rec, { summary: 's', actions: [
+    { kind: 'set_shape', shape: { id: 'disc', path: 'M {-r} 0 A {r} {r} 0 1 1 {r} 0 A {r} {r} 0 1 1 {-r} 0 Z' } },
+    { kind: 'set_shape', shape: { id: 'rim', band: { of: 'disc', width: '0.25', overrun: '0.05' } } },
+    { kind: 'set_shape', shape: { id: 'both', path: 'M 0 0 L 1 1 Z', band: { of: 'disc', width: '1' } } },  // two forms
+    { kind: 'set_shape', shape: { id: 'orphan', band: { of: 'nope', width: '0.2' } } },                     // bad ref
+  ], declined: [] });
+  if (res.applied.length === 2 && res.skipped.length === 2
+      && res.skipped[0].includes('one derivation') && res.skipped[1].includes('not defined ABOVE')) {
+    pass('set_shape derivations validated at apply time (two-forms and bad-ref skipped with reasons)');
+  } else fail(`algebra apply wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+  const rm = applyActions(res.recipe, { summary: 'rm', actions: [{ kind: 'remove_shape', id: 'disc' }], declined: [] });
+  if (rm.skipped.some(s => s.includes("another shape's derivation"))) {
+    pass('remove_shape blocked while a derivation references it');
+  } else fail(`derivation removal guard failed: ${JSON.stringify(rm.skipped)}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

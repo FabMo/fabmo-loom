@@ -55,6 +55,56 @@ export function weldContours(contours) {
 }
 
 // ---------------------------------------------------------------------
+// Region algebra — the derivation operators that move geometry work
+// from the model's head into deterministic code. A whole-rim rabbet is
+// band(arch, w, overrun); a keepout is outset(shape, clearance); a
+// washer is difference(disc, hole). All Clipper, all exact.
+
+const toClipPaths = (regions) => regions.flatMap(r => [
+  r.outer.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) })),
+  ...r.holes.map(h => {
+    const p = h.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) }));
+    // holes must wind opposite to outers for offset/boolean semantics
+    return ClipperLib.Clipper.Orientation(p) ? p.reverse() : p;
+  }),
+]);
+const fromClipTree = (tree) => ClipperLib.JS.PolyTreeToExPolygons(tree)
+  .filter(e => e.outer?.length >= 3)
+  .map(e => ({
+    outer: ccw(e.outer.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE }))),
+    holes: (e.holes ?? []).map(h => ccw(h.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE })))),
+  }));
+
+/** Offset regions by delta inches (positive = outward). Returns regions (possibly empty). */
+export function offsetRegions(regions, delta) {
+  const co = new ClipperLib.ClipperOffset(2, 0.002 * CLIP_SCALE);
+  co.AddPaths(toClipPaths(regions), ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const out = new ClipperLib.Paths();
+  co.Execute(out, delta * CLIP_SCALE);
+  const c = new ClipperLib.Clipper();
+  c.AddPaths(out, ClipperLib.PolyType.ptSubject, true);
+  const tree = new ClipperLib.PolyTree();
+  c.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return fromClipTree(tree);
+}
+
+/** Boolean over region sets: 'union' | 'difference' (first minus rest) | 'intersect'. */
+export function booleanRegions(op, regionSets) {
+  const CT = { union: ClipperLib.ClipType.ctUnion, difference: ClipperLib.ClipType.ctDifference, intersect: ClipperLib.ClipType.ctIntersection };
+  if (!(op in CT)) return { error: `unknown boolean op "${op}"` };
+  let acc = regionSets[0];
+  for (let i = 1; i < regionSets.length; i++) {
+    const c = new ClipperLib.Clipper();
+    c.AddPaths(toClipPaths(acc), ClipperLib.PolyType.ptSubject, true);
+    c.AddPaths(toClipPaths(regionSets[i]), ClipperLib.PolyType.ptClip, true);
+    const tree = new ClipperLib.PolyTree();
+    c.Execute(CT[op], tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    acc = fromClipTree(tree);   // folds pairwise across all sets
+  }
+  return { regions: acc };
+}
+
+// ---------------------------------------------------------------------
 // Parametric paths: {expressions} of control ids inside a template
 // string, evaluated against the current control values at weave time.
 // This is what makes a shape's INTERNAL geometry adjustable — an arch
