@@ -515,9 +515,13 @@ export function runRecipe(recipe, controlValues, fonts) {
 
   // a shop-scale sanity check: a shape pasted from a 100-unit SVG
   // viewbox comes out 100 INCHES wide, verifies honestly, and previews
-  // as a giant blank-looking board — say so
+  // as a giant blank-looking board — say so. The viewbox lesson only
+  // applies when there ARE authored shapes; big furniture is just big.
   if (autoStock.w > 60 || autoStock.h > 60) {
-    shapesWarnings.push(`this part needs a ${autoStock.w}" × ${autoStock.h}" board — shapes are authored in INCHES; a path pasted from an SVG viewbox unscaled comes out viewbox-units wide`);
+    const hint = recipe.shapes?.length
+      ? ' — shapes are authored in INCHES; a path pasted from an SVG viewbox unscaled comes out viewbox-units wide'
+      : '';
+    shapesWarnings.push(`this part needs a ${autoStock.w}" × ${autoStock.h}" board${hint}`);
   }
 
   const composed = composeJob(job);
