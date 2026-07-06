@@ -256,7 +256,7 @@ function refreshPreview() {
       if (shallowDeepest === 0) shallowDeepest = sim.minZ;   // pure through job
     }
     const auto = sim
-      ? Math.min(4, Math.max(1, (0.05 * span) / Math.max(0.02, -shallowDeepest)))
+      ? Math.min(5, Math.max(1, (0.08 * span) / Math.max(0.02, -shallowDeepest)))
       : 1;
     const zx = zxAuto ? auto : 1;
     window.loomZx = { auto, zx, shallowDeepest, minZ: sim?.minZ };   // debug handle
