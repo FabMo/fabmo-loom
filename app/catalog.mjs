@@ -75,6 +75,20 @@ function contentReach(ctx, c) {
   return reach;
 }
 
+// Clipper round-joint outward offset of a single ring (largest result
+// piece); null on failure so callers can fall back to the original
+const CLIP_SCALE_OFF = 1e6;
+function expandRing(ring, delta) {
+  const co = new ClipperLib.ClipperOffset(2, 0.005 * CLIP_SCALE_OFF);
+  co.AddPath(ring.map(q => ({ X: Math.round(q.x * CLIP_SCALE_OFF), Y: Math.round(q.y * CLIP_SCALE_OFF) })),
+    ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  const out = new ClipperLib.Paths();
+  co.Execute(out, delta * CLIP_SCALE_OFF);
+  if (!out.length) return null;
+  const biggest = out.reduce((a, b) => (Math.abs(ClipperLib.Clipper.Area(a)) > Math.abs(ClipperLib.Clipper.Area(b)) ? a : b));
+  return biggest.map(q => ({ x: q.X / CLIP_SCALE_OFF, y: q.Y / CLIP_SCALE_OFF }));
+}
+
 function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   r = Math.max(0, Math.min(r, (x1 - x0) / 2, (y1 - y0) / 2));
   const ring = [];
@@ -114,7 +128,7 @@ function customShapeRegion(p) {
   if (regions.length > 1) {
     warnings.push(`that shape welds to ${regions.length} separate pieces — using the largest; the rest are ignored`);
   }
-  return { region: regions[0], w: sized.w, h: sized.h, warnings };
+  return { region: regions[0], w: sized.w, h: sized.h, warnings, anchored: sized.anchored };
 }
 
 // Enforce the medial axis's own invariant against the exact region
@@ -454,7 +468,7 @@ export const CATALOG = {
   },
 
   pocket_shape: {
-    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
+    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
       shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", or "custom" (author the outline in the path param)' },
       path: { type: 'string', default: '', template: true, doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path, {arithmetic} of control ids included (set width and height 0 for parametric paths)' },
@@ -466,6 +480,7 @@ export const CATALOG = {
       toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
       restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit that cleans rectangle corners' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      edgeTreatment: { type: 'boolean', default: false, doc: 'true when this pocket is a RABBET/LEDGE along a later cutout\'s edge and deliberately overruns that edge a little — permits overlapping the cut-free kerf (otherwise cross-operation overlap is an error)' },
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
@@ -480,7 +495,9 @@ export const CATALOG = {
         const cs = customShapeRegion(p);
         if (cs.error) return cs;
         shapeWarnings.push(...cs.warnings);
-        const shift = ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
+        // anchored (width/height 0) shapes stay in authored coordinates
+        // so parametric ops sharing a frame (arch + its rabbet) align
+        const shift = cs.anchored ? (ring => ring) : (ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y })));
         region = { outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) };
       } else {
         return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, or custom)` };
@@ -518,7 +535,7 @@ export const CATALOG = {
         if (!g.moves.length) continue;
         ops.push({
           subName: prev == null ? 'bulk' : `rest ${formatDiameter(d)}`,
-          allowOverlap: prev != null,
+          allowOverlap: prev != null || p.edgeTreatment,
           tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
           cutter: { type: 'flat', diameter: d },
           feedRate: p.feedRate, plungeRate: 30,
@@ -709,7 +726,7 @@ export const CATALOG = {
   },
 
   shape_cutout: {
-    doc: 'Cut out a part with ANY outline — ellipse, star, heart, arch, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. PARAMETRIC shapes — when a DIMENSION OF THE SHAPE ITSELF must be adjustable (an arch with radius and band-thickness sliders): write {arithmetic} of number-control ids inside the path, set width AND height to 0 (path units are then inches as authored), and create the controls. The arch: path "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z" with controls r and t — every slider move re-evaluates, re-lowers, re-verifies. (A part dimension like that band thickness is a shape control — it is NOT the stock thickness.) Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
+    doc: 'Cut out a part with ANY outline — ellipse, star, heart, arch, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. PARAMETRIC shapes — when a DIMENSION OF THE SHAPE ITSELF must be adjustable (an arch with radius and band-thickness sliders): write {arithmetic} of number-control ids inside the path, set width AND height to 0, and create the controls. The arch: path "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z" with controls r and t — every slider move re-evaluates, re-lowers, re-verifies. (A part dimension like that band thickness is a shape control — it is NOT the stock thickness.) Width/height 0 is ANCHORED mode: authored units are inches and authored coordinates are kept verbatim (y still flips), NOT auto-centered — so several parametric ops written in one frame align by construction (a rabbet band on the arch\'s inside edge shares the arch\'s own r and t), and prior content (which sits centered near the origin) must be enclosed by where YOU put the shape. Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
     params: {
       path: { type: 'string', default: '', template: true, doc: 'the outline as one SVG path "d" string (any coordinate box; scaled to width/height); may contain {arithmetic} of control ids for parametric shapes' },
       width: { type: 'number', default: 4, doc: 'finished part width, inches; 0 = the path is already in inches (REQUIRED for parametric {…} paths — do not fight the shape controls with a second scale)', bindable: true },
@@ -730,17 +747,25 @@ export const CATALOG = {
         warnings.push('interior holes in the shape are ignored for a cutout — add pocket/bore operations for interior features');
       }
       const c = contentCenter(ctx);
-      const ring = cs.region.outer.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
+      const ring = cs.anchored
+        ? cs.region.outer
+        : cs.region.outer.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
       const shapeRegion = { outer: ring, holes: [] };
       // content-fit: everything machined so far must sit INSIDE the shape.
       // Check the TRUE content outlines when entries recorded them (a star
       // pocket fits a star cutout even though its bounding BOX does not);
       // fall back to walking the bbox perimeter — perimeter, not just
-      // corners, so a concavity (star waist) between corners is caught too
+      // corners, so a concavity (star waist) between corners is caught too.
+      // The shape is expanded by a small grace first: edge treatments
+      // (a rabbet pocket) deliberately overrun the future edge a little,
+      // and that must not read as misplaced content.
+      const EDGE_GRACE = 0.1;
+      const graceRing = expandRing(ring, EDGE_GRACE) ?? ring;
+      const graceRegion = { outer: graceRing, holes: [] };
       const fitError = { error: `the content so far pokes outside that ${p.width > 0 ? `${p.width}"-wide ` : ''}shape — enlarge ${p.width > 0 ? 'width/height' : 'its controls'}, or reshape the outline` };
       if (ctx.contentRings?.length) {
         for (const cr of ctx.contentRings) {
-          if (cr.some(q => !pointInPolygon(q.x, q.y, shapeRegion))) return fitError;
+          if (cr.some(q => !pointInPolygon(q.x, q.y, graceRegion))) return fitError;
         }
       } else if (ctx.contentBBox) {
         const b = ctx.contentBBox;
@@ -748,7 +773,7 @@ export const CATALOG = {
         const walk = [[b.maxX, b.minY], [b.maxX, b.maxY]];
         for (let x = b.minX; x <= b.maxX + 1e-9; x += step) { walk.push([x, b.minY], [x, b.maxY]); }
         for (let y = b.minY; y <= b.maxY + 1e-9; y += step) { walk.push([b.minX, y], [b.maxX, y]); }
-        if (walk.some(([x, y]) => !pointInPolygon(x, y, shapeRegion))) return fitError;
+        if (walk.some(([x, y]) => !pointInPolygon(x, y, graceRegion))) return fitError;
       }
       const prof = generateProfile(shapeRegion, { diameter: p.toolDiameter }, {
         side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,

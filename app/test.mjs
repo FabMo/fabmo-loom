@@ -980,5 +980,87 @@ console.log('--- the arch app: adjustable radius and band thickness ---');
   else fail(`literal braces broke text: ${rl.errors?.join(' | ')}`);
 }
 
+// ---------------- 21. edge treatments: a rabbet on the arch's inside edge ----------------
+// The "add a rabbet" decline, converted by COMPOSITION, not a new
+// strategy: the rabbet is a parametric band pocket sharing the arch's
+// own controls ({r-t-0.05} to {r-t+w}), overrunning the future edge so
+// no sliver wall remains (edgeTreatment permits the kerf overlap; the
+// cutout's fit check grants a small grace for the overrun).
+
+console.log('--- rabbet on the arch inside edge ---');
+{
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Arch with rabbet',
+    controls: [
+      { id: 'r', type: 'number', label: 'Arch radius (in)', default: 2, min: 0.75, max: 6, step: 0.125 },
+      { id: 't', type: 'number', label: 'Band thickness (in)', default: 0.6, min: 0.25, max: 2, step: 0.125 },
+      { id: 'rw', type: 'number', label: 'Rabbet width (in)', default: 0.25, min: 0.125, max: 0.5, step: 0.0625 },
+      { id: 'rd', type: 'number', label: 'Rabbet depth (in)', default: 0.25, min: 0.0625, max: 0.4, step: 0.0625 },
+    ],
+    pipeline: [
+      { id: 'rabbet', strategy: 'pocket_shape', params: {
+        shape: 'custom', width: 0, height: 0, toolDiameter: 0.125, edgeTreatment: true,
+        depth: { ctrl: 'rd' },
+        path: 'M {-(r-t-0.05)} 0 A {r-t-0.05} {r-t-0.05} 0 0 1 {r-t-0.05} 0 L {r-t+rw} 0 A {r-t+rw} {r-t+rw} 0 0 0 {-(r-t+rw)} 0 Z',
+      } },
+      { id: 'cut', strategy: 'shape_cutout', params: {
+        path: 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z',
+        width: 0, height: 0, tabs: true,
+      } },
+    ],
+  };
+  const r = run(rec);
+  if (r.ok && r.sbp) pass('arch + inside-edge rabbet VERIFIED → SBP');
+  else fail(`rabbet arch rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const cut = r.preview.built.find(x => x.r.previewRing);
+    const ring = cut.r.previewRing;
+    const p2 = r.preview.placement;
+    const cx = (Math.max(...ring.map(q => q.x)) + Math.min(...ring.map(q => q.x))) / 2 + p2.x;
+    const baseY = Math.min(...ring.map(q => q.y)) + p2.y;
+    // at the crown (r=2, t=0.6): inner edge at 1.4, rabbet ledge to 1.65,
+    // untouched band face from 1.65 to 2
+    const ledge = surfaceAt(sim, cx, baseY + 1.4 + 0.125);   // mid-rabbet
+    const face = surfaceAt(sim, cx, baseY + 1.4 + 0.25 + 0.15); // past the rabbet
+    const kerfIn = surfaceAt(sim, cx, baseY + 1.4 - 0.126);  // inner kerf centerline
+    if (Math.abs(ledge + 0.25) < 0.005 && face === 0 && kerfIn < -0.49) {
+      pass(`rabbet measured at the crown: ledge ${ledge.toFixed(3)} (declared -0.25), band face ${face}, inner kerf ${kerfIn.toFixed(3)} (through)`);
+    } else fail(`rabbet surface wrong: ledge=${ledge} face=${face} kerfIn=${kerfIn}`);
+  }
+
+  // the rabbet follows the arch's sliders — one control moves both ops
+  const r2 = run(rec, { r: 3, t: 0.8, rw: 0.25, rd: 0.2 });
+  if (r2.ok) {
+    const sim2 = simulateJob(r2.preview.built, r2.preview.placement, r2.preview.stock);
+    const ring2 = r2.preview.built.find(x => x.r.previewRing).r.previewRing;
+    const p2 = r2.preview.placement;
+    const cx2 = (Math.max(...ring2.map(q => q.x)) + Math.min(...ring2.map(q => q.x))) / 2 + p2.x;
+    const baseY2 = Math.min(...ring2.map(q => q.y)) + p2.y;
+    const ledge2 = surfaceAt(sim2, cx2, baseY2 + 2.2 + 0.125);  // inner edge now at r-t = 2.2
+    if (Math.abs(ledge2 + 0.2) < 0.005) {
+      pass(`sliders move the rabbet with the arch: ledge at the new inner edge reads ${ledge2.toFixed(3)}`);
+    } else fail(`rabbet did not follow sliders: ${ledge2}`);
+  } else fail(`rabbet arch at r=3 rejected: ${r2.errors?.join(' | ')}`);
+
+  // without edgeTreatment the kerf overlap is still an ERROR — the gate
+  // only opens where the op declares the intent
+  const noFlag = structuredClone(rec);
+  delete noFlag.pipeline[0].params.edgeTreatment;
+  const rn = run(noFlag);
+  if (!rn.ok && rn.errors.some(e => e.toLowerCase().includes('overlap') || e.toLowerCase().includes('intru'))) {
+    pass(`same recipe without edgeTreatment still refused: "${rn.errors[0]}"`);
+  } else fail(`overlap check did not hold: ok=${rn.ok} ${rn.errors?.join(' | ')}`);
+
+  // grossly oversized edge work is still caught despite the fit grace
+  const off = structuredClone(rec);
+  off.pipeline[0].params.path = off.pipeline[0].params.path.replaceAll('{r-t+rw}', '{r-t+rw+1}').replaceAll('{-(r-t+rw)}', '{-(r-t+rw+1)}');
+  const ro = run(off);
+  if (!ro.ok && ro.errors.some(e => e.includes('pokes outside'))) {
+    pass('fit grace is small: a rabbet band 1" too wide still refused as misplaced content');
+  } else fail(`gross misplacement slipped through the fit grace: ok=${ro.ok} ${ro.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

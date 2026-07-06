@@ -306,8 +306,13 @@ export function parseSvgPath(d) {
  * @param {string} d  SVG path data, any convenient coordinate box
  * @param {{width?:number, height?:number}} size  target size in inches.
  *   width only → uniform scale (aspect preserved); both → stretched to
- *   exactly width×height; neither → path units are inches as authored.
- * @returns {{regions, w, h, merged} | {error}}
+ *   exactly width×height. NEITHER → anchored true-size mode: authored
+ *   units are inches AND authored coordinates are kept verbatim (only
+ *   the y-flip applies) — no recentering, so several parametric paths
+ *   authored in one frame (an arch and the rabbet band on its edge)
+ *   stay aligned by construction. `anchored: true` in the result tells
+ *   the caller not to re-position the shape either.
+ * @returns {{regions, w, h, merged, anchored} | {error}}
  */
 export function pathToRegions(d, { width = 0, height = 0 } = {}) {
   let contours;
@@ -327,17 +332,19 @@ export function pathToRegions(d, { width = 0, height = 0 } = {}) {
   }
   const bw = maxX - minX, bh = maxY - minY;
   if (bw < 1e-9 || bh < 1e-9) return { error: 'that shape path is degenerate (zero width or height)' };
+  const anchored = !(width > 0) && !(height > 0);
   let sxs, sys;
   if (width > 0 && height > 0) { sxs = width / bw; sys = height / bh; }
   else if (width > 0) { sxs = sys = width / bw; }
   else if (height > 0) { sxs = sys = height / bh; }
   else { sxs = sys = 1; }
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const cx = anchored ? 0 : (minX + maxX) / 2;
+  const cy = anchored ? 0 : (minY + maxY) / 2;
   const placed = contours.map(ring => ring.map(q => ({
     x: (q.x - cx) * sxs,
     y: (cy - q.y) * sys,   // y-flip: SVG y grows downward
   })));
   const { regions, merged } = weldContours(placed);
   if (!regions.length) return { error: 'that shape path welds to nothing solid' };
-  return { regions, w: bw * sxs, h: bh * sys, merged };
+  return { regions, w: bw * sxs, h: bh * sys, merged, anchored };
 }
