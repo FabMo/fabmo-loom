@@ -4,6 +4,7 @@
 // no code, no motion. See intent.mjs for the trust boundary.
 
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
+import { svgAssetToRegions } from './svg.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
@@ -94,8 +95,9 @@ function renderControls() {
 
 // ------------------------------------------------------------- assets
 // Uploaded images/graphics live IN the recipe document (self-contained,
-// survives save/open). No strategy consumes them yet: this is the intake
-// side, the carving strategies are the next decline-to-feature loop.
+// survives save/open). SVG files are consumable: the shapes section
+// lowers their filled artwork to cuttable geometry ({asset: {of, width}}).
+// Raster images are intake-only until the image strategies arrive.
 
 function renderAssets() {
   const host = $('assets');
@@ -117,6 +119,11 @@ function renderAssets() {
     x.textContent = '×';
     x.title = 'remove';
     x.addEventListener('click', () => {
+      const usedBy = (recipe.shapes ?? []).filter(s => s.asset && (s.asset.of === a.id || s.asset.of === a.name));
+      if (usedBy.length) {
+        addTurn(`"${escapeHtml(a.name)}" is still used by shape${usedBy.length > 1 ? 's' : ''} ${usedBy.map(s => `"${s.id}"`).join(', ')} — remove that first (ask, or edit the recipe).`, true);
+        return;
+      }
       recipe.assets = recipe.assets.filter(z => z.id !== a.id);
       persist();
       renderAssets();
@@ -171,7 +178,21 @@ async function addAssetFile(f) {
   recipe.assets.push({ id: unique, name: f.name, ...asset });
   persist();
   renderAssets();
-  addTurn(`Added ${asset.kind} "${escapeHtml(f.name)}"${asset.width ? ` (${asset.width}×${asset.height}px)` : ''} to the recipe. No strategy can carve it yet — it is stored for when image/graphic weaving arrives.`);
+  if (asset.kind === 'svg') {
+    // parse it NOW so the user hears "ready" or the honest reason before
+    // they ask for a cut — same lowering the weave will run
+    const probe = svgAssetToRegions(asset.data, {});
+    if (probe.error) {
+      addTurn(`Added svg "${escapeHtml(f.name)}" to the recipe, but it won't lower to a shape yet: ${escapeHtml(probe.error)}`, true);
+    } else {
+      const pieces = probe.regions.length;
+      const holes = probe.regions.reduce((n, r) => n + r.holes.length, 0);
+      const notes = probe.warnings.length ? ` (${probe.warnings.map(escapeHtml).join('; ')})` : '';
+      addTurn(`Added svg "${escapeHtml(f.name)}" — ${pieces} filled piece${pieces > 1 ? 's' : ''}${holes ? `, ${holes} hole${holes > 1 ? 's' : ''}` : ''}${notes}. Ask to use it: "cut out ${escapeHtml(f.name)} 4 inches wide", "pocket it 1/8 deep"…`);
+    }
+  } else {
+    addTurn(`Added image "${escapeHtml(f.name)}" (${asset.width}×${asset.height}px) to the recipe. Raster carving isn't in the catalog yet — it is stored for when that arrives.`);
+  }
 }
 
 // ---------------------------------------------------------------- run/draw

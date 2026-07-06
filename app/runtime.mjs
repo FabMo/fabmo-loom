@@ -19,6 +19,7 @@
 
 import { CATALOG } from './catalog.mjs';
 import { expandTemplate, pathToRegions, pathToCurve, offsetRegions, booleanRegions } from './shape.mjs';
+import { svgAssetToRegions } from './svg.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
 
@@ -39,8 +40,8 @@ export const EMPTY_RECIPE = {
   pipeline: [],
   // uploaded images/graphics, embedded so recipes stay self-contained:
   // { id, name, kind: 'image'|'svg', data (dataURL or svg text), width?, height? }
-  // No strategy consumes them yet — they are the raw material for the
-  // image/graphic strategies to come (the runtime ignores them).
+  // SVG assets are consumed via the shapes section ({ id, asset: {of,
+  // width?, height?} }); raster images await the image strategies.
   assets: [],
 };
 
@@ -78,9 +79,11 @@ export function buildVars(recipe, controlValues) {
 // construction. Each lowered shape carries `root`: the base path shape
 // its derivation chain started from (itself for path shapes) — the
 // lineage that lets a rabbet band and the cutout that consumes the same
-// base shape be recognized as related. Returns { shapes } or { error }.
+// base shape be recognized as related. Returns { shapes, warnings } or
+// { error }.
 export function buildShapes(recipe, vars) {
   const shapes = {};
+  const warnings = [];
   const num = (v, what, id) => {
     if (typeof v === 'number') return { value: v };
     // "0.2", "rw", "r - t/2", and "{rw}" all work — the model writes
@@ -110,6 +113,30 @@ export function buildShapes(recipe, vars) {
         if (r.error) return { error: `shape "${s.id}": ${r.error}` };
         shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
       }
+    } else if (s.asset) {
+      // an UPLOADED SVG file as a shape: the filled artwork, welded and
+      // sized, becomes ordinary region geometry — cutouts, pockets, and
+      // along-derivations neither know nor care it came from a file
+      const spec = s.asset;
+      const asset = (recipe.assets ?? []).find(a => a.id === spec.of || a.name === spec.of);
+      if (!asset) {
+        const names = (recipe.assets ?? []).map(a => `"${a.name}"`).join(', ');
+        return { error: `shape "${s.id}": no uploaded file "${spec.of}" — uploads: ${names || 'none'}` };
+      }
+      if (asset.kind !== 'svg') {
+        return { error: `shape "${s.id}": "${asset.name}" is a raster image — only SVG uploads lower to shapes (image carving is not in the catalog yet)` };
+      }
+      const size = {};
+      for (const k of ['width', 'height']) {
+        if (spec[k] === undefined || spec[k] === null || spec[k] === '') continue;
+        const d = num(spec[k], k, s.id);
+        if (d.error) return d;
+        size[k] = d.value;
+      }
+      const r = svgAssetToRegions(asset.data, size);
+      if (r.error) return { error: `shape "${s.id}": ${r.error}` };
+      warnings.push(...r.warnings.map(w => `shape "${s.id}" (${asset.name}): ${w}`));
+      shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
     } else if (s.inset || s.outset) {
       const spec = s.inset ?? s.outset;
       const b = baseOf(spec.of, s.id, s.inset ? 'inset' : 'outset');
@@ -148,10 +175,10 @@ export function buildShapes(recipe, vars) {
       // stands in (difference keeps the body it carves from)
       shapes[s.id] = { kind: 'region', regions: out.regions, root: shapes[refs[0]].root };
     } else {
-      return { error: `shape "${s.id}" needs a path or a derivation (inset/outset/band/union/difference/intersect)` };
+      return { error: `shape "${s.id}" needs a path, an asset, or a derivation (inset/outset/band/union/difference/intersect)` };
     }
   }
-  return { shapes };
+  return { shapes, warnings };
 }
 
 export function controlDefaults(recipe) {
@@ -220,7 +247,7 @@ export function runRecipe(recipe, controlValues, fonts) {
   // so a fit conflict shows WHERE instead of a blank canvas), plus
   // authoring sanity warnings
   const shapeOutlines = [];
-  const shapesWarnings = [];
+  const shapesWarnings = [...(bs.warnings ?? [])];
   for (const [id, sh] of Object.entries(bs.shapes)) {
     const rings = sh.kind === 'region'
       ? sh.regions.flatMap(r => [r.outer, ...r.holes])

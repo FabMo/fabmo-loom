@@ -78,18 +78,41 @@ console.log('--- live prompt 2: "now add a cutout around the names…" ---');
   else fail(`prompt 2: cutout=${!!cut} verified=${r.ok} mounts=${mounts} errors=${r.errors?.join(' | ')}`);
 }
 
-console.log('--- live prompt 3: "add holding tabs to the cutout" → expect decline ---');
+console.log('--- live prompt 3: "add holding tabs to the cutout" → a FEATURE now ---');
 {
-  const before = recipe.pipeline.length;
+  // this prompt was the original decline that grew the tabs capability;
+  // the same words must now edit the cutout instead of declining
   const payload = await parse(recipe, 'add holding tabs to the cutout');
   const out = applyActions(recipe, payload);
   recipe = out.recipe;
   console.log(`    model: "${payload.summary}"${out.declined.length ? ` | declined: ${out.declined.map(d => d.what).join('; ')}` : ''}${out.skipped.length ? ` | skipped: ${out.skipped.join('; ')}` : ''}`);
-  const noTabParams = !JSON.stringify(recipe).includes('tab');
+  const cut = recipe.pipeline.find(o => o.strategy === 'tag_cutout');
+  const tabsOn = cut && (cut.params.tabs === true || cut.params.tabs === 'true');
   const r = quiet(() => runRecipe(recipe, controlDefaults(recipe), FONT));
-  if (out.declined.length >= 1 && recipe.pipeline.length === before && noTabParams && r.ok) {
-    pass('tabs declined as a capability gap; recipe still verifies');
-  } else fail(`prompt 3: declined=${out.declined.length} ops=${recipe.pipeline.length}/${before} verified=${r.ok}`);
+  if (out.declined.length === 0 && tabsOn && r.ok) {
+    pass('tabs applied as a cutout param (the converted decline holds live); recipe verifies');
+  } else fail(`prompt 3: declined=${out.declined.length} tabs=${JSON.stringify(cut?.params.tabs)} verified=${r.ok}`);
+}
+
+console.log('--- live prompt 4: "cut out the uploaded logo" → asset shape ---');
+{
+  // an uploaded SVG rides the recipe; the model must author a shapes-
+  // section asset entry and reference it, not decline it
+  recipe = structuredClone(EMPTY_RECIPE);
+  recipe.assets.push({
+    id: 'logo.svg', name: 'logo.svg', kind: 'svg',
+    data: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80"><g transform="translate(60 40)"><path fill-rule="evenodd" d="M -50 -30 L 50 -30 L 50 30 L -50 30 Z M -12 0 A 12 12 0 1 1 12 0 A 12 12 0 1 1 -12 0 Z"/><rect x="-54" y="-8" width="8" height="16"/></g></svg>',
+  });
+  const payload = await parse(recipe, 'cut out the uploaded logo, about 4 inches wide');
+  const out = applyActions(recipe, payload);
+  recipe = out.recipe;
+  console.log(`    model: "${payload.summary}" | applied: ${out.applied.join('; ')}${out.skipped.length ? ` | skipped: ${out.skipped.join('; ')}` : ''}${out.declined.length ? ` | declined: ${out.declined.map(d => d.what).join('; ')}` : ''}`);
+  const assetShape = (recipe.shapes ?? []).find(s => s.asset);
+  const cut = recipe.pipeline.find(o => o.strategy === 'shape_cutout' && o.params.shape === assetShape?.id);
+  const r = quiet(() => runRecipe(recipe, controlDefaults(recipe), FONT));
+  if (out.declined.length === 0 && assetShape && cut && r.ok && r.sbp) {
+    pass(`uploaded SVG woven live: shape "${assetShape.id}" from ${assetShape.asset.of}, cutout verified → SBP`);
+  } else fail(`prompt 4: declined=${out.declined.length} assetShape=${!!assetShape} cutout=${!!cut} verified=${r.ok} errors=${r.errors?.join(' | ')}`);
 }
 
 console.log(failures === 0 ? '\nALL LIVE INTENT CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

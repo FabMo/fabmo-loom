@@ -64,11 +64,20 @@ export const ACTION_TOOL = {
               required: ['id', 'expr'],
             },
             shape: {
-              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
+              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, an asset, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
               properties: {
                 id: { type: 'string', description: 'the name (letters/digits/_)' },
                 path: { type: 'string', description: 'SVG path "d" string; coordinates are INCHES centered on the origin (rescale viewbox paths yourself — a 0..100 box would be a 100-inch part); {arithmetic} of controls/derived allowed' },
                 open: { type: 'boolean', description: 'path only: true = an open CURVE (for hole patterns along it), false/absent = a closed outline' },
+                asset: {
+                  type: 'object', description: 'derive the shape from an UPLOADED SVG asset: its filled artwork, welded and centered on the origin (strokes/text/images inside the file are skipped)',
+                  properties: {
+                    of: { type: 'string', description: 'the asset name exactly as listed under UPLOADED ASSETS' },
+                    width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); omit width AND height to use the file\'s own declared physical size' },
+                    height: { type: 'string', description: 'target height, inches; width alone keeps aspect, both stretch' },
+                  },
+                  required: ['of'],
+                },
                 inset: { type: 'object', properties: { of: { type: 'string' }, by: { type: 'string', description: 'inches or {arithmetic}' } }, required: ['of', 'by'] },
                 outset: { type: 'object', properties: { of: { type: 'string' }, by: { type: 'string' } }, required: ['of', 'by'] },
                 band: { type: 'object', description: 'edge band hugging a shape\'s whole outline', properties: { of: { type: 'string' }, width: { type: 'string', description: 'band width into the shape, inches or {arithmetic}' }, overrun: { type: 'string', description: 'overhang past the edge, inches (default 0; use ~0.05 for edge treatments)' } }, required: ['of', 'width'] },
@@ -115,7 +124,8 @@ export function promptRecipeView(recipe) {
 
 export function buildSystemPrompt(recipe) {
   const assetSection = recipe.assets?.length
-    ? `\n\nUPLOADED ASSETS (embedded in the recipe document, but NOT yet usable: no strategy in the catalog can carve images or graphics yet. If the user asks to engrave/carve/trace one, DECLINE that part — what: the asset use, why: "image/graphic strategies are not in the catalog yet; the upload is stored and ready for when they arrive" — and still apply any other part of the request):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}`
+    ? `\n\nUPLOADED ASSETS (embedded in the recipe document; reference by NAME, never by content — the bytes are not shown to you):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}
+An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <inches or {arithmetic}>} lowers the file's FILLED artwork to a closed outline in the shared frame (strokes, text, and embedded images inside the file are skipped with warnings). Reference that shape id from shape_cutout (cut the logo out), pocket_shape (recess it), or bore_hole's along (holes around its outline). Bind width to a size control when the user might rescale it. A raster IMAGE (png/jpeg photo) is NOT usable: if the user asks to carve/engrave/trace one, DECLINE that part — what: the image use, why: "raster image carving is not in the catalog yet; the upload is stored for when it arrives" — and still apply the rest of the request.`
     : '';
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
@@ -123,7 +133,7 @@ AVAILABLE STRATEGIES (the complete list — nothing else exists):
 ${catalogDoc()}${assetSection}
 
 RULES:
-- Only these strategies and their listed params. A request needing anything else (images, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
+- Only these strategies and their listed params. A request needing anything else (raster images/photos, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
@@ -270,10 +280,10 @@ export function applyActions(recipe, payload) {
         if (!s?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.id)) {
           skipped.push('set_shape: needs an id (letters/digits/_)'); break;
         }
-        // the stored entry: a path, or exactly one derivation
-        const forms = ['path', 'inset', 'outset', 'band', 'union', 'difference', 'intersect'].filter(k => s[k] !== undefined);
+        // the stored entry: a path, an asset, or exactly one derivation
+        const forms = ['path', 'asset', 'inset', 'outset', 'band', 'union', 'difference', 'intersect'].filter(k => s[k] !== undefined);
         if (forms.length !== 1) {
-          skipped.push(`set_shape "${s.id}": give a path OR one derivation (inset/outset/band/union/difference/intersect)`); break;
+          skipped.push(`set_shape "${s.id}": give a path, an asset, OR one derivation (inset/outset/band/union/difference/intersect)`); break;
         }
         const entry = { id: s.id, [forms[0]]: s[forms[0]], ...(forms[0] === 'path' && s.open ? { open: true } : {}) };
         // dry-lower the FINAL shapes list through the real buildShapes so
@@ -286,7 +296,9 @@ export function applyActions(recipe, payload) {
         for (const c of next.controls) probeVals[c.id] = c.default;
         const bv = buildVars({ derived: next.derived ?? [] }, probeVals);
         if (bv.error) { skipped.push(`set_shape "${s.id}": ${bv.error}`); break; }
-        const bs = buildShapes({ shapes: finalShapes }, bv.vars);
+        // assets ride along: an asset-derived shape dry-lowers the real
+        // uploaded file, so a wrong name or an unusable file skips HERE
+        const bs = buildShapes({ shapes: finalShapes, assets: next.assets ?? [] }, bv.vars);
         if (bs.error) { skipped.push(`set_shape "${s.id}": ${bs.error}`); break; }
         next.shapes = finalShapes;
         applied.push(`shape "${s.id}" (${forms[0] === 'path' ? (s.open ? 'curve' : 'outline') : forms[0]})`);

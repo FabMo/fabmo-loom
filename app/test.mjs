@@ -17,6 +17,7 @@ import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
 import { pathToRegions, expandTemplate } from './shape.mjs';
+import { svgToRegions, svgAssetToRegions } from './svg.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FONT_SHELF = {};
@@ -700,10 +701,12 @@ console.log('--- choice control: font picker as a dropdown ---');
   else fail(`bad default kept: ${JSON.stringify(c3)}`);
 }
 
-// ---------------- 18. uploaded assets: stored, surfaced, honestly unusable ----------------
+// ---------------- 18. uploaded assets: stored, surfaced, bytes elided ----------------
 // Upload happens in the browser; here we assert the document and prompt
 // sides: assets ride the recipe, the LLM sees their names but never their
-// bytes, and the runtime ignores them.
+// bytes, SVGs are announced usable while rasters keep decline guidance,
+// and a recipe that doesn't reference its assets runs as if they weren't
+// there. (Consuming an SVG asset is section 27.)
 
 console.log('--- assets: in the document, out of the prompt ---');
 {
@@ -717,8 +720,11 @@ console.log('--- assets: in the document, out of the prompt ---');
   const req = buildParseRequest(rec, 'engrave the dog photo');
   const sys = req.system;
   if (sys.includes('"dog.png" (image, 640×480px)') && sys.includes('"logo.svg" (svg)') && sys.includes('DECLINE')) {
-    pass('prompt lists both assets with decline guidance');
+    pass('prompt lists both assets; raster decline guidance retained');
   } else fail('asset section missing from prompt');
+  if (sys.includes('IS usable') && sys.includes('asset {of:') && !sys.includes('no strategy in the catalog can carve images or graphics yet')) {
+    pass('prompt teaches the SVG-asset shape instead of declining SVGs');
+  } else fail('prompt still declines SVG assets');
   if (!sys.includes('AAAAA') && !sys.includes('xxxxx') && sys.includes('chars omitted')) {
     pass(`asset bytes elided from the prompt (${sys.length.toLocaleString()} chars total)`);
   } else fail(`asset bytes leaked into the prompt (${sys.length} chars)`);
@@ -1548,6 +1554,177 @@ console.log('--- degraded previews and authoring-scale warnings ---');
   // shape outlines ride along on SUCCESS too (construction geometry)
   if (r3.ok && r3.preview.shapeOutlines?.length === 1) pass('construction outlines present in successful previews');
   else fail(`outlines missing on success: ${r3.preview?.shapeOutlines?.length}`);
+}
+
+// ---------------- 27. uploaded SVG files as shapes ----------------
+// The "carve the uploaded logo" decline, converted: a whole SVG FILE
+// (transform stacks, shape elements, per-element fill rules) lowers to
+// the same welded regions an authored path does, via the shapes section
+// ({ asset: {of, width} }). Size is expression-capable, so the logo
+// rides a slider like any parametric shape.
+
+console.log('--- svg file parsing: transforms, elements, fill rules ---');
+{
+  const file = `<?xml version="1.0"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- machinery that must NOT become geometry -->
+  <defs><circle id="tpl" cx="0" cy="0" r="40"/></defs>
+  <g transform="translate(50 50)">
+    <path fill-rule="evenodd" d="M -30 0 A 30 30 0 1 1 30 0 A 30 30 0 1 1 -30 0 Z M -15 0 A 15 15 0 1 1 15 0 A 15 15 0 1 1 -15 0 Z"/>
+    <rect x="-45" y="-45" width="20" height="10" transform="rotate(90)"/>
+    <circle cx="40" cy="40" r="8" fill="none"/>
+    <text x="0" y="0">skip me</text>
+  </g>
+  <polygon points="90,90 98,90 94,98"/>
+</svg>`;
+  const r = svgToRegions(file);
+  const area = (ring) => {
+    let a = 0;
+    for (let i = 0; i < ring.length; i++) {
+      const j = (i + 1) % ring.length;
+      a += ring[i].x * ring[j].y - ring[j].x * ring[i].y;
+    }
+    return Math.abs(a / 2);
+  };
+  if (r.error) fail(`svg file did not parse: ${r.error}`);
+  else {
+    const donut = r.regions.find(x => x.holes.length === 1);
+    const ringErr = donut ? Math.abs(area(donut.outer) - Math.PI * 900) / (Math.PI * 900) : 1;
+    const holeErr = donut ? Math.abs(area(donut.holes[0]) - Math.PI * 225) / (Math.PI * 225) : 1;
+    if (donut && ringErr < 0.01 && holeErr < 0.01) {
+      pass(`evenodd donut welds with its hole (outer ${(ringErr * 100).toFixed(2)}% from π·30², hole ${(holeErr * 100).toFixed(2)}% from π·15²)`);
+    } else fail(`donut wrong: found=${!!donut} ringErr=${ringErr} holeErr=${holeErr}`);
+    const rect = r.regions.find(x => !x.holes.length && Math.abs(area(x.outer) - 200) < 0.5);
+    if (rect) {
+      const xs = rect.outer.map(q => q.x), ys = rect.outer.map(q => q.y);
+      const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys);
+      // translate(50,50)·rotate(90) maps the 20×10 rect to a 10-wide, 20-tall one
+      if (Math.abs(w - 10) < 1e-6 && Math.abs(h - 20) < 1e-6) {
+        pass('nested transform stack exact: rotate(90) under translate turns 20×10 into 10×20');
+      } else fail(`transform wrong: ${w}×${h}`);
+    } else fail('transformed rect missing');
+    const tri = r.regions.find(x => Math.abs(area(x.outer) - 32) < 0.5);
+    if (r.regions.length === 3 && tri) pass('3 filled pieces total: defs template did not leak, triangle polygon parsed');
+    else fail(`pieces wrong: ${r.regions.length}, tri=${!!tri}`);
+    const wantWarn = ['unfilled', '<text>'];
+    if (wantWarn.every(w => r.warnings.some(x => x.includes(w)))) {
+      pass(`skips are honest warnings: ${r.warnings.join(' / ')}`);
+    } else fail(`skip warnings wrong: ${JSON.stringify(r.warnings)}`);
+  }
+
+  // declared physical size: 80mm-wide viewBox-100 file → true-size mode
+  const mm = `<svg width="80mm" height="80mm" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40"/></svg>`;
+  const t = svgAssetToRegions(mm, {});
+  if (!t.error && Math.abs(t.w - 64 / 25.4) < 1e-3 && !t.warnings.length) {
+    pass(`physical units honored: 64mm-diameter circle lowers to ${t.w.toFixed(4)}" with no size given`);
+  } else fail(`true-size wrong: w=${t.w} ${t.error ?? ''} ${JSON.stringify(t.warnings)}`);
+  const bare = svgAssetToRegions(`<svg viewBox="0 0 10 5"><rect width="10" height="5"/></svg>`, {});
+  if (!bare.error && bare.w === 3 && bare.warnings.some(w => w.includes('3"'))) {
+    pass('unit-less file defaults to 3" wide WITH a warning to set a size');
+  } else fail(`default-size wrong: ${bare.w} ${JSON.stringify(bare.warnings)}`);
+}
+
+console.log('--- the uploaded logo, pocketed: asset → shape → verified job ---');
+{
+  // a "logo" exercising cross-element union (the tab overlaps the plate)
+  // and an evenodd hole that must survive as an uncut island
+  const logo = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">
+  <g transform="translate(60 40)">
+    <path fill-rule="evenodd" d="M -50 -30 L 50 -30 L 50 30 L -50 30 Z M -12 0 A 12 12 0 1 1 12 0 A 12 12 0 1 1 -12 0 Z"/>
+    <rect x="-54" y="-8" width="8" height="16"/>
+  </g>
+</svg>`;
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.assets.push({ id: 'logo.svg', name: 'logo.svg', kind: 'svg', data: logo });
+
+  // built the way the model would build it: through the intent layer,
+  // with the size BOUND so the user can rescale the logo later
+  const res = applyActions(rec, { summary: 'pocket the logo', actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'number', label: 'Logo width', default: 3, min: 1.5, max: 6, step: 0.25 } },
+    { kind: 'set_shape', shape: { id: 'logo', asset: { of: 'logo.svg', width: 'w' } } },
+    { kind: 'add_operation', operation: { id: 'emblem', strategy: 'pocket_shape', params: { shape: 'logo', depth: 0.15, toolDiameter: 0.125 } } },
+  ], declined: [] });
+  if (res.applied.length === 3 && !res.skipped.length) pass('asset shape applies through the intent layer (dry-lowered the real file)');
+  else fail(`asset apply wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+
+  const r = run(res.recipe);
+  if (r.ok && r.sbp) pass('uploaded-logo pocket VERIFIED → SBP');
+  else fail(`logo pocket rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    // measured: the weld crossed elements (tab + plate = one piece), the
+    // island is uncut at 0, the floor is at depth, the width matches w
+    const p = r.preview.placement;
+    const sim = simulateJob(r.preview.built, p, r.preview.stock);
+    const island = surfaceAt(sim, p.x, p.y);
+    const floor = surfaceAt(sim, p.x + 1.0, p.y);
+    if (Math.abs(island) < 1e-6 && Math.abs(floor + 0.15) < 0.01) {
+      pass(`evenodd hole survives as an island (surface ${island}" vs floor ${floor.toFixed(3)}")`);
+    } else fail(`island/floor wrong: island=${island} floor=${floor}`);
+    const rings = r.preview.built[0].r.previewRegions?.[0];
+    const xs = rings.outer.map(q => q.x);
+    const w = Math.max(...xs) - Math.min(...xs);
+    if (Math.abs(w - 3) < 1e-6) pass('logo scaled to the bound control: 3.000" wide');
+    else fail(`logo width wrong: ${w}`);
+
+    const r2 = run(res.recipe, { w: 4.5 });
+    if (r2.ok) {
+      const rr = r2.preview.built[0].r.previewRegions[0];
+      const xs2 = rr.outer.map(q => q.x);
+      const w2 = Math.max(...xs2) - Math.min(...xs2);
+      if (Math.abs(w2 - 4.5) < 1e-6) pass('slider rescales the uploaded file: 4.5" wide re-lowers and re-verifies');
+      else fail(`rescale wrong: ${w2}`);
+    } else fail(`w=4.5 rejected: ${r2.errors?.join(' | ')}`);
+  }
+}
+
+console.log('--- asset shapes compose: inset ring, holes along it, cutout ---');
+{
+  const shield = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M 10 10 H 90 V 55 C 90 80 50 95 50 95 C 50 95 10 80 10 55 Z"/>
+</svg>`;
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Shield plaque',
+    assets: [{ id: 'shield.svg', name: 'shield.svg', kind: 'svg', data: shield }],
+    shapes: [
+      { id: 'shield', asset: { of: 'shield.svg', width: '4' } },
+      { id: 'rim', inset: { of: 'shield', by: 0.45 } },
+    ],
+    pipeline: [
+      { id: 'holes', strategy: 'bore_hole', params: { along: 'rim', count: 6, diameter: 0.25, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'shield', tabs: true } },
+    ],
+  };
+  const r = run(rec);
+  const holes = r.preview?.built?.find(x => x.r.previewHoles)?.r.previewHoles ?? [];
+  if (r.ok && r.sbp && holes.length === 6) {
+    pass('shape algebra runs on file geometry: 6 holes along an inset of the UPLOAD, cutout verified');
+  } else fail(`shield recipe rejected: ok=${r.ok} holes=${holes.length} ${r.errors?.join(' | ')}`);
+}
+
+console.log('--- asset shape failure modes stay honest ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.assets.push(
+    { id: 'logo.svg', name: 'logo.svg', kind: 'svg', data: '<svg viewBox="0 0 10 10"><rect width="10" height="10"/></svg>' },
+    { id: 'dog.png', name: 'dog.png', kind: 'image', data: 'data:image/png;base64,AAAA', width: 64, height: 64 },
+    { id: 'junk.svg', name: 'junk.svg', kind: 'svg', data: '<p>not svg</p>' },
+  );
+  const tryShape = (shape) => applyActions(rec, { summary: 's', actions: [{ kind: 'set_shape', shape }], declined: [] }).skipped[0] ?? '';
+  const missing = tryShape({ id: 'x', asset: { of: 'nope.svg' } });
+  if (missing.includes('no uploaded file "nope.svg"') && missing.includes('"logo.svg"')) {
+    pass(`wrong name skipped, uploads listed: "${missing}"`);
+  } else fail(`missing-asset message wrong: ${missing}`);
+  const raster = tryShape({ id: 'x', asset: { of: 'dog.png' } });
+  if (raster.includes('raster image')) pass('raster asset refused as a shape with the honest reason');
+  else fail(`raster message wrong: ${raster}`);
+  const junk = tryShape({ id: 'x', asset: { of: 'junk.svg' } });
+  if (junk.includes('no <svg> element')) pass('unparseable file refused at apply time, not at weave time');
+  else fail(`junk message wrong: ${junk}`);
+  const both = tryShape({ id: 'x', path: 'M 0 0 L 1 0 L 1 1 Z', asset: { of: 'logo.svg' } });
+  if (both.includes('give a path, an asset, OR')) pass('path + asset together refused as ambiguous');
+  else fail(`both-forms message wrong: ${both}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

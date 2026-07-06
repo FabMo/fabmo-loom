@@ -34,7 +34,7 @@ const ccw = (ring) => (ringArea(ring) > 0 ? ring : [...ring].reverse());
 // overlaps, and classifies opposite-winding subpaths as holes. Output
 // normalized to the downstream convention (outers CCW, holes CCW).
 const CLIP_SCALE = 1e6;
-export function weldContours(contours) {
+export function weldContours(contours, fillRule = 'nonzero') {
   if (!contours.length) return { regions: [], merged: false };
   const toClip = ring => ring.map(q => ({ X: Math.round(q.x * CLIP_SCALE), Y: Math.round(q.y * CLIP_SCALE) }));
   const fromClip = path => path.map(q => ({ x: q.X / CLIP_SCALE, y: q.Y / CLIP_SCALE }));
@@ -43,7 +43,10 @@ export function weldContours(contours) {
     c.AddPath(toClip(ring), ClipperLib.PolyType.ptSubject, true);
   }
   const tree = new ClipperLib.PolyTree();
-  c.Execute(ClipperLib.ClipType.ctUnion, tree, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  // evenodd exists for uploaded SVG files that declare it; everything
+  // authored in-app (fonts, model paths) welds nonzero
+  const ft = fillRule === 'evenodd' ? ClipperLib.PolyFillType.pftEvenOdd : ClipperLib.PolyFillType.pftNonZero;
+  c.Execute(ClipperLib.ClipType.ctUnion, tree, ft, ft);
   const ex = ClipperLib.JS.PolyTreeToExPolygons(tree);
   const regions = ex
     .filter(e => e.outer?.length >= 3)
