@@ -402,16 +402,25 @@ function textGeometry(ctx, text, letterHeight, fontId) {
   return ctx._textCache.get(key);
 }
 
-// Place a text block ABSOLUTELY for multi-element layouts (a sign's glyph
-// above, braille below): posX/posY, when given, override that axis of the
-// block's center in the shared frame — instead of the auto-centering,
-// which follows the content machined so far and therefore stacks a sign's
-// text right onto its glyph. Builds fresh arrays: centeredText's result
-// is cached and must not be mutated.
-function placeTextBlock({ regions, bbox }, px, py) {
-  if (!px && !py) return { regions, bbox };
-  const dx = px ? px - (bbox.minX + bbox.maxX) / 2 : 0;
-  const dy = py ? py - (bbox.minY + bbox.maxY) / 2 : 0;
+// Lay out a text block for multi-element signs. A text block otherwise
+// centers on the content machined so far — which stacks a sign's text
+// right ON its glyph. `place` moves it RELATIVE to that content with no
+// coordinates to compute: "below" drops the block a gap under everything
+// so far, "above" lifts it a gap over. This makes pipeline order the
+// vertical stack the model expects (glyph, then text below, then braille
+// below). posX/posY remain an ABSOLUTE-center override for precise work.
+// Builds fresh arrays: centeredText's result is cached, never mutated.
+function placeTextBlock(ctx, { regions, bbox }, p) {
+  const bc = { x: (bbox.minX + bbox.maxX) / 2, y: (bbox.minY + bbox.maxY) / 2 };
+  const half = (bbox.maxY - bbox.minY) / 2;
+  const cb = ctx.contentBBox;
+  let tx = bc.x, ty = bc.y;
+  if (p.place === 'below' && cb) ty = cb.minY - p.gap - half;
+  else if (p.place === 'above' && cb) ty = cb.maxY + p.gap + half;
+  if (Number.isFinite(p.posX) && p.posX !== 0) tx = p.posX;
+  if (Number.isFinite(p.posY) && p.posY !== 0) ty = p.posY;
+  const dx = tx - bc.x, dy = ty - bc.y;
+  if (!dx && !dy) return { regions, bbox };
   const mv = (ring) => ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
   return {
     regions: regions.map(r => ({ outer: mv(r.outer), holes: r.holes.map(mv) })),
@@ -421,8 +430,10 @@ function placeTextBlock({ regions, bbox }, px, py) {
 
 // Placement params shared by the text entries.
 const TEXT_PLACE_PARAMS = {
-  posX: { type: 'number', default: 0, bindable: true, doc: 'ABSOLUTE X of the text block\'s center, inches in the shared frame; 0/absent = auto-center on the content so far' },
-  posY: { type: 'number', default: 0, bindable: true, doc: 'ABSOLUTE Y of the text block\'s center, inches; 0/absent = auto-center — which lands ON any earlier glyph/pocket, so multi-element signs MUST place each block' },
+  place: { type: 'string', default: 'center', doc: 'where the text sits RELATIVE to the content machined before it: "below" = a gap under it, "above" = a gap over it, "center" (default) = centered ON it (a monogram inside a pocket). For a stacked SIGN, set "below" on every element after the top one — no coordinates needed.' },
+  gap: { type: 'number', default: 0.35, doc: 'spacing to the neighbouring element when place is "below"/"above", inches' },
+  posX: { type: 'number', default: 0, doc: 'ABSOLUTE X of the block\'s center, inches (overrides place\'s X); 0/absent = leave to place' },
+  posY: { type: 'number', default: 0, doc: 'ABSOLUTE Y of the block\'s center, inches (overrides place); 0/absent = leave to place' },
 };
 
 // One font param spec shared by the text entries; the doc is the model's
@@ -447,7 +458,7 @@ export const CATALOG = {
     run(p, ctx) {
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
-      const { regions, bbox } = placeTextBlock(centeredText(ctx, p.text, p.letterHeight, p.font), p.posX, p.posY);
+      const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
@@ -484,7 +495,7 @@ export const CATALOG = {
     run(p, ctx) {
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
-      const { regions, bbox } = placeTextBlock(centeredText(ctx, p.text, p.letterHeight, p.font), p.posX, p.posY);
+      const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const moves = [];
@@ -526,7 +537,7 @@ export const CATALOG = {
     run(p, ctx) {
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
-      const { regions, bbox } = placeTextBlock(centeredText(ctx, p.text, p.letterHeight, p.font), p.posX, p.posY);
+      const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
       noteContent(ctx, regions.map(r => r.outer));
       const params = {

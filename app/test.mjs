@@ -2020,18 +2020,19 @@ console.log('--- glyph library: built-in signage symbols, no upload ---');
     pass(`unknown glyph skipped with the library listed: "${bad.skipped[0].slice(0, 70)}…"`);
   } else fail(`unknown glyph not refused: ${JSON.stringify(bad.skipped)}`);
 
-  // the men's-room sign layout: glyph placed ABOVE, text offset BELOW —
-  // the field-reported failure was both stacked on the origin
+  // the men's-room sign: the model just orders the ops and sets
+  // place:"below" — no coordinates. The field-reported failure was every
+  // element stacked on the origin; here each drops under the last.
   const sign = applyActions(structuredClone(EMPTY_RECIPE), { summary: "men's sign", actions: [
-    { kind: 'set_shape', shape: { id: 'fig', glyph: { of: 'men', width: '1.5', posY: '0.5' } } },
+    { kind: 'set_shape', shape: { id: 'fig', glyph: { of: 'men', width: '2' } } },
     { kind: 'add_operation', operation: { id: 'symbol', strategy: 'pocket_shape', params: { shape: 'fig', depth: 0.1, toolDiameter: 0.125 } } },
-    { kind: 'add_operation', operation: { id: 'label', strategy: 'vcarve_text', params: { text: 'Men', letterHeight: 0.8, posY: -2.2 } } },
+    { kind: 'add_operation', operation: { id: 'label', strategy: 'vcarve_text', params: { text: 'Men', letterHeight: 0.8, place: 'below' } } },
     { kind: 'add_operation', operation: { id: 'plaque', strategy: 'tag_cutout', params: { buffer: 0.5 } } },
   ], declined: [] });
-  if (sign.applied.length === 4 && !sign.skipped.length) pass('men\'s sign layout applies (glyph posY + text offsetY)');
+  if (sign.applied.length === 4 && !sign.skipped.length) pass('men\'s sign layout applies (place:"below", no coordinates)');
   else fail(`sign apply wrong: ${JSON.stringify(sign.skipped)}`);
   const sr = run(sign.recipe);
-  if (sr.ok) pass('men\'s sign VERIFIED with placed elements');
+  if (sr.ok) pass('men\'s sign VERIFIED with stacked elements');
   else fail(`men's sign rejected: ${sr.errors?.join(' | ')}`);
   if (sr.ok) {
     const yRange = (strategy) => {
@@ -2041,9 +2042,26 @@ console.log('--- glyph library: built-in signage symbols, no upload ---');
     };
     const glyphY = yRange('pocket_shape'), textY = yRange('vcarve_text');
     if (glyphY.min > textY.max + 0.1) {
-      pass(`no overlap: glyph bottom ${glyphY.min.toFixed(2)}" clears text top ${textY.max.toFixed(2)}"`);
+      pass(`place:"below" stacks: glyph bottom ${glyphY.min.toFixed(2)}" clears text top ${textY.max.toFixed(2)}"`);
     } else fail(`glyph/text overlap: glyph [${glyphY.min.toFixed(2)},${glyphY.max.toFixed(2)}] text [${textY.min.toFixed(2)},${textY.max.toFixed(2)}]`);
   }
+
+  // the overlay case must still center: a monogram in a pocketed well
+  // (place default "center") sits ON the well, not below it
+  const mono = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 2, depth: 0.1 } },
+      { id: 'mono', strategy: 'vcarve_text', params: { text: 'B', letterHeight: 1 } },
+    ],
+  });
+  if (mono.ok) {
+    const wc = mono.preview.built.find(b => b.op.id === 'well');
+    const mc = mono.preview.built.find(b => b.op.id === 'mono');
+    const cy = (b) => { const ys = (b.r.previewRegions ?? []).flatMap(r => r.outer.map(q => q.y)); return (Math.min(...ys) + Math.max(...ys)) / 2; };
+    if (Math.abs(cy(wc) - cy(mc)) < 0.15) pass('overlay unchanged: default-place monogram still centers ON the well');
+    else fail(`monogram not centered on well: well cy ${cy(wc).toFixed(2)} vs mono cy ${cy(mc).toFixed(2)}`);
+  } else fail(`monogram-in-well rejected: ${mono.errors?.join(' | ')}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
