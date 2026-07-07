@@ -12,6 +12,7 @@
 import { CATALOG, catalogDoc } from './catalog.mjs';
 import { expandTemplate } from './shape.mjs';
 import { buildVars, buildShapes } from './runtime.mjs';
+import { GLYPHS } from './glyphs.mjs';
 
 // ---------------------------------------------------------------- schema
 
@@ -64,7 +65,7 @@ export const ACTION_TOOL = {
               required: ['id', 'expr'],
             },
             shape: {
-              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, an asset, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
+              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, an asset, a glyph, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
               properties: {
                 id: { type: 'string', description: 'the name (letters/digits/_)' },
                 path: { type: 'string', description: 'SVG path "d" string; coordinates are INCHES centered on the origin (rescale viewbox paths yourself — a 0..100 box would be a 100-inch part); {arithmetic} of controls/derived allowed' },
@@ -75,6 +76,15 @@ export const ACTION_TOOL = {
                     of: { type: 'string', description: 'the asset name exactly as listed under UPLOADED ASSETS' },
                     width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); omit width AND height to use the file\'s own declared physical size' },
                     height: { type: 'string', description: 'target height, inches; width alone keeps aspect, both stretch' },
+                  },
+                  required: ['of'],
+                },
+                glyph: {
+                  type: 'object', description: 'derive the shape from a BUILT-IN signage glyph (see GLYPH LIBRARY) — standard symbols, no upload needed',
+                  properties: {
+                    of: { type: 'string', description: 'the glyph id exactly as listed under GLYPH LIBRARY' },
+                    width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); default 3' },
+                    height: { type: 'string', description: 'target height, inches; width alone keeps the glyph\'s aspect' },
                   },
                   required: ['of'],
                 },
@@ -135,17 +145,18 @@ export function buildSystemPrompt(recipe) {
     ? `\n\nUPLOADED ASSETS (embedded in the recipe document; reference by NAME, never by content — the bytes are not shown to you):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}
 An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <inches or {arithmetic}>} lowers the file's FILLED artwork to a closed outline in the shared frame (strokes, text, and embedded images inside the file are skipped with warnings). Reference that shape id from shape_cutout (cut the logo out), pocket_shape (recess it), or bore_hole's along (holes around its outline). Bind width to a size control when the user might rescale it. A raster IMAGE (png/jpeg photo) is NOT usable: if the user asks to carve/engrave/trace one, DECLINE that part — what: the image use, why: "raster image carving is not in the catalog yet; the upload is stored for when it arrives" — and still apply the rest of the request.`
     : '';
+  const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}`;
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
 AVAILABLE STRATEGIES (the complete list — nothing else exists):
-${catalogDoc()}${assetSection}
+${catalogDoc()}${assetSection}${glyphSection}
 
 RULES:
 - Only these strategies and their listed params. A request needing anything else (raster images/photos, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
-- An outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield…) is NOT a decline: AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc.
+- An outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc.
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame and re-lower on every slider move. CRITICAL: shape coordinates are INCHES, CENTERED ON THE ORIGIN (where prior content like engraved text centers). NEVER paste an SVG-viewbox path unscaled — a heart in a 0..100 box becomes a 100-INCH part 50 inches off-center. A 3" heart spans roughly -1.5..1.5 around the origin; rescale and re-center the coordinates yourself (or use {arithmetic} of a size control) before authoring the path. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
@@ -291,9 +302,9 @@ export function applyActions(recipe, payload) {
           skipped.push('set_shape: needs an id (letters/digits/_)'); break;
         }
         // the stored entry: a path, an asset, or exactly one derivation
-        const forms = ['path', 'asset', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit'].filter(k => s[k] !== undefined);
+        const forms = ['path', 'asset', 'glyph', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit'].filter(k => s[k] !== undefined);
         if (forms.length !== 1) {
-          skipped.push(`set_shape "${s.id}": give a path, an asset, OR one derivation (inset/outset/band/union/difference/intersect/fit)`); break;
+          skipped.push(`set_shape "${s.id}": give a path, an asset, a glyph, OR one derivation (inset/outset/band/union/difference/intersect/fit)`); break;
         }
         const entry = { id: s.id, [forms[0]]: s[forms[0]], ...(forms[0] === 'path' && s.open ? { open: true } : {}) };
         // dry-lower the FINAL shapes list through the real buildShapes so

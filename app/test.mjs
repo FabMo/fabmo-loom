@@ -1723,7 +1723,7 @@ console.log('--- asset shape failure modes stay honest ---');
   if (junk.includes('no <svg> element')) pass('unparseable file refused at apply time, not at weave time');
   else fail(`junk message wrong: ${junk}`);
   const both = tryShape({ id: 'x', path: 'M 0 0 L 1 0 L 1 1 Z', asset: { of: 'logo.svg' } });
-  if (both.includes('give a path, an asset, OR')) pass('path + asset together refused as ambiguous');
+  if (both.includes('give a path, an asset, a glyph, OR')) pass('path + asset together refused as ambiguous');
   else fail(`both-forms message wrong: ${both}`);
 }
 
@@ -1971,6 +1971,54 @@ console.log('--- guest mount: register, weave, verify ---');
   } else fail('registration guardrails failed');
 
   delete CATALOG.two_pads;   // leave the catalog clean for other sections
+}
+
+console.log('--- glyph library: built-in signage symbols, no upload ---');
+{
+  const { GLYPHS, glyphById } = await import('./glyphs.mjs');
+  // every library entry lowers cleanly at the default size — the library
+  // is pre-curated, so a warning here means a bad regeneration
+  let dirty = 0;
+  for (const g of GLYPHS) {
+    const r = svgAssetToRegions(g.svg, { width: 3 });
+    if (r.error || !r.regions?.length || r.warnings?.length) {
+      dirty++; fail(`glyph "${g.id}": ${r.error ?? r.warnings?.join(' | ') ?? 'no regions'}`);
+    }
+  }
+  if (!dirty) pass(`all ${GLYPHS.length} glyphs lower clean and warning-free`);
+  if (glyphById('restroom') && glyphById('accessible')) pass('restroom + accessible present (the signage staples)');
+  else fail('restroom/accessible missing from library');
+
+  // built the way the model would build it: a restroom sign — glyph
+  // recessed via the intent layer, size bound, plaque cut around it
+  const res = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'restroom sign', actions: [
+    { kind: 'add_control', control: { id: 'gw', type: 'number', label: 'Symbol width', default: 2.5, min: 1, max: 5, step: 0.25 } },
+    { kind: 'set_shape', shape: { id: 'sym', glyph: { of: 'restroom', width: 'gw' } } },
+    { kind: 'add_operation', operation: { id: 'recess', strategy: 'pocket_shape', params: { shape: 'sym', depth: 0.1, toolDiameter: 0.125 } } },
+  ], declined: [] });
+  if (res.applied.length === 3 && !res.skipped.length) pass('glyph shape applies through the intent layer (dry-lowered the library file)');
+  else fail(`glyph apply wrong: ${JSON.stringify(res.applied)} / ${JSON.stringify(res.skipped)}`);
+
+  const r = run(res.recipe);
+  if (r.ok && r.sbp) pass('restroom-glyph pocket VERIFIED → SBP');
+  else fail(`glyph pocket rejected: ${r.errors?.join(' | ')}`);
+  if (r.ok) {
+    // the composite pockets as several sub-ops (one per figure) — measure
+    // the whole glyph across all of them
+    const rings = r.preview.built.flatMap(b => b.r.previewRegions ?? []);
+    const xs = rings.flatMap(reg => reg.outer.map(q => q.x));
+    const w = Math.max(...xs) - Math.min(...xs);
+    if (Math.abs(w - 2.5) < 1e-6) pass('glyph scaled to the bound control: 2.500" wide');
+    else fail(`glyph width wrong: ${w}`);
+  }
+
+  // a wrong name must skip with the library listed, not half-apply
+  const bad = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'set_shape', shape: { id: 'sym', glyph: { of: 'unicorn' } } },
+  ], declined: [] });
+  if (!bad.applied.length && bad.skipped[0]?.includes('no built-in glyph "unicorn"')) {
+    pass(`unknown glyph skipped with the library listed: "${bad.skipped[0].slice(0, 70)}…"`);
+  } else fail(`unknown glyph not refused: ${JSON.stringify(bad.skipped)}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

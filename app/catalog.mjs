@@ -137,6 +137,20 @@ function namedShapeRegion(ctx, id, use) {
   return { region: regions[0], warnings, anchored: true };
 }
 
+// ALL pieces of a (possibly multi-piece) shape — for consumers that
+// machine each piece (pocketing a signage glyph's separate figures).
+// Single-outline consumers (cutouts: N pieces = N loose parts) keep
+// namedShapeRegion's largest-piece rule.
+function namedShapeRegionsAll(ctx, id, use) {
+  const sh = ctx.shapes?.[id];
+  if (!sh) {
+    const known = Object.keys(ctx.shapes ?? {});
+    return { error: `unknown shape "${id}" — defined shapes: ${known.length ? known.join(', ') : 'none'}` };
+  }
+  if (sh.kind !== 'region') return { error: `shape "${id}" is an open curve — ${use} needs a closed outline` };
+  return { regions: sh.regions, anchored: true };
+}
+
 // resolve a shapes-section reference to a polyline to follow: an open
 // curve directly, or a closed region's outer ring
 function namedShapePolyline(ctx, id) {
@@ -540,7 +554,7 @@ export const CATALOG = {
   },
 
   pocket_shape: {
-    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
+    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. A referenced shape with SEVERAL pieces (a signage glyph\'s separate figures, a multi-part logo) pockets EVERY piece; pieces too small for the bit are skipped with a warning. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
       shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", "custom" (author the outline in the path param), or the id of a shapes-section entry (anchored in the shared frame)' },
       path: { type: 'string', default: '', template: true, doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path, {arithmetic} of control ids included (set width and height 0 for parametric paths)' },
@@ -556,36 +570,41 @@ export const CATALOG = {
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
-      let region;
+      let regions;   // one or more pieces — every piece gets pocketed
       let shapeRoot = null;   // lineage: the base shape a reference derives from
       const shapeWarnings = [];
       if (p.shape === 'circle') {
-        region = { outer: circleRing(c.x, c.y, p.diameter / 2), holes: [] };
+        regions = [{ outer: circleRing(c.x, c.y, p.diameter / 2), holes: [] }];
       } else if (p.shape === 'rectangle') {
         const rh = p.height > 0 ? p.height : 1.5;
-        region = { outer: roundedRectRing(c.x - p.width / 2, c.y - rh / 2, c.x + p.width / 2, c.y + rh / 2, p.cornerRadius), holes: [] };
-      } else if (p.shape === 'custom' || ctx.shapes?.[p.shape]) {
-        const cs = p.shape === 'custom' ? customShapeRegion(p) : namedShapeRegion(ctx, p.shape, 'a pocket');
+        regions = [{ outer: roundedRectRing(c.x - p.width / 2, c.y - rh / 2, c.x + p.width / 2, c.y + rh / 2, p.cornerRadius), holes: [] }];
+      } else if (p.shape === 'custom') {
+        const cs = customShapeRegion(p);
         if (cs.error) return cs;
-        if (p.shape !== 'custom') shapeRoot = ctx.shapes[p.shape].root;
         shapeWarnings.push(...cs.warnings);
-        // anchored shapes (references, and width/height-0 paths) stay in
-        // authored coordinates so ops sharing a frame (arch + its
-        // rabbet) align by construction
         const shift = cs.anchored ? (ring => ring) : (ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y })));
-        region = { outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) };
+        regions = [{ outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) }];
+      } else if (ctx.shapes?.[p.shape]) {
+        // a shapes-section reference: pocket EVERY piece — a multi-piece
+        // shape (a signage glyph's separate figures, a multi-part logo)
+        // is N recesses, not just the largest one. Anchored: references
+        // stay in authored coordinates so ops sharing a frame (arch +
+        // its rabbet) align by construction.
+        const cs = namedShapeRegionsAll(ctx, p.shape, 'a pocket');
+        if (cs.error) return cs;
+        shapeRoot = ctx.shapes[p.shape].root;
+        regions = cs.regions;
       } else {
         return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, custom, or a defined shape id)` };
       }
-      const ring = region.outer;
-      noteContent(ctx, [ring]);
+      noteContent(ctx, regions.map(r => r.outer));
       const params = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
       };
       let chain, autoWarnings = [];
       if (p.toolDiameter === 0) {
-        const auto = autoToolChain([region], p.depth);
+        const auto = autoToolChain(regions, p.depth);
         if (auto.error) return { error: `that ${p.shape} pocket: ${auto.error}` };
         chain = auto.chain;
         autoWarnings = [auto.note];
@@ -595,35 +614,50 @@ export const CATALOG = {
           chain.push({ d: p.restDiameter, prev: p.toolDiameter });
         }
       }
-      const bb = ring.reduce((a, q) => ({
+      const bb = regions.flatMap(r => r.outer).reduce((a, q) => ({
         minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
         maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
       }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
       const ops = [];
-      for (const { d, prev } of chain) {
-        const g = prev == null
-          ? generatePocket(region, { diameter: d }, params)
-          : generateRestPocket(region, prev, { diameter: d }, params);
-        if (prev == null && !g.moves.length) {
-          return { error: `a ${d}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
+      let cutPieces = 0;
+      regions.forEach((region, ri) => {
+        const piece = regions.length > 1 ? ` ${ri + 1}/${regions.length}` : '';
+        let pieceCut = false;
+        for (const { d, prev } of chain) {
+          const g = prev == null
+            ? generatePocket(region, { diameter: d }, params)
+            : generateRestPocket(region, prev, { diameter: d }, params);
+          if (prev == null && !g.moves.length) {
+            if (regions.length === 1) {
+              return; // fall through to the all-pieces error below
+            }
+            shapeWarnings.push(`piece ${ri + 1} of "${p.shape}" is too small for the ${formatDiameter(d)} bit — skipped`);
+            break;
+          }
+          if (!g.moves.length) continue;
+          pieceCut = true;
+          // an edge treatment with KNOWN lineage gets a scoped allowance
+          // (wired to the cutout of the same base shape by the runtime)
+          // instead of the blanket flag — the verifier still catches it
+          // overlapping anything unrelated
+          ops.push({
+            subName: (prev == null ? 'bulk' : `rest ${formatDiameter(d)}`) + piece,
+            allowOverlap: prev != null || (p.edgeTreatment && !shapeRoot),
+            edgeScopeRoot: p.edgeTreatment && shapeRoot ? shapeRoot : undefined,
+            tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
+            cutter: { type: 'flat', diameter: d },
+            feedRate: p.feedRate, plungeRate: 30,
+            moves: g.moves,
+            target: g.target ?? { type: 'region', rings: [ccw(region.outer), ...region.holes.map(cwr)], depth: p.depth },
+            ...(prev == null ? { previewRegions: [region] } : {}),
+          });
         }
-        if (!g.moves.length) continue;
-        // an edge treatment with KNOWN lineage gets a scoped allowance
-        // (wired to the cutout of the same base shape by the runtime)
-        // instead of the blanket flag — the verifier still catches it
-        // overlapping anything unrelated
-        ops.push({
-          subName: prev == null ? 'bulk' : `rest ${formatDiameter(d)}`,
-          allowOverlap: prev != null || (p.edgeTreatment && !shapeRoot),
-          edgeScopeRoot: p.edgeTreatment && shapeRoot ? shapeRoot : undefined,
-          tool: { name: `${formatDiameter(d)} endmill`, diameter: d },
-          cutter: { type: 'flat', diameter: d },
-          feedRate: p.feedRate, plungeRate: 30,
-          moves: g.moves,
-          target: g.target ?? { type: 'region', rings: [ccw(ring), ...region.holes.map(cwr)], depth: p.depth },
-          ...(prev == null ? { previewRegions: [region], warnings: [...shapeWarnings, ...autoWarnings] } : {}),
-        });
+        if (pieceCut) cutPieces++;
+      });
+      if (!ops.length) {
+        return { error: `a ${chain[0].d}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
       }
+      ops[0] = { ...ops[0], warnings: [...shapeWarnings, ...autoWarnings] };
       return { ops, bbox: bb };
     },
   },

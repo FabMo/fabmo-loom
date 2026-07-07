@@ -8,3 +8,9 @@ FabMo Loom is part of the FabMo platform, from the makers of ShopBot
 This product includes clipper-lib (Clipper, by Angus Johnson; JavaScript
 port by Timo), used under the Boost Software License 1.0, vendored at
 vendor/clipper.js.
+
+The built-in signage glyph library (app/glyphs.mjs) is derived from the
+AIGA/U.S. Department of Transportation symbol signs (1974/1979), which
+AIGA makes available copyright-free, plus the International Symbol of
+Access. Source files were obtained via Wikimedia Commons and processed
+into region-native SVG for CNC use.
