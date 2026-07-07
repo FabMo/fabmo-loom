@@ -2046,6 +2046,42 @@ console.log('--- glyph library: built-in signage symbols, no upload ---');
     } else fail(`glyph/text overlap: glyph [${glyphY.min.toFixed(2)},${glyphY.max.toFixed(2)}] text [${textY.min.toFixed(2)},${textY.max.toFixed(2)}]`);
   }
 
+  // the glyph DROPDOWN: of bound to a choice control, switching the value
+  // swaps the symbol and re-lowers the sign live
+  const drop = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'switchable sign', actions: [
+    { kind: 'add_control', control: { id: 'symbol', type: 'choice', default: 'men', options: [
+      { value: 'men', label: 'Men' }, { value: 'women', label: 'Women' }, { value: 'accessible', label: 'Accessible' },
+    ] } },
+    { kind: 'set_shape', shape: { id: 'fig', glyph: { of: { ctrl: 'symbol' }, width: '2' } } },
+    { kind: 'add_operation', operation: { id: 'sym', strategy: 'pocket_shape', params: { shape: 'fig', depth: 0.1, toolDiameter: 0.125 } } },
+  ], declined: [] });
+  if (drop.applied.length === 3 && !drop.skipped.length) pass('glyph bound to a choice control applies (of: {ctrl})');
+  else fail(`glyph dropdown apply wrong: ${JSON.stringify(drop.skipped)}`);
+
+  const widthAt = (recipe, symbol) => {
+    const r = run(recipe, { ...controlDefaults(recipe), symbol });
+    if (!r.ok) return { err: r.errors?.join(' | ') };
+    const xs = r.preview.built.flatMap(b => b.r.previewRegions ?? []).flatMap(reg => reg.outer.map(q => q.x));
+    const ys = r.preview.built.flatMap(b => b.r.previewRegions ?? []).flatMap(reg => reg.outer.map(q => q.y));
+    return { w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
+  const men = widthAt(drop.recipe, 'men');
+  const acc = widthAt(drop.recipe, 'accessible');
+  // men figure is tall-and-narrow; the wheelchair symbol is near-square —
+  // so at the same 2" width their HEIGHTS differ measurably: the dropdown
+  // really swapped the geometry, not just relabelled it
+  if (men.err || acc.err) fail(`dropdown weave failed: ${men.err ?? acc.err}`);
+  else if (Math.abs(men.h - acc.h) > 0.5) pass(`dropdown swaps geometry: "men" is ${men.h.toFixed(1)}" tall, "accessible" ${acc.h.toFixed(1)}" at the same 2" width`);
+  else fail(`dropdown did not change the glyph: men ${men.h.toFixed(2)} vs accessible ${acc.h.toFixed(2)}`);
+
+  // a binding to a missing control is refused at apply time
+  const missing = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'set_shape', shape: { id: 'fig', glyph: { of: { ctrl: 'nope' }, width: '2' } } },
+  ], declined: [] });
+  if (!missing.applied.length && missing.skipped[0]?.includes('missing control "nope"')) {
+    pass('glyph bound to a missing control refused at apply time');
+  } else fail(`missing-control binding not refused: ${JSON.stringify(missing.skipped)}`);
+
   // the overlay case must still center: a monogram in a pocketed well
   // (place default "center") sits ON the well, not below it
   const mono = run({

@@ -84,7 +84,13 @@ export const ACTION_TOOL = {
                 glyph: {
                   type: 'object', description: 'derive the shape from a BUILT-IN signage glyph (see GLYPH LIBRARY) — standard symbols, no upload needed',
                   properties: {
-                    of: { type: 'string', description: 'the glyph id exactly as listed under GLYPH LIBRARY' },
+                    of: {
+                      anyOf: [
+                        { type: 'string' },
+                        { type: 'object', properties: { ctrl: { type: 'string' } }, required: ['ctrl'], additionalProperties: false },
+                      ],
+                      description: 'the glyph id (see GLYPH LIBRARY), OR {"ctrl":"id"} bound to a "choice" control whose option VALUES are glyph ids — that gives the user a glyph DROPDOWN that re-lowers the sign live when switched',
+                    },
                     width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); default 3' },
                     height: { type: 'string', description: 'target height, inches; width alone keeps the glyph\'s aspect' },
                     posX: { type: 'string', description: 'shift the placed glyph right (+) / left (−), inches or {arithmetic}; default centered on the origin' },
@@ -150,6 +156,7 @@ export function buildSystemPrompt(recipe) {
 An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <inches or {arithmetic}>} lowers the file's FILLED artwork to a closed outline in the shared frame (strokes, text, and embedded images inside the file are skipped with warnings). Reference that shape id from shape_cutout (cut the logo out), pocket_shape (recess it), or bore_hole's along (holes around its outline). Bind width to a size control when the user might rescale it. A raster IMAGE (png/jpeg photo) is NOT usable: if the user asks to carve/engrave/trace one, DECLINE that part — what: the image use, why: "raster image carving is not in the catalog yet; the upload is stored for when it arrives" — and still apply the rest of the request.`
     : '';
   const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}
+GLYPH DROPDOWN: to let the user SWITCH the symbol, first add a "choice" control whose option VALUES are glyph ids (label them nicely) and bind glyph.of to it: add_control {id:"symbol", type:"choice", default:"men", options:[{value:"men",label:"Men"},{value:"women",label:"Women"},{value:"restroom",label:"All-gender"},{value:"accessible",label:"Accessible"}]} then set_shape {id:"fig", glyph:{of:{ctrl:"symbol"}, width:2}}. Offer the glyphs relevant to the sign. Create the control BEFORE the set_shape.
 SIGN LAYOUT — pipeline order is MACHINING order, NOT position: every text/glyph/braille element defaults to the SAME spot (centered on the content so far) and they OVERLAP unless you stack them. To stack a sign vertically, set place:"below" on each element after the top one — it drops that element a gap beneath everything machined so far, with NO coordinates to compute. Top-to-bottom = pipeline order. Pick the SPECIFIC glyph: a men's room sign is glyph "men" + text "Men"; women's is "women"; only an all-gender/family restroom uses "restroom". A men's sign, in full: set_shape fig = glyph {of:"men", width:2}; pocket_shape shape:"fig" (the glyph, on top); vcarve_text "Men" place:"below" (drops under the glyph); braille_text "Men" place:"below" (drops under the text); tag_cutout last (the plaque). Only reach for posX/posY when the user wants a specific off-center position.`;
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 

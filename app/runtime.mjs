@@ -184,9 +184,19 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       // Library entries are pre-curated region-native files — clean by
       // construction, so no warnings ride along.
       const spec = s.glyph;
-      const g = glyphById(spec.of);
+      // `of` is a literal glyph id OR a {ctrl:"id"} binding to a choice
+      // control (option values = glyph ids) — that's the glyph DROPDOWN:
+      // picking re-lowers the shape and the whole sign updates live.
+      let glyphId = spec.of;
+      if (glyphId && typeof glyphId === 'object' && 'ctrl' in glyphId) {
+        if (!(glyphId.ctrl in vars)) {
+          return { error: `shape "${s.id}": glyph bound to missing control "${glyphId.ctrl}"` };
+        }
+        glyphId = vars[glyphId.ctrl];
+      }
+      const g = glyphById(glyphId);
       if (!g) {
-        return { error: `shape "${s.id}": no built-in glyph "${spec.of}" — the library: ${GLYPHS.map(x => x.id).join(', ')}` };
+        return { error: `shape "${s.id}": no built-in glyph "${glyphId}" — the library: ${GLYPHS.map(x => x.id).join(', ')}` };
       }
       const size = {};
       for (const k of ['width', 'height']) {
