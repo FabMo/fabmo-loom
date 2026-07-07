@@ -76,6 +76,8 @@ export const ACTION_TOOL = {
                     of: { type: 'string', description: 'the asset name exactly as listed under UPLOADED ASSETS' },
                     width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); omit width AND height to use the file\'s own declared physical size' },
                     height: { type: 'string', description: 'target height, inches; width alone keeps aspect, both stretch' },
+                    posX: { type: 'string', description: 'shift the placed artwork right (+) / left (−), inches or {arithmetic}; default centered on the origin' },
+                    posY: { type: 'string', description: 'shift the placed artwork up (+) / down (−), inches or {arithmetic}' },
                   },
                   required: ['of'],
                 },
@@ -85,6 +87,8 @@ export const ACTION_TOOL = {
                     of: { type: 'string', description: 'the glyph id exactly as listed under GLYPH LIBRARY' },
                     width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls (bind a size control so the user can scale it); default 3' },
                     height: { type: 'string', description: 'target height, inches; width alone keeps the glyph\'s aspect' },
+                    posX: { type: 'string', description: 'shift the placed glyph right (+) / left (−), inches or {arithmetic}; default centered on the origin' },
+                    posY: { type: 'string', description: 'shift the placed glyph up (+) / down (−), inches or {arithmetic} — a sign\'s glyph usually sits ABOVE its text' },
                   },
                   required: ['of'],
                 },
@@ -145,7 +149,8 @@ export function buildSystemPrompt(recipe) {
     ? `\n\nUPLOADED ASSETS (embedded in the recipe document; reference by NAME, never by content — the bytes are not shown to you):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}
 An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <inches or {arithmetic}>} lowers the file's FILLED artwork to a closed outline in the shared frame (strokes, text, and embedded images inside the file are skipped with warnings). Reference that shape id from shape_cutout (cut the logo out), pocket_shape (recess it), or bore_hole's along (holes around its outline). Bind width to a size control when the user might rescale it. A raster IMAGE (png/jpeg photo) is NOT usable: if the user asks to carve/engrave/trace one, DECLINE that part — what: the image use, why: "raster image carving is not in the catalog yet; the upload is stored for when it arrives" — and still apply the rest of the request.`
     : '';
-  const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}`;
+  const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}
+SIGN LAYOUT — text AUTO-CENTERS on the content machined so far, so a sign's text lands ON its glyph unless every block is placed. Multi-element signs MUST give each element an ABSOLUTE position (all centers in the shared frame, inches): the glyph via posY on the glyph spec, the text via posX/posY on the text op, braille below the text. Glyph heights follow from width × the aspect in the library list — leave a 0.3–0.5" gap between elements. Pick the SPECIFIC glyph: a men's room sign is glyph "men" + text "Men"; women's is "women"; only an all-gender/family restroom uses "restroom". Example men's sign: shape fig = glyph {of "men", width 1.5, posY 0.5} (1.5" wide × ~3.9 tall → spans −1.45..2.45); vcarve_text "Men" letterHeight 1, posY -2.5; braille_text "Men" posY -4.3 (its posY is the strip's BOTTOM-LEFT, not center); cutout last.`;
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
 AVAILABLE STRATEGIES (the complete list — nothing else exists):

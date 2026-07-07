@@ -2019,6 +2019,31 @@ console.log('--- glyph library: built-in signage symbols, no upload ---');
   if (!bad.applied.length && bad.skipped[0]?.includes('no built-in glyph "unicorn"')) {
     pass(`unknown glyph skipped with the library listed: "${bad.skipped[0].slice(0, 70)}…"`);
   } else fail(`unknown glyph not refused: ${JSON.stringify(bad.skipped)}`);
+
+  // the men's-room sign layout: glyph placed ABOVE, text offset BELOW —
+  // the field-reported failure was both stacked on the origin
+  const sign = applyActions(structuredClone(EMPTY_RECIPE), { summary: "men's sign", actions: [
+    { kind: 'set_shape', shape: { id: 'fig', glyph: { of: 'men', width: '1.5', posY: '0.5' } } },
+    { kind: 'add_operation', operation: { id: 'symbol', strategy: 'pocket_shape', params: { shape: 'fig', depth: 0.1, toolDiameter: 0.125 } } },
+    { kind: 'add_operation', operation: { id: 'label', strategy: 'vcarve_text', params: { text: 'Men', letterHeight: 0.8, posY: -2.2 } } },
+    { kind: 'add_operation', operation: { id: 'plaque', strategy: 'tag_cutout', params: { buffer: 0.5 } } },
+  ], declined: [] });
+  if (sign.applied.length === 4 && !sign.skipped.length) pass('men\'s sign layout applies (glyph posY + text offsetY)');
+  else fail(`sign apply wrong: ${JSON.stringify(sign.skipped)}`);
+  const sr = run(sign.recipe);
+  if (sr.ok) pass('men\'s sign VERIFIED with placed elements');
+  else fail(`men's sign rejected: ${sr.errors?.join(' | ')}`);
+  if (sr.ok) {
+    const yRange = (strategy) => {
+      const ys = sr.preview.built.filter(b => b.op.strategy === strategy)
+        .flatMap(b => b.r.previewRegions ?? []).flatMap(reg => reg.outer.map(q => q.y));
+      return { min: Math.min(...ys), max: Math.max(...ys) };
+    };
+    const glyphY = yRange('pocket_shape'), textY = yRange('vcarve_text');
+    if (glyphY.min > textY.max + 0.1) {
+      pass(`no overlap: glyph bottom ${glyphY.min.toFixed(2)}" clears text top ${textY.max.toFixed(2)}"`);
+    } else fail(`glyph/text overlap: glyph [${glyphY.min.toFixed(2)},${glyphY.max.toFixed(2)}] text [${textY.min.toFixed(2)},${textY.max.toFixed(2)}]`);
+  }
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

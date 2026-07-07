@@ -57,6 +57,22 @@ export function migrateRecipe(recipe) {
 
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Artwork shapes (assets, glyphs) lower centered on the origin; optional
+// posX/posY translate the placed piece so multi-element layouts (a sign's
+// glyph above its text) don't stack everything at the same spot.
+function placeArtwork(regions, spec, shapeId, num) {
+  const off = { posX: 0, posY: 0 };
+  for (const k of ['posX', 'posY']) {
+    if (spec[k] === undefined || spec[k] === null || spec[k] === '') continue;
+    const d = num(spec[k], k, shapeId);
+    if (d.error) return d;
+    off[k] = d.value;
+  }
+  if (!off.posX && !off.posY) return { regions };
+  const mv = (ring) => ring.map(q => ({ x: q.x + off.posX, y: q.y + off.posY }));
+  return { regions: regions.map(r => ({ outer: mv(r.outer), holes: r.holes.map(mv) })) };
+}
+
 // "h - t/2"-style expression evaluation against the controls + derived
 // namespace (extras lose to a user's own ids). Guest strategies get this
 // as ctx.evalNumber; the UI rebuilds the same closure for handoff hooks.
@@ -159,7 +175,9 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       const r = svgAssetToRegions(asset.data, size);
       if (r.error) return { error: `shape "${s.id}": ${r.error}` };
       warnings.push(...r.warnings.map(w => `shape "${s.id}" (${asset.name}): ${w}`));
-      shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
+      const placed = placeArtwork(r.regions, spec, s.id, num);
+      if (placed.error) return placed;
+      shapes[s.id] = { kind: 'region', regions: placed.regions, root: s.id };
     } else if (s.glyph) {
       // a BUILT-IN signage glyph (app/glyphs.mjs, the AIGA/DOT symbol
       // set): identical lowering to an uploaded SVG, no upload required.
@@ -180,7 +198,9 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       if (size.width === undefined && size.height === undefined) size.width = 3;
       const r = svgAssetToRegions(g.svg, size);
       if (r.error) return { error: `shape "${s.id}": ${r.error}` };
-      shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
+      const placed = placeArtwork(r.regions, spec, s.id, num);
+      if (placed.error) return placed;
+      shapes[s.id] = { kind: 'region', regions: placed.regions, root: s.id };
     } else if (s.inset || s.outset) {
       const spec = s.inset ?? s.outset;
       const b = baseOf(spec.of, s.id, s.inset ? 'inset' : 'outset');

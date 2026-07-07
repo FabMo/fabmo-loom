@@ -505,6 +505,20 @@ async function generate() {
     renderControls();
     runAndRender();
 
+    // the funnel / gap report — declines are the catalog's backlog and
+    // parses its pricing data. Fire-and-forget: the weave never depends
+    // on logging, and a checkout without the endpoint just no-ops.
+    fetch('/api/intent/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app: 'loom',
+        utterance,
+        intent: { summary: out.summary, actions: toolUse.input.actions ?? [], declined: out.declined },
+        usage: { input: data.usage?.input_tokens, output: data.usage?.output_tokens },
+      }),
+    }).catch(() => {});
+
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
     const skipped = out.skipped.length ? `<div class="declined">skipped: ${out.skipped.map(escapeHtml).join('; ')}</div>` : '';
