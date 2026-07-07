@@ -3,8 +3,8 @@
 // The LLM (user's own key, browser-direct) emits recipe actions only —
 // no code, no motion. See intent.mjs for the trust boundary.
 
-import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
-import { registerCatalogEntries } from './catalog.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars } from './runtime.mjs';
+import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
@@ -241,7 +241,43 @@ function render() {
   $('warnings').textContent = r.warnings.join('\n');
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
+  renderHandoffs();
   refreshPreview();
+}
+
+// "Continue in <app>" — a catalog entry may declare a `handoff` hook
+// (guest apps use it to carry the authored document back into their own
+// app for hand-editing). Loom stays generic: it supplies evalNumber (so
+// the document resolves at the CURRENT slider values) and the recipe
+// name; the entry does the storing and says where to go. Deliberately
+// not gated on r.ok — a design can be worth continuing even when this
+// weave's motion was refused (wrong bit, stock mismatch); the target app
+// re-verifies everything at its own export gate.
+function renderHandoffs() {
+  const wrap = $('handoffs');
+  wrap.innerHTML = '';
+  const seen = new Set();
+  for (const op of recipe.pipeline ?? []) {
+    const entry = CATALOG[op.strategy];
+    if (!entry?.handoff?.carry || seen.has(op.strategy)) continue;
+    seen.add(op.strategy);
+    const btn = document.createElement('button');
+    btn.className = 'ghost small';
+    btn.textContent = `${entry.handoff.label ?? 'Continue in app'} →`;
+    btn.addEventListener('click', () => {
+      const bv = buildVars(recipe, controlValues);
+      if (bv.error) { $('errors').textContent = `handoff: ${bv.error}`; return; }
+      let res;
+      try {
+        res = entry.handoff.carry(op.params, { evalNumber: makeEvalNumber(bv.vars), recipeName: recipe.name });
+      } catch (e) {
+        res = { error: e?.message ?? String(e) };
+      }
+      if (res?.error) { $('errors').textContent = `handoff: ${res.error}`; return; }
+      if (res?.url) window.open(res.url, '_blank');
+    });
+    wrap.appendChild(btn);
+  }
 }
 
 function refreshPreview() {

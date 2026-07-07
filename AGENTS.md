@@ -134,6 +134,16 @@ possible macro-strategy. The contract a guest must satisfy:
    moves/targets (translate rings and move endpoints; rotation is not
    yet supported for baking). Loom composes, verifies, and posts exactly
    as for native ops — the export gate is unchanged.
+4. **Optionally, a `handoff` hook** — round-tripping out of Loom:
+   `handoff: { label, carry(params, { evalNumber, recipeName }) }` on
+   the entry. Loom shows the label as a button whenever the entry is in
+   the pipeline; `carry` resolves the entry's authored document at the
+   CURRENT slider values (via `evalNumber`), stores the now-static
+   document wherever the guest's own app will find it (e.g. a shared
+   same-origin design store), and returns `{ url }` for Loom to open in
+   a new tab (or `{ error }`). This is how a prompt-woven design
+   graduates to hand-editing in the guest app's full UI. `carry` runs in
+   the browser only — keep it out of `run()`'s DOM-free path.
 
 Wiring: the guest ships a module exporting `entries` (catalog-shaped);
 an uncommitted `app/guests.local.mjs` lists guest module URLs per

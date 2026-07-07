@@ -56,6 +56,19 @@ export function migrateRecipe(recipe) {
 
 const ID_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// "h - t/2"-style expression evaluation against the controls + derived
+// namespace (extras lose to a user's own ids). Guest strategies get this
+// as ctx.evalNumber; the UI rebuilds the same closure for handoff hooks.
+export function makeEvalNumber(vars) {
+  return (v, extras = {}) => {
+    if (typeof v === 'number') return { value: v };
+    const src = String(v).trim().replace(/^\{([^{}]*)\}$/, '$1');
+    const ex = expandTemplate(`{${src}}`, { ...extras, ...vars });
+    if (ex.error) return { error: ex.error };
+    return { value: parseFloat(ex.value) };
+  };
+}
+
 // controls + derived, evaluated in order → the namespace every
 // {expression} sees. Returns { vars } or { error }.
 export function buildVars(recipe, controlValues) {
@@ -365,15 +378,7 @@ export function runRecipe(recipe, controlValues, fonts) {
     safeZ: 0.5,
     rpm: 14000,
     contentBBox: null,
-    // for guest strategies: evaluate "h - t/2"-style expressions against
-    // the controls + derived namespace (extras lose to a user's own ids)
-    evalNumber: (v, extras = {}) => {
-      if (typeof v === 'number') return { value: v };
-      const src = String(v).trim().replace(/^\{([^{}]*)\}$/, '$1');
-      const ex = expandTemplate(`{${src}}`, { ...extras, ...vars });
-      if (ex.error) return { error: ex.error };
-      return { value: parseFloat(ex.value) };
-    },
+    evalNumber: makeEvalNumber(vars),
   };
 
   // ---- run each strategy in local coords, growing the content bbox ----
