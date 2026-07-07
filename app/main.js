@@ -320,8 +320,13 @@ function refreshPreview() {
       }
       if (shallowDeepest === 0) shallowDeepest = sim.minZ;   // pure through job
     }
+    // …but never so much that the BOARD itself lies: the scale is applied
+    // to the whole scene, stock slab included, so cap it where the slab
+    // would render thicker than a quarter of its span (a 0.5" sign board
+    // at ×5 reads as a brick; braille dots key the feature depth at 0.04").
+    const slabCap = Math.max(1, (0.25 * span) / Math.max(0.05, stock.thickness));
     const auto = sim
-      ? Math.min(5, Math.max(1, (0.08 * span) / Math.max(0.02, -shallowDeepest)))
+      ? Math.min(5, slabCap, Math.max(1, (0.08 * span) / Math.max(0.02, -shallowDeepest)))
       : 1;
     const zx = zxAuto ? auto : 1;
     window.loomZx = { auto, zx, shallowDeepest, minZ: sim?.minZ };   // debug handle
