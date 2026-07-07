@@ -269,7 +269,7 @@ function renderHandoffs() {
       if (bv.error) { $('errors').textContent = `handoff: ${bv.error}`; return; }
       let res;
       try {
-        res = entry.handoff.carry(op.params, { evalNumber: makeEvalNumber(bv.vars), recipeName: recipe.name });
+        res = entry.handoff.carry(op.params, { evalNumber: makeEvalNumber(bv.vars), vars: bv.vars, recipeName: recipe.name });
       } catch (e) {
         res = { error: e?.message ?? String(e) };
       }

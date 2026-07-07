@@ -135,8 +135,10 @@ possible macro-strategy. The contract a guest must satisfy:
    yet supported for baking). Loom composes, verifies, and posts exactly
    as for native ops — the export gate is unchanged.
 4. **Optionally, a `handoff` hook** — round-tripping out of Loom:
-   `handoff: { label, carry(params, { evalNumber, recipeName }) }` on
-   the entry. Loom shows the label as a button whenever the entry is in
+   `handoff: { label, carry(params, { evalNumber, vars, recipeName }) }`
+   on the entry. `carry` receives RAW params (control bindings arrive as
+   `{ ctrl: id }` — resolve via `vars`; expression strings via
+   `evalNumber`). Loom shows the label as a button whenever the entry is in
    the pipeline; `carry` resolves the entry's authored document at the
    CURRENT slider values (via `evalNumber`), stores the now-static
    document wherever the guest's own app will find it (e.g. a shared
