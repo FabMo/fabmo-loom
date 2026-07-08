@@ -2100,5 +2100,228 @@ console.log('--- glyph library: built-in signage symbols, no upload ---');
   } else fail(`monogram-in-well rejected: ${mono.errors?.join(' | ')}`);
 }
 
+// ---------------- texture_field: procedural relief around a name ----------------
+
+console.log('--- texture_field: flood a texture around the name ---');
+{
+  const base = () => ({ ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.6 } });
+  const mk = (params) => ({ ...base(), pipeline: [
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Anna', letterHeight: 1 } },
+    { id: 'tex', strategy: 'texture_field', params },
+  ] });
+
+  // clean case: verified ballnose surface-raster; the field carries relief and
+  // the letters stay PROUD (a shallow texture band, then the deeper V-carve —
+  // two distinct depth populations, proving the ball did not skim the letters)
+  const r = run(mk({ texture: 'waves', depth: 0.06 }));
+  const texBuilt = r.preview?.built?.find(b => b.op.id === 'tex');
+  const tgt = r.report?.stats.targets?.find(t => t.type === 'heightmap');
+  if (r.ok && texBuilt?.r.cutter?.type === 'ball' && tgt && (tgt.gouges ?? 0) === 0) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    let texBand = 0, letterBand = 0;
+    for (const z of sim.grid) { if (z < -0.015 && z > -0.14) texBand++; if (z <= -0.15) letterBand++; }
+    if (texBand > 50000 && letterBand > 3000) pass(`waves field verified: ${tgt.samples} samples, 0 gouges; ${texBand} texture cells shallower than the ${letterBand}-cell V-carve (letters stay proud)`);
+    else fail(`relief populations off: texBand=${texBand} letterBand=${letterBand}`);
+  } else fail(`waves texture_field failed: ok=${r.ok} err=${r.errors?.join(' | ')} cutter=${texBuilt?.r.cutter?.type} gouges=${tgt?.gouges}`);
+
+  // every curated family verifies through the unchanged gate with a heightmap target
+  const fams = ['waves', 'ripples', 'interference', 'fluting', 'basketweave', 'woodgrain', 'crosshatch', 'hammered', 'flowing', 'slate'];
+  const bad = fams.filter(f => { const x = run(mk({ texture: f })); return !(x.ok && x.report?.stats.targets?.some(t => t.type === 'heightmap')); });
+  if (!bad.length) pass(`all ${fams.length} curated families verify → ball surface-raster`);
+  else fail(`families that did not verify: ${bad.join(', ')}`);
+
+  // honest failures
+  const noPrior = run({ ...base(), pipeline: [{ id: 'tex', strategy: 'texture_field', params: { texture: 'waves' } }] });
+  if (!noPrior.ok && noPrior.errors.some(e => /prior operation/.test(e))) pass('nothing to surround: friendly error');
+  else fail(`no-prior not handled: ${JSON.stringify(noPrior.errors)}`);
+
+  const unknown = run(mk({ texture: 'zigzag' }));
+  if (!unknown.ok && unknown.errors.some(e => /unknown texture/.test(e))) pass('unknown family named with the list: clean error');
+  else fail(`unknown family not handled: ${JSON.stringify(unknown.errors)}`);
+
+  // bit-aware guardrail: a feature finer than the ballnose can resolve warns (and still cuts)
+  const muddy = run(mk({ texture: 'waves', featureSize: 0.1, toolDiameter: 0.125 }));
+  if (muddy.ok && muddy.warnings.some(w => /finer than|muddy/.test(w))) pass('sub-bit feature size warns (bit-aware guardrail), still verifies');
+  else fail(`muddy warning missing: ok=${muddy.ok} warnings=${JSON.stringify(muddy.warnings)}`);
+
+  // ---- driving fields: angle / origin / flow / fade reshape the pattern,
+  // all through the unchanged verifier gate
+  const movesOf = (r) => r.preview.built.find((b) => b.op.id === 'tex').r.moves;
+  const sig = (r) => JSON.stringify(movesOf(r).slice(0, 80));
+  const plain = run(mk({ texture: 'waves' }));
+  const angled = run(mk({ texture: 'waves', angle: 90 }));
+  if (plain.ok && angled.ok && sig(plain) !== sig(angled)) pass('angle 90° verifies and actually rotates the pattern (motion differs)');
+  else fail(`angle: plain ok=${plain.ok} angled ok=${angled.ok} differs=${plain.ok && angled.ok ? sig(plain) !== sig(angled) : '-'}`);
+
+  const fromName = run(mk({ texture: 'ripples', origin: 'content' }));
+  const native = run(mk({ texture: 'ripples' }));
+  if (fromName.ok && native.ok && sig(fromName) !== sig(native)
+    && fromName.report.stats.targets.some((t) => t.type === 'heightmap' && (t.gouges ?? 0) === 0)) {
+    pass('origin "content" verifies: rings spread from the letters, 0 gouges, distinct from native ripples');
+  } else fail(`origin content: ok=${fromName.ok} distinct=${fromName.ok && native.ok ? sig(fromName) !== sig(native) : '-'} err=${fromName.errors?.join(' | ')}`);
+
+  const bent = run(mk({ texture: 'waves', flow: 1 }));
+  if (bent.ok && sig(bent) !== sig(plain)) pass('flow 1 verifies: ridges bend around the letters (motion differs from straight waves)');
+  else fail(`flow: ok=${bent.ok} distinct=${bent.ok && plain.ok ? sig(bent) !== sig(plain) : '-'}`);
+
+  // fade calms the field near the letters: strictly fewer full-depth cells
+  // than the same texture without fade (the pool is the only difference)
+  const deepCells = (r) => {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    let n = 0;
+    for (const z of sim.grid) if (z < -0.045 && z > -0.14) n++;
+    return n;
+  };
+  const pooled = run(mk({ texture: 'waves', fade: 0.6 }));
+  if (pooled.ok && plain.ok) {
+    const dp = deepCells(pooled), dn = deepCells(plain);
+    if (dp < dn * 0.9) pass(`fade 0.6 calms a pool around the letters: ${dp} full-depth cells vs ${dn} without fade`);
+    else fail(`fade did not calm the field: ${dp} full-depth cells with fade vs ${dn} without`);
+  } else fail(`fade run failed: ok=${pooled.ok} err=${pooled.errors?.join(' | ')}`);
+
+  // knobs that need a wave family or content degrade politely, bad values error
+  const flat2d = run(mk({ texture: 'basketweave', origin: 'edge', flow: 0.5 }));
+  if (flat2d.ok && flat2d.warnings.some((w) => /not a wave family/.test(w))) pass('origin/flow on a 2D family: warned and ignored, still verifies');
+  else fail(`2D-family origin not handled: ok=${flat2d.ok} warnings=${JSON.stringify(flat2d.warnings)}`);
+  const badOrigin = run(mk({ texture: 'waves', origin: 'letters' }));
+  if (!badOrigin.ok && badOrigin.errors.some((e) => /unknown origin/.test(e))) pass('unknown origin named with the choices: clean error');
+  else fail(`bad origin not handled: ${JSON.stringify(badOrigin.errors)}`);
+}
+
+// ---------------- texture_field within: texture strictly inside a shape ----------------
+
+console.log('--- texture_field within: texture strictly inside a named shape ---');
+{
+  const heartPath = 'M 0 -1.2 C 1.6 0.4 0.9 1.6 0 0.7 C -0.9 1.6 -1.6 0.4 0 -1.2 Z';
+  const rec = {
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.6 },
+    shapes: [{ id: 'heart', path: heartPath }],
+    pipeline: [{ id: 'tex', strategy: 'texture_field', params: { texture: 'hammered', within: 'heart', depth: 0.06 } }],
+  };
+  const r = run(rec);
+  const tgt = r.report?.stats.targets?.find((t) => t.type === 'heightmap');
+  if (r.ok && tgt && (tgt.gouges ?? 0) === 0 && (tgt.maskViolations ?? 0) === 0) {
+    // brute force: the texture stays inside the heart — everything cut must
+    // be within the shape; sample the simulated stock on a coarse lattice
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const built = r.preview.built.find((b) => b.op.id === 'tex');
+    const rings = built.r.previewRegions.flatMap((rg) => [rg.outer, ...rg.holes])
+      .map((ring) => ring.map((q) => ({ x: q.x + r.preview.placement.x, y: q.y + r.preview.placement.y })));
+    const inRings = (x, y) => {
+      let inside = false;
+      for (const ring of rings) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const a = ring[i], b = ring[j];
+          if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+        }
+      }
+      return inside;
+    };
+    // previewRegions are the guard-inset mask; the cut legitimately reaches
+    // the TRUE shape edge (the guard annulus is sub-cut by design), so allow
+    // guard (0.03) + sim stamp quantization beyond the preview rings
+    let cut = 0, escapes = 0;
+    const step = sim.dx * 3, tol = 0.06;
+    for (let y = 0; y < r.preview.stock.h; y += step) {
+      for (let x = 0; x < r.preview.stock.w; x += step) {
+        if (surfaceAt(sim, x, y) < -0.005) {
+          cut++;
+          if (!inRings(x, y) && !inRings(x + tol, y) && !inRings(x - tol, y) && !inRings(x, y + tol) && !inRings(x, y - tol)) escapes++;
+        }
+      }
+    }
+    if (cut > 800 && escapes === 0) pass(`within "heart" verified: ${cut} cut samples, all inside the shape (+guard), 0 gouges`);
+    else fail(`within containment: cut=${cut} escapes=${escapes}`);
+  } else fail(`within heart failed: ok=${r.ok} gouges=${tgt?.gouges} maskViol=${tgt?.maskViolations} err=${r.errors?.join(' | ')}`);
+
+  const unknownShape = run({ ...structuredClone(EMPTY_RECIPE), pipeline: [{ id: 'tex', strategy: 'texture_field', params: { within: 'ghost' } }] });
+  if (!unknownShape.ok && unknownShape.errors.some((e) => /unknown shape/.test(e))) pass('unknown within shape named with the list: clean error');
+  else fail(`unknown within shape not handled: ${JSON.stringify(unknownShape.errors)}`);
+}
+
+// ---------------- texture_text: the letters ARE the texture ----------------
+
+console.log('--- texture_text: letters rendered as texture, face stays smooth ---');
+{
+  const base = () => ({ ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.6 } });
+  const mk = (params) => ({ ...base(), pipeline: [{ id: 'word', strategy: 'texture_text', params: { text: 'OAK', letterHeight: 2.5, ...params } }] });
+
+  const r = run(mk({ texture: 'waves' }));
+  const tgt = r.report?.stats.targets?.find((t) => t.type === 'heightmap');
+  if (r.ok && tgt && (tgt.gouges ?? 0) === 0 && (tgt.maskViolations ?? 0) === 0) {
+    // brute force both directions: relief exists INSIDE the letter strokes,
+    // nothing is cut outside them (even-odd over the true outlines, ball
+    // feather tolerance), and the O's counter keeps its smooth face
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const built = r.preview.built.find((b) => b.op.id === 'word');
+    const regions = built.r.previewRegions;
+    const rings = regions.flatMap((rg) => [rg.outer, ...rg.holes])
+      .map((ring) => ring.map((q) => ({ x: q.x + r.preview.placement.x, y: q.y + r.preview.placement.y })));
+    const inRings = (x, y) => {
+      let inside = false;
+      for (const ring of rings) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const a = ring[i], b = ring[j];
+          if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+        }
+      }
+      return inside;
+    };
+    let cut = 0, escapes = 0;
+    const step = sim.dx * 2, tol = 0.03;
+    for (let y = 0; y < r.preview.stock.h; y += step) {
+      for (let x = 0; x < r.preview.stock.w; x += step) {
+        if (surfaceAt(sim, x, y) < -0.005) {
+          cut++;
+          if (!inRings(x, y) && !inRings(x + tol, y) && !inRings(x - tol, y) && !inRings(x, y + tol) && !inRings(x, y - tol)) escapes++;
+        }
+      }
+    }
+    // the counter of the O: centroid of the first hole ring must stay at the surface
+    const holed = regions.find((rg) => rg.holes.length);
+    let counterOk = true;
+    if (holed) {
+      const hr = holed.holes[0];
+      const cx = hr.reduce((s, q) => s + q.x, 0) / hr.length + r.preview.placement.x;
+      const cy = hr.reduce((s, q) => s + q.y, 0) / hr.length + r.preview.placement.y;
+      counterOk = surfaceAt(sim, cx, cy) > -0.001;
+    }
+    if (cut > 400 && escapes === 0 && counterOk) pass(`texture_text verified: ${cut} cut samples all inside the strokes, counters smooth, 0 gouges/mask violations`);
+    else fail(`texture_text containment: cut=${cut} escapes=${escapes} counterOk=${counterOk}`);
+  } else fail(`texture_text failed: ok=${r.ok} gouges=${tgt?.gouges} maskViol=${tgt?.maskViolations} err=${r.errors?.join(' | ')}`);
+
+  // origin "edge" = contour bands inside each letter — verifies and differs
+  const contour = run(mk({ texture: 'ripples', origin: 'edge', featureSize: 0.2 }));
+  const straight = run(mk({ texture: 'ripples', featureSize: 0.2 }));
+  const sigOf = (x) => JSON.stringify(x.preview.built.find((b) => b.op.id === 'word').r.moves.slice(0, 80));
+  if (contour.ok && straight.ok && sigOf(contour) !== sigOf(straight)) pass('origin "edge" verifies: pattern follows the letter outlines (motion differs)');
+  else fail(`texture_text edge origin: ok=${contour.ok} distinct=${contour.ok && straight.ok ? sigOf(contour) !== sigOf(straight) : '-'}`);
+
+  // honest failures
+  const thin = run(mk({ text: 'lily', letterHeight: 0.5, toolDiameter: 0.125 }));
+  if (!thin.ok && thin.errors.some((e) => /too thin/.test(e))) pass('strokes thinner than the ball: friendly error naming the fixes');
+  else fail(`thin strokes not handled: ${JSON.stringify(thin.errors)}`);
+  const badFam = run(mk({ texture: 'plaid' }));
+  if (!badFam.ok && badFam.errors.some((e) => /unknown texture/.test(e))) pass('unknown family named with the list: clean error');
+  else fail(`unknown family not handled: ${JSON.stringify(badFam.errors)}`);
+
+  // built the way the model would: the pond-drop plaque through the intent
+  // layer — bound text, a texture choice control, rings spreading from the
+  // name — then woven and verified
+  const res = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'pond-drop plaque', actions: [
+    { kind: 'add_control', control: { id: 'name', type: 'text', label: 'Name', default: 'Anna' } },
+    { kind: 'add_control', control: { id: 'tex', type: 'choice', label: 'Texture', default: 'ripples', options: [{ value: 'ripples', label: 'Ripples' }, { value: 'waves', label: 'Waves' }] } },
+    { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 'field', strategy: 'texture_field', params: { texture: { ctrl: 'tex' }, origin: 'content', fade: 0.2 } } },
+    { kind: 'add_operation', operation: { id: 'word', strategy: 'texture_text', params: { text: { ctrl: 'name' }, letterHeight: 2.5, posY: -4 } } },
+  ], declined: [] });
+  if (res.applied.length === 5 && !res.skipped.length) {
+    const woven = run(res.recipe);
+    if (woven.ok && woven.report.stats.targets.filter((t) => t.type === 'heightmap').length === 2) {
+      pass('intent layer: pond-drop plaque + textured word apply, weave, and verify (2 heightmap targets)');
+    } else fail(`intent recipe did not weave: ok=${woven.ok} err=${woven.errors?.join(' | ')}`);
+  } else fail(`intent apply wrong: applied=${res.applied.length} skipped=${JSON.stringify(res.skipped)}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

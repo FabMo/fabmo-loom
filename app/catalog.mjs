@@ -31,7 +31,8 @@ import { generateSurfaceRaster } from '../strategies/surface-raster.js';
 import { coverageCurve, pickChainSlotAware, regionArea, formatDiameter } from '../strategies/tool-select.js';
 import ClipperLib from '../vendor/clipper.js';
 import { FONTS, DEFAULT_FONT } from './fonts.mjs';
-import { weldContours, pathToRegions } from './shape.mjs';
+import { weldContours, pathToRegions, offsetRegions, booleanRegions } from './shape.mjs';
+import { TEXTURES, TEXTURE_IDS, sampleTexture, distanceGridForRings, gridSampler, insideGridEvenOdd } from './texture-kernel.mjs';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -110,6 +111,16 @@ function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   corner(x0 + r, y1 - r, Math.PI / 2);
   corner(x0 + r, y0 + r, Math.PI);
   return ring;
+}
+
+// Sampling lattice shared by the texture entries: ~300k cells over the
+// field bbox extended by the ball reach, so resolution scales with area.
+// The distance fields driving origin/flow/fade live on the same lattice.
+function textureGrid(x0, y0, x1, y1, ext) {
+  const ox = x0 - ext, oy = y0 - ext;
+  const spanX = (x1 - x0) + 2 * ext, spanY = (y1 - y0) + 2 * ext;
+  const cell = Math.max(0.01, Math.sqrt((spanX * spanY) / 300000));
+  return { cols: Math.ceil(spanX / cell) + 1, rows: Math.ceil(spanY / cell) + 1, cell, ox, oy };
 }
 
 // Font contours weld under the NONZERO fill rule — the same rule every
@@ -757,6 +768,241 @@ export const CATALOG = {
         target: g.target,
         bbox: { minX: c.x - r, minY: c.y - r, maxX: c.x + r, maxY: c.y + r },
         previewRegions: [{ outer: maskRing, holes: [] }],
+      };
+    },
+  },
+
+  texture_field: {
+    doc: 'Flood the area AROUND the content so far with a procedural relief TEXTURE — the "plaque with a name in the middle and a wavy texture around it" job. A ballnose rasters a shallow texture into the field and flows around the letters, leaving them raised and clean (a small clearance moat). Pick a family with "texture": waves (calm parallel ridges — the default "wavy"), ripples (concentric rings), interference (soft crossing waves), fluting (rounded reeds), basketweave (woven), woodgrain (faux-bois grain), crosshatch (incised lattice), hammered (peened dimples), flowing (marbled turbulence), slate (riven stone). THE LOOK HAS FOUR MORE LEVERS: angle rotates the pattern; origin re-drives the wave families (waves/ripples/fluting) — "content" makes the rings/ridges SPREAD FROM THE LETTERS themselves (the pond-drop plaque: ripples radiating from the name), "edge" makes them run parallel to the field boundary (a bordered, engine-turned read), "center" is radial from the field center; flow bends any wave family\'s ridges around the letters like water around a rock; fade calms the texture to a smooth pool right around the letters. By default it fills a rounded-rectangle field out to "buffer" past the content, so a following tag_cutout at the same buffer lands right on the texture edge — OR set "within" to a shapes-section id and the texture fills THAT shape instead (a textured border band: band-derive the tag outline and texture within it; a textured heart behind a name), clipped strictly inside it. Needs a prior op to surround unless "within" is set. The motion is checked against the declared 3D surface. Modest depth (a texture, not a pocket). Leave featureSize at 0 to use the family\'s tuned look; it is bit-aware — a feature finer than the ballnose can resolve is warned. Requires a BALLNOSE bit.',
+    params: {
+      texture: { type: 'string', default: 'waves', doc: `which family: ${TEXTURE_IDS.join(', ')}. Bind to a choice control to let the user switch textures.`, bindable: true },
+      featureSize: { type: 'number', default: 0, min: 0, max: 3, doc: 'feature wavelength in inches; 0 = the family\'s tuned default. Larger = bigger, calmer features.', bindable: true },
+      depth: { type: 'number', default: 0.06, min: 0.01, max: 0.25, doc: 'texture depth (peak-to-valley) in inches — keep it shallow', bindable: true },
+      angle: { type: 'number', default: 0, min: -180, max: 180, doc: 'rotate the pattern this many degrees (waves at 30° etc.); radial looks ignore it', bindable: true },
+      origin: { type: 'string', default: '', doc: 'wave families only (waves/ripples/fluting): "" = the family\'s native look, "content" = ridges/rings spread from the LETTERS (needs prior content), "edge" = ridges run parallel to the field boundary, "center" = radial from the field center' },
+      flow: { type: 'number', default: 0, min: 0, max: 1, doc: 'wave families only: bend the ridges around the letters like streamlines around a rock (0 = straight through, 1 = full hug near the letters; needs prior content)', bindable: true },
+      fade: { type: 'number', default: 0, min: 0, max: 3, doc: 'calm the texture to a smooth pool within this many inches of the letters (0 = full texture right up to the moat)', bindable: true },
+      toolDiameter: { type: 'number', default: 0.125, doc: 'BALLNOSE bit diameter, inches — this strategy requires a ballnose' },
+      stepoverPct: { type: 'number', default: 16, min: 5, max: 45, doc: 'stepover as a percentage of the bit diameter; smaller = smoother finish, longer cut' },
+      buffer: { type: 'number', default: 0.35, doc: 'how far the textured field extends past the content, inches — match the tag_cutout buffer so the edges align (ignored when "within" is set)' },
+      margin: { type: 'number', default: 0.05, doc: 'clear gap kept between the texture and the letters, inches' },
+      within: { type: 'string', default: '', doc: 'a shapes-section id: texture strictly INSIDE that shape instead of the default rounded-rect field (prior content still gets its clearance moat)' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      seed: { type: 'number', default: 1, min: 1, max: 9999, doc: 'variation seed for the seeded families (hammered/flowing/slate); the others ignore it — bind to a slider for a "reseed" knob', bindable: true },
+    },
+    run(p, ctx) {
+      const fam = TEXTURES[p.texture];
+      if (!fam) return { error: `unknown texture "${p.texture}" — try one of: ${TEXTURE_IDS.join(', ')}` };
+      if (p.origin && !['center', 'content', 'edge'].includes(p.origin)) {
+        return { error: `unknown origin "${p.origin}" — use "center", "content", or "edge" (or leave it empty for the family's native look)` };
+      }
+      const F = p.featureSize > 0 ? p.featureSize : fam.defaultFeature;
+      const R = p.toolDiameter / 2;
+      const warnings = [];
+      if (F < 2 * R) warnings.push(`feature size ${F.toFixed(3)}" is finer than a ${p.toolDiameter}" ballnose can resolve — the texture will cut muddy; use a smaller bit or a larger feature size`);
+
+      // letters become clearance moats: offset outward by margin + ball radius
+      // + guard so the ball NEVER reaches the carved letters (the tool center
+      // stays out; padding by R keeps the overhang clear too). The GUARD is a
+      // small geometry margin against grid-sampled boundaries — sub-cut, not a
+      // loosened verifier.
+      const guard = 0.03;
+      const letterRings = ctx.contentRings ?? [];
+      const moats = letterRings.length
+        ? offsetRegions(letterRings.map((r) => ({ outer: r, holes: [] })), p.margin + R + guard)
+        : [];
+
+      // ---- the field: a rounded-rect plaque around the content (default),
+      // or a named shape (within) — the texture then clips strictly inside it
+      const b = ctx.contentBBox;
+      let x0, y0, x1, y1, mask, edgeRings, clipRings = null, previewRegions;
+      if (p.within) {
+        const sh = namedShapeRegionsAll(ctx, p.within, 'texture_field');
+        if (sh.error) return sh;
+        const inset = offsetRegions(sh.regions, -guard);
+        if (!inset.length) return { error: `shape "${p.within}" is too small to texture` };
+        const carved = moats.length ? booleanRegions('difference', [inset, moats]) : { regions: inset };
+        if (carved.error || !carved.regions.length) return { error: `nothing of shape "${p.within}" is left to texture once the content is cleared` };
+        const rings = carved.regions.flatMap((rg) => [rg.outer, ...rg.holes]);
+        mask = { outer: rings[0], holes: rings.slice(1) };   // even-odd: disjoint rings compose
+        clipRings = sh.regions.flatMap((rg) => [rg.outer, ...rg.holes]);
+        edgeRings = clipRings;
+        previewRegions = carved.regions;
+        x0 = Infinity; y0 = Infinity; x1 = -Infinity; y1 = -Infinity;
+        for (const rg of sh.regions) for (const q of rg.outer) {
+          if (q.x < x0) x0 = q.x; if (q.x > x1) x1 = q.x;
+          if (q.y < y0) y0 = q.y; if (q.y > y1) y1 = q.y;
+        }
+      } else {
+        if (!b) return { error: 'texture_field needs at least one prior operation (the name) to surround — or a "within" shape to fill' };
+        x0 = b.minX - p.buffer; y0 = b.minY - p.buffer; x1 = b.maxX + p.buffer; y1 = b.maxY + p.buffer;
+        const cornerR = Math.min(0.5, p.buffer * 1.2, (x1 - x0) / 2, (y1 - y0) / 2);
+        const plaqueRing = roundedRectRing(x0 + guard, y0 + guard, x1 - guard, y1 - guard, Math.max(0.02, cornerR - guard));
+        mask = { outer: plaqueRing, holes: moats.map((rg) => rg.outer) };
+        edgeRings = [roundedRectRing(x0, y0, x1, y1, cornerR)];
+        previewRegions = [{ outer: plaqueRing, holes: mask.holes }];
+      }
+
+      // heightmap lattice over the field bbox (+ ball reach); the distance
+      // fields that drive origin/flow/fade live on the same lattice
+      const ext = R + 0.05;
+      const grid = textureGrid(x0, y0, x1, y1, ext);
+      const { cols, rows, cell, ox, oy } = grid;
+      const P = {
+        F, seed: p.seed | 0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2,
+        origin: p.origin, flow: Math.max(0, Math.min(1, p.flow)), fade: Math.max(0, p.fade),
+      };
+      if (((p.angle % 360) + 360) % 360 !== 0) {
+        const a = (p.angle * Math.PI) / 180;
+        P.rot = { c: Math.cos(a), s: Math.sin(a) };
+      }
+      if ((P.origin || P.flow > 0) && !fam.wave) {
+        warnings.push(`"${p.texture}" is not a wave family — origin/flow shape the wave families (waves, ripples, fluting) and have no effect here`);
+        P.origin = ''; P.flow = 0;
+      }
+      if ((P.origin === 'content' || P.flow > 0 || P.fade > 0) && !letterRings.length) {
+        warnings.push('origin "content", flow, and fade measure from prior content — nothing machined yet, so they are ignored');
+        if (P.origin === 'content') P.origin = 'center';
+        P.flow = 0; P.fade = 0;
+      }
+      if (P.origin === 'content' || P.flow > 0 || P.fade > 0) {
+        P.distContent = gridSampler(distanceGridForRings(letterRings, grid), grid);
+      }
+      if (P.origin === 'edge') {
+        P.distEdge = gridSampler(distanceGridForRings(edgeRings, grid), grid);
+      }
+
+      const insideField = clipRings ? insideGridEvenOdd(clipRings, grid) : null;
+      const heights = new Float64Array(cols * rows);
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const i = row * cols + col;
+          if (insideField && !insideField[i]) continue;   // outside the shape: uncut surface (z=0)
+          const t = sampleTexture(fam, ox + col * cell, oy + row * cell, P);
+          heights[i] = -(1 - t) * p.depth; // 1 = surface (z=0), 0 = -depth
+        }
+      }
+      const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
+
+      const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
+        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
+      });
+      if (!g.moves.length) {
+        return { error: `texture produced no cutting moves — ${g.warnings[0] ?? 'nothing to cut in the field'}` };
+      }
+      // default field: do NOT grow contentBBox — report the content it
+      // surrounds so a following tag_cutout at the same buffer aligns with
+      // the texture edge. A within shape IS content: report its bbox so a
+      // cutout wraps the textured shape.
+      if (p.within) noteContent(ctx, edgeRings);
+      const bbox = p.within
+        ? { minX: x0, minY: y0, maxX: x1, maxY: y1 }
+        : { minX: b.minX, minY: b.minY, maxX: b.maxX, maxY: b.maxY };
+      return {
+        tool: { name: `${p.toolDiameter}" ballnose`, diameter: p.toolDiameter, kind: 'ball' },
+        cutter: { type: 'ball', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: g.moves,
+        warnings: [...warnings, ...g.warnings],
+        target: g.target,
+        bbox,
+        previewRegions,
+      };
+    },
+  },
+
+  texture_text: {
+    doc: 'Render TEXT AS TEXTURE — the letters\' interiors carry a shallow procedural relief while the face around them stays untouched stock, so the name reads as a textured inlay in a smooth surface (the INVERSE of texture_field; pair them for full-face contrast). Counters (the holes of e/o/a) stay smooth. Same families as texture_field: waves, ripples, interference, fluting, basketweave, woodgrain, crosshatch, hammered, flowing, slate. A ballnose rasters strictly inside the letter outlines; the cut feathers up to the surface over about the ball\'s contact radius, giving a soft fabric-like edge — follow with outline_text at the SAME text/font/letterHeight for a crisp engraved border around each letter. origin "edge" runs the pattern parallel to each letter\'s own outline (concentric contour bands inside the strokes — the neon-tube look); "center" radiates across the whole word from its middle. Letters need meat: strokes narrower than the ball leave nothing to cut (friendly error) — use a large letterHeight, a bold font, and a SMALL ballnose (1/16" default). featureSize 0 auto-tunes to the letter size. Requires a BALLNOSE bit.',
+    params: {
+      text: { type: 'string', doc: 'the text to texture — bind to a text control so users can retype it', bindable: true },
+      font: FONT_PARAM,
+      letterHeight: { type: 'number', default: 2.5, min: 0.5, max: 8, doc: 'total text height in inches — texture needs room; below ~1.5" most families stop reading', bindable: true },
+      texture: { type: 'string', default: 'waves', doc: `which family: ${TEXTURE_IDS.join(', ')}. Bind to a choice control to let the user switch textures.`, bindable: true },
+      featureSize: { type: 'number', default: 0, min: 0, max: 3, doc: 'feature wavelength in inches; 0 auto-tunes to min(family default, letterHeight/4)', bindable: true },
+      depth: { type: 'number', default: 0.05, min: 0.01, max: 0.2, doc: 'texture depth (peak-to-valley) in inches — keep it shallow', bindable: true },
+      angle: { type: 'number', default: 0, min: -180, max: 180, doc: 'rotate the pattern this many degrees within the letters', bindable: true },
+      origin: { type: 'string', default: '', doc: 'wave families only: "" = native, "edge" = pattern follows each letter\'s outline (contour bands), "center" = radial from the word\'s center' },
+      toolDiameter: { type: 'number', default: 0.0625, doc: 'BALLNOSE bit diameter, inches — small: it must fit inside the letter strokes' },
+      stepoverPct: { type: 'number', default: 16, min: 5, max: 45, doc: 'stepover as a percentage of the bit diameter; smaller = smoother finish, longer cut' },
+      feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
+      seed: { type: 'number', default: 1, min: 1, max: 9999, doc: 'variation seed for the seeded families (hammered/flowing/slate) — bind to a slider for a "reseed" knob', bindable: true },
+      ...TEXT_PLACE_PARAMS,
+    },
+    run(p, ctx) {
+      const fam = TEXTURES[p.texture];
+      if (!fam) return { error: `unknown texture "${p.texture}" — try one of: ${TEXTURE_IDS.join(', ')}` };
+      if (p.origin && !['center', 'edge'].includes(p.origin)) {
+        return { error: `unknown origin "${p.origin}" — texture_text takes "center" or "edge" (or leave it empty)` };
+      }
+      const fe = fontBufferOf(ctx, p.font);
+      if (fe.error) return fe;
+      const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
+      if (!regions.length) return { error: 'no engravable outlines in that text' };
+      const R = p.toolDiameter / 2;
+      const F = p.featureSize > 0 ? p.featureSize : Math.min(fam.defaultFeature, p.letterHeight / 4);
+      const warnings = [];
+      if (F < 2 * R) warnings.push(`feature size ${F.toFixed(3)}" is finer than a ${p.toolDiameter}" ballnose can resolve — the texture will cut muddy; use a smaller bit or a larger feature size`);
+      if ((p.origin) && !fam.wave) {
+        warnings.push(`"${p.texture}" is not a wave family — origin shapes the wave families (waves, ripples, fluting) and has no effect here`);
+        p = { ...p, origin: '' };
+      }
+
+      // strokes must admit the ball: if shrinking every letter by the ball
+      // radius leaves nothing, no texture can fit inside
+      if (!offsetRegions(regions, -R).length) {
+        return { error: `the strokes of "${p.text}" at ${p.letterHeight}" are too thin for a ${p.toolDiameter}" ballnose to enter — use a larger letterHeight, a bolder font, or a smaller ballnose` };
+      }
+
+      // the heightmap carries the texture ONLY inside the letter outlines
+      // (counters excluded); outside cells stay at the surface, so ballnose
+      // compensation feathers the cut up to z=0 at each letter's edge — no
+      // bleed past the outline by construction, and the mask keeps the tool
+      // center inside the letters
+      const allRings = regions.flatMap((r) => [r.outer, ...r.holes]);
+      const mask = { outer: allRings[0], holes: allRings.slice(1) };   // even-odd: disjoint rings compose
+      const ext = R + 0.05;
+      const grid = textureGrid(bbox.minX, bbox.minY, bbox.maxX, bbox.maxY, ext);
+      const { cols, rows, cell, ox, oy } = grid;
+      const P = {
+        F, seed: p.seed | 0,
+        cx: (bbox.minX + bbox.maxX) / 2, cy: (bbox.minY + bbox.maxY) / 2,
+        origin: p.origin, flow: 0, fade: 0,
+      };
+      if (((p.angle % 360) + 360) % 360 !== 0) {
+        const a = (p.angle * Math.PI) / 180;
+        P.rot = { c: Math.cos(a), s: Math.sin(a) };
+      }
+      if (P.origin === 'edge') P.distEdge = gridSampler(distanceGridForRings(allRings, grid), grid);
+      const insideLetters = insideGridEvenOdd(allRings, grid);
+      const heights = new Float64Array(cols * rows);
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const i = row * cols + col;
+          if (!insideLetters[i]) continue;   // outside the letters: uncut surface
+          const t = sampleTexture(fam, ox + col * cell, oy + row * cell, P);
+          heights[i] = -(1 - t) * p.depth;
+        }
+      }
+      const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
+
+      const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
+        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
+      });
+      if (!g.moves.length) {
+        return { error: `no texture fits inside "${p.text}" — ${g.warnings[0] ?? 'the strokes are too thin or the depth too shallow'}; try a larger letterHeight or a smaller ballnose` };
+      }
+      noteContent(ctx, regions.map((r) => r.outer));
+      return {
+        tool: { name: `${p.toolDiameter}" ballnose`, diameter: p.toolDiameter, kind: 'ball' },
+        cutter: { type: 'ball', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: g.moves,
+        warnings: [...warnings, ...g.warnings],
+        target: g.target,
+        bbox,
+        previewRegions: regions,
       };
     },
   },

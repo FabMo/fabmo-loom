@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Loom texture contact sheet</title>
+<style>
+  body { background: #14100c; color: #d8cdbd; font: 13px/1.4 system-ui, sans-serif; margin: 20px; }
+  h1 { font-size: 16px; font-weight: 600; }
+  p.note { color: #8d8172; max-width: 72em; }
+  .grid { display: flex; flex-wrap: wrap; gap: 14px; }
+  .tile { width: 300px; }
+  .tile canvas { width: 300px; height: 200px; border-radius: 4px; display: block; }
+  .tile .cap { margin-top: 4px; color: #b3a893; }
+  .tile .cap b { color: #e6dcc8; font-weight: 600; }
+  .sec { margin: 26px 0 10px; font-size: 14px; font-weight: 600; color: #e6dcc8; border-bottom: 1px solid #3a3126; padding-bottom: 4px; }
+</style>
+</head>
+<body>
+<h1>Texture contact sheet — driving fields, flow, fade, inside-letters</h1>
+<p class="note">Every tile is the real kernel (<code>sampleTexture</code>) shaded with a raking light,
+over a 6&times;4&quot; field. The grey blob rings stand in for a carved name (the moat is shown
+uncut, exactly as texture_field masks it). This page is the art-direction tool: what looks
+muddy here will cut muddy.</p>
+<div id="sheet"></div>
+<script type="module">
+import { TEXTURES, sampleTexture, distanceGridForRings, gridSampler, insideGridEvenOdd }
+  from '../app/texture-kernel.mjs';
+
+// ---- a synthetic "name": three blobs roughly where letters would sit
+const blob = (cx, cy, rx, ry, n = 40) => Array.from({ length: n }, (_, i) => {
+  const a = (i / n) * Math.PI * 2;
+  return { x: cx + rx * Math.cos(a) * (1 + 0.18 * Math.sin(3 * a)), y: cy + ry * Math.sin(a) };
+});
+const CONTENT = [blob(-1.1, 0, 0.42, 0.5), blob(0, 0, 0.42, 0.5), blob(1.1, 0, 0.42, 0.5)];
+
+// field: 6x4" centered at origin
+const W = 6, H = 4, x0 = -W / 2, y0 = -H / 2;
+const COLS = 300, ROWS = 200, cell = W / COLS;
+const grid = { cols: COLS, rows: ROWS, cell, ox: x0, oy: y0 };
+const distContent = gridSampler(distanceGridForRings(CONTENT, grid), grid);
+const edgeRing = [{ x: x0, y: y0 }, { x: -x0, y: y0 }, { x: -x0, y: -y0 }, { x: x0, y: -y0 }];
+const distEdge = gridSampler(distanceGridForRings([edgeRing], grid), grid);
+// moat: don't cut within this distance of the "letters"
+const MOAT = 0.05 + 0.0625 + 0.03;
+
+function drawTile(parent, cap, fam, P, opts = {}) {
+  const tile = document.createElement('div'); tile.className = 'tile';
+  const cv = document.createElement('canvas'); cv.width = COLS; cv.height = ROWS;
+  const capEl = document.createElement('div'); capEl.className = 'cap'; capEl.innerHTML = cap;
+  tile.append(cv, capEl); parent.appendChild(tile);
+  const h = new Float64Array(COLS * ROWS);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const x = x0 + c * cell, y = y0 + r * cell;
+    let t = 1;                                   // uncut surface
+    const inMoat = distContent(x, y) < MOAT;
+    const inside = opts.inside ? opts.inside(x, y) : !inMoat;
+    if (inside && !(opts.inside && inMoat && !opts.noMoat)) t = sampleTexture(fam, x, y, P);
+    if (opts.inside && !opts.inside(x, y)) t = 1;
+    h[r * COLS + c] = t;
+  }
+  // raking-light shade: normal from gradient, light from upper-left
+  const img = new ImageData(COLS, ROWS);
+  const DEPTH = 22;                              // exaggeration for display
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const i = r * COLS + c;
+    const hx = (h[r * COLS + Math.min(COLS - 1, c + 1)] - h[i]) * DEPTH;
+    const hy = (h[Math.min(ROWS - 1, r + 1) * COLS + c] - h[i]) * DEPTH;
+    let n = (-hx * -0.6 + -hy * -0.6 + 1) / Math.sqrt(hx * hx + hy * hy + 1) / Math.sqrt(0.6 * 0.6 * 2 + 1);
+    n = Math.max(0, n);
+    const base = 82 + 148 * n + (h[i] - 1) * 40; // valleys slightly darker
+    img.data[i * 4] = base * 1.06; img.data[i * 4 + 1] = base * 0.92; img.data[i * 4 + 2] = base * 0.72;
+    img.data[i * 4 + 3] = 255;
+  }
+  // flip y (shop coords) and paint
+  const ctx2 = cv.getContext('2d');
+  const flip = new ImageData(COLS, ROWS);
+  for (let r = 0; r < ROWS; r++) flip.data.set(img.data.subarray(r * COLS * 4, (r + 1) * COLS * 4), (ROWS - 1 - r) * COLS * 4);
+  ctx2.putImageData(flip, 0, 0);
+}
+
+const sheet = document.getElementById('sheet');
+const sec = (title) => { const el = document.createElement('div'); el.className = 'sec'; el.textContent = title; sheet.appendChild(el); const g = document.createElement('div'); g.className = 'grid'; sheet.appendChild(g); return g; };
+const mkP = (famId, over = {}) => ({ F: TEXTURES[famId].defaultFeature, seed: 1, cx: 0, cy: 0, origin: '', flow: 0, fade: 0, distContent, distEdge, ...over });
+const rot = (deg) => ({ c: Math.cos(deg * Math.PI / 180), s: Math.sin(deg * Math.PI / 180) });
+
+// --- 1. the new driving fields
+let g = sec('Driving fields — origin (waves / ripples / fluting)');
+for (const fid of ['waves', 'ripples', 'fluting']) {
+  drawTile(g, `<b>${fid}</b> — native`, TEXTURES[fid], mkP(fid));
+  drawTile(g, `<b>${fid}</b> — origin: content`, TEXTURES[fid], mkP(fid, { origin: 'content' }));
+  drawTile(g, `<b>${fid}</b> — origin: edge`, TEXTURES[fid], mkP(fid, { origin: 'edge' }));
+}
+
+// --- 2. angle
+g = sec('Angle');
+drawTile(g, `<b>waves</b> — angle 30°`, TEXTURES.waves, mkP('waves', { rot: rot(30) }));
+drawTile(g, `<b>fluting</b> — angle 90°`, TEXTURES.fluting, mkP('fluting', { rot: rot(90) }));
+drawTile(g, `<b>crosshatch</b> — angle 45°`, TEXTURES.crosshatch, mkP('crosshatch', { rot: rot(45) }));
+drawTile(g, `<b>woodgrain</b> — angle 90°`, TEXTURES.woodgrain, mkP('woodgrain', { rot: rot(90) }));
+
+// --- 3. flow & fade
+g = sec('Flow (bend around the name) & fade (calm pool)');
+drawTile(g, `<b>waves</b> — flow 0 (today)`, TEXTURES.waves, mkP('waves'));
+drawTile(g, `<b>waves</b> — flow 1`, TEXTURES.waves, mkP('waves', { flow: 1 }));
+drawTile(g, `<b>waves</b> — flow 0.6, fade 0.35`, TEXTURES.waves, mkP('waves', { flow: 0.6, fade: 0.35 }));
+drawTile(g, `<b>ripples</b> — origin content + fade 0.3`, TEXTURES.ripples, mkP('ripples', { origin: 'content', fade: 0.3 }));
+drawTile(g, `<b>fluting</b> — flow 1`, TEXTURES.fluting, mkP('fluting', { flow: 1 }));
+drawTile(g, `<b>interference</b> — fade 0.5`, TEXTURES.interference, mkP('interference', { fade: 0.5 }));
+
+// --- 4. inside letters (texture_text): pattern clipped INTO the blobs
+g = sec('Inside the letters (texture_text) — field stays smooth');
+const inBlobs = (() => {
+  const flags = insideGridEvenOdd(CONTENT, grid);
+  return (x, y) => {
+    const c = Math.round((x - x0) / cell), r = Math.round((y - y0) / cell);
+    return c >= 0 && c < COLS && r >= 0 && r < ROWS && !!flags[r * COLS + c];
+  };
+})();
+const distLetterEdge = distContent;   // same rings: inside, distance to outline
+for (const [fid, over, label] of [
+  ['waves', {}, 'waves'],
+  ['ripples', { origin: 'edge', F: 0.18, distEdge: distLetterEdge }, 'ripples — origin edge (contour bands)'],
+  ['hammered', { F: 0.3 }, 'hammered'],
+  ['woodgrain', { F: 0.15 }, 'woodgrain'],
+]) {
+  drawTile(g, `<b>${label}</b>`, TEXTURES[fid], mkP(fid, over), { inside: inBlobs, noMoat: true });
+}
+document.title = 'texture sheet ready';
+</script>
+</body>
+</html>
