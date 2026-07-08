@@ -125,9 +125,10 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
   /**
    * @param {ReturnType<import('./sim.mjs').simulateJob>|null} sim
    * @param {{w,h,thickness}} stock
-   * @param {number} zScale  vertical exaggeration (display-only; the whole
-   *   solid scales together, and the UI labels it — engraving depth is a
-   *   few percent of board span and reads flat at true scale)
+   * @param {number} zScale  vertical scale for the whole solid (stock slab
+   *   included). Callers pass 1 (true scale) — vee carves render their ideal
+   *   analytic surface (see vcarve-surface.mjs) so depth reads without any
+   *   exaggeration; kept as a param for one-off diagnostics.
    * @param {number} [tintRange]  depth (positive inches) that maps to the
    *   full cut tint — pass the job's FEATURE depth so an engraving next to
    *   a through cut still uses the whole color scale

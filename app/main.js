@@ -20,7 +20,6 @@ const ctx = canvas.getContext('2d');
 let LOADED_FONTS = null;   // id → ArrayBuffer, the whole shelf
 let viewMode = localStorage.getItem('loom:view') ?? '3d';
 let view3d = null;
-let zxAuto = true;   // 3D depth exaggeration: auto (labeled) vs true scale
 let recipe = loadRecipe();
 let controlValues = controlDefaults(recipe);
 let result = null;
@@ -291,20 +290,18 @@ function refreshPreview() {
   $('btn2d').className = is3d ? 'small ghost' : 'small';
   if (is3d) {
     view3d ??= createView3D($('preview3d'));
+    syncView3dTheme();            // match the scene backdrop to the current theme
     window.loomView3d = view3d;   // debug/test handle for deterministic camera poses
     const pre = result?.preview;
     const stock = pre?.stock ?? { w: 8, h: 2.5, thickness: recipe.stock.thickness ?? 0.5 };
-    const sim = pre?.built?.length ? simulateJob(pre.built, pre.placement, stock) : null;
-    // adaptive display exaggeration: an engraving is a few percent of the
-    // board span and reads flat at true scale. Key on the deepest cut that
-    // is NOT a through cut — a tag's kerf must not veto exaggerating the
-    // carve it surrounds. Always labeled; the button toggles true scale.
-    const span = Math.max(stock.w, stock.h);
-    let shallowDeepest = 0;
+    // display surface: vee ops render their ideal analytic V-surface (smooth
+    // groove walls). Everything is drawn at TRUE scale — no depth exaggeration.
+    const sim = pre?.built?.length ? simulateJob(pre.built, pre.placement, stock, { analyticVee: true }) : null;
+    // feature depth (deepest cut that is NOT a through cut) normalizes the
+    // depth TINT so an engraving next to a through cutout still uses the whole
+    // color scale — a tag's kerf must not swallow the carve it surrounds.
+    let featureDepth = 0;
     if (sim) {
-      // depth histogram of cut cells above the through zone; the deepest
-      // bin with real MASS is the feature depth. A bare minimum would key
-      // on the cutout's ramp-entry cells, which pass through every depth.
       const BINS = 100;
       const zTh = 0.9 * stock.thickness;
       const hist = new Uint32Array(BINS);
@@ -316,28 +313,12 @@ function refreshPreview() {
       }
       const minMass = Math.max(50, cut * 0.005);
       for (let b = BINS - 1; b >= 0; b--) {
-        if (hist[b] >= minMass) { shallowDeepest = -((b + 1) / BINS) * zTh; break; }
+        if (hist[b] >= minMass) { featureDepth = -((b + 1) / BINS) * zTh; break; }
       }
-      if (shallowDeepest === 0) shallowDeepest = sim.minZ;   // pure through job
+      if (featureDepth === 0) featureDepth = sim.minZ;   // pure through job
     }
-    // …but never so much that the BOARD itself lies: the scale is applied
-    // to the whole scene, stock slab included, so cap it where the slab
-    // would render thicker than a quarter of its span (a 0.5" sign board
-    // at ×5 reads as a brick; braille dots key the feature depth at 0.04").
-    const slabCap = Math.max(1, (0.25 * span) / Math.max(0.05, stock.thickness));
-    const auto = sim
-      ? Math.min(5, slabCap, Math.max(1, (0.08 * span) / Math.max(0.02, -shallowDeepest)))
-      : 1;
-    const zx = zxAuto ? auto : 1;
-    window.loomZx = { auto, zx, shallowDeepest, minZ: sim?.minZ };   // debug handle
-    view3d.update(sim, stock, zx, shallowDeepest ? -shallowDeepest : null);
-    const zb = $('zxBtn');
-    if (sim && auto > 1.05) {
-      zb.style.display = 'block';
-      zb.textContent = zx > 1.05 ? `depth ×${zx.toFixed(1)} (display)` : 'depth ×1 (true scale)';
-    } else {
-      zb.style.display = 'none';
-    }
+    window.loomZx = { zx: 1, featureDepth, minZ: sim?.minZ };   // debug handle
+    view3d.update(sim, stock, 1, featureDepth ? -featureDepth : null);
   } else {
     draw();
   }
@@ -560,7 +541,6 @@ $('chips').addEventListener('click', (e) => {
   const p = e.target?.dataset?.p;
   if (p) { $('prompt').value = p; generate(); }
 });
-$('zxBtn').addEventListener('click', () => { zxAuto = !zxAuto; refreshPreview(); });
 $('btn3d').addEventListener('click', () => { viewMode = '3d'; localStorage.setItem('loom:view', '3d'); refreshPreview(); });
 $('btn2d').addEventListener('click', () => { viewMode = '2d'; localStorage.setItem('loom:view', '2d'); refreshPreview(); });
 $('reset').addEventListener('click', () => {
@@ -612,6 +592,41 @@ $('thickness').addEventListener('input', () => {
     persist();
     debounceRun();
   }
+});
+
+// ------------------------------------------------------------- theme
+// The document theme is set before first paint by an inline script in
+// index.html (stored choice, else OS preference). Here we wire the header
+// toggle and keep the 3D scene backdrop in sync — the WebGL background is
+// not a CSS surface, so it can't inherit --surround and must be pushed.
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+function surroundColor() {
+  // read the resolved --surround token so the 3D backdrop matches the 2D canvas
+  return getComputedStyle(document.documentElement).getPropertyValue('--surround').trim();
+}
+function syncView3dTheme() {
+  if (!view3d) return;
+  // scene.background is a THREE.Color created in view3d.mjs — mutate it in place
+  view3d.scene.background.set(surroundColor());
+  view3d.domElement.style.borderColor =
+    getComputedStyle(document.documentElement).getPropertyValue('--border').trim();
+  view3d.render();
+}
+function updateThemeToggle() {
+  // the icon shows what you'll switch TO
+  $('themeToggle').textContent = currentTheme() === 'dark' ? '☀︎ Light' : '☾ Dark';
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('loom:theme', theme); } catch {}
+  updateThemeToggle();
+  syncView3dTheme();
+}
+updateThemeToggle();
+$('themeToggle').addEventListener('click', () => {
+  applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
 });
 
 // Guest apps: an optional, uncommitted guests.local.mjs lists module

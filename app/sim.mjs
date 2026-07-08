@@ -16,6 +16,7 @@
 // footprint cannot skip cells.
 
 import { walkMoves } from '../ir/moves.js';
+import { stampVeeSurface } from './vcarve-surface.mjs';
 
 /**
  * @param {Array<{r:{moves,cutter?,tool}}>} built  runtime preview.built
@@ -96,6 +97,14 @@ export function simulateJob(built, placement, stock, opts = {}) {
   };
 
   for (const { r } of built) {
+    // display surfaces: a vee op renders its IDEAL analytic V-surface (smooth
+    // groove walls) instead of stamping the scalloped toolpath. Preview-only —
+    // the verifier and gauntlet call without this flag and get the honest sim.
+    if (opts.analyticVee && r.previewVee) {
+      const z = stampVeeSurface(grid, cols, rows, dx, placement, r.previewVee, floorZ);
+      if (z < minZ) minZ = z;
+      continue;
+    }
     const cutter = r.cutter ?? { type: 'flat', diameter: r.tool?.diameter || 0.01 };
     const isVee = cutter.type === 'vee';
     const isBall = cutter.type === 'ball';

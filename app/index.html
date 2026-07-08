@@ -11,28 +11,49 @@
     --navy: #1b2a6b; --sky: #7ba3d4; --red: #cc2229;
     --bg: #f7f6f2; --panel: #ffffff; --ink: #22263a; --mut: #6a7086;
     --ok: #1a7f4b; --bad: #b3261e; --amber: #8a6d1a;
+    /* chrome tokens (the wood-board colors are NOT themed — they are the material) */
+    --header-bg: var(--navy);
+    --accent: var(--navy);          /* ghost buttons, chip text, links, big-input border */
+    --btn-bg: var(--navy);
+    --border: #e3e1d8; --input-border: #c9c6ba; --input-bg: #ffffff;
+    --chip-bg: #eef1fa; --code-bg: #f4f4f0; --disabled-bg: #b9bcc9;
+    --surround: #fdfdfb;            /* the 2D canvas / 3D scene backdrop around the board */
+  }
+  :root[data-theme="dark"] {
+    --sky: #8fb4de;
+    --bg: #12141c; --panel: #1b1e2a; --ink: #e6e8f0; --mut: #9aa0b4;
+    --ok: #35c07a; --bad: #ff6b62; --amber: #d8a83a;
+    --header-bg: #161d3d;
+    --accent: #8fb4de;
+    --btn-bg: #33509e;
+    --border: #2c3040; --input-border: #3a3f52; --input-bg: #232736;
+    --chip-bg: #262b3d; --code-bg: #171a24; --disabled-bg: #363b4d;
+    --surround: #0f1119;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 14px; padding: 12px 22px; background: var(--navy); color: #fff; }
+  header { display: flex; align-items: center; gap: 14px; padding: 12px 22px; background: var(--header-bg); color: #fff; }
   header img { height: 42px; border-radius: 6px; }
   header h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
   header .sub { font-size: .78rem; opacity: .75; }
+  header .spacer { flex: 1; }
+  #themeToggle { background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 6px 12px; font-size: .95rem; font-weight: 500; }
+  #themeToggle:hover { background: rgba(255,255,255,.2); }
   main { max-width: 1360px; margin: 0 auto; padding: 16px 22px 40px; display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 18px; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid #e3e1d8; border-radius: 12px; padding: 14px 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
   label { display: block; font-size: .76rem; color: var(--mut); margin: 8px 0 3px; }
-  input, textarea, select { width: 100%; padding: 7px 9px; font-size: .95rem; border: 1px solid #c9c6ba; border-radius: 8px; background: #fff; font-family: inherit; }
+  input, textarea, select { width: 100%; padding: 7px 9px; font-size: .95rem; border: 1px solid var(--input-border); border-radius: 8px; background: var(--input-bg); color: var(--ink); font-family: inherit; }
   textarea { resize: vertical; min-height: 64px; }
-  button { font-size: .95rem; padding: 9px 16px; border-radius: 9px; border: none; background: var(--navy); color: #fff; cursor: pointer; font-weight: 600; }
-  button:disabled { background: #b9bcc9; cursor: not-allowed; }
-  button.ghost { background: #fff; color: var(--navy); border: 1.5px solid var(--navy); }
+  button { font-size: .95rem; padding: 9px 16px; border-radius: 9px; border: none; background: var(--btn-bg); color: #fff; cursor: pointer; font-weight: 600; }
+  button:disabled { background: var(--disabled-bg); cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--accent); border: 1.5px solid var(--accent); }
   button.small { font-size: .78rem; padding: 5px 10px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chips button { background: #eef1fa; color: var(--navy); font-weight: 500; font-size: .78rem; padding: 5px 10px; border-radius: 999px; }
-  .asset-chip { display: inline-flex; align-items: center; gap: 6px; background: #eef1fa; color: var(--navy); font-size: .78rem; padding: 4px 10px; border-radius: 999px; }
+  .chips button { background: var(--chip-bg); color: var(--accent); font-weight: 500; font-size: .78rem; padding: 5px 10px; border-radius: 999px; }
+  .asset-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--chip-bg); color: var(--accent); font-size: .78rem; padding: 4px 10px; border-radius: 999px; }
   .asset-chip img { height: 20px; width: 20px; object-fit: cover; border-radius: 4px; }
-  .asset-chip .x { background: none; border: none; color: var(--navy); font-weight: 700; padding: 0 2px; font-size: .85rem; cursor: pointer; }
+  .asset-chip .x { background: none; border: none; color: var(--accent); font-weight: 700; padding: 0 2px; font-size: .85rem; cursor: pointer; }
   #history { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
   .turn { border-left: 3px solid var(--sky); padding: 4px 10px; font-size: .82rem; }
   .turn .you { color: var(--mut); }
@@ -43,7 +64,7 @@
   summary { cursor: pointer; font-size: .82rem; color: var(--mut); }
   .keyrow { display: flex; gap: 8px; align-items: center; }
   .keynote { font-size: .72rem; color: var(--mut); margin-top: 4px; }
-  canvas { width: 100%; height: auto; display: block; background: #fdfdfb; border-radius: 10px; border: 1px solid #e3e1d8; }
+  canvas { width: 100%; height: auto; display: block; background: var(--surround); border-radius: 10px; border: 1px solid var(--border); }
   .verdict { display: flex; align-items: baseline; gap: 10px; margin: 10px 0 4px; }
   .badge { font-size: 1.1rem; font-weight: 700; padding: 3px 12px; border-radius: 999px; color: #fff; }
   .badge.ok { background: var(--ok); } .badge.bad { background: var(--bad); } .badge.wait { background: var(--mut); }
@@ -55,12 +76,23 @@
   #appName { font-size: 1.05rem; font-weight: 700; margin: 0 0 2px; }
   #controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
   #controls .ctl-text { grid-column: 1 / -1; }
-  #controls .ctl-text input { font-size: 1.35rem; border: 2px solid var(--navy); border-radius: 10px; }
-  #recipeJson { font-size: .72rem; background: #f4f4f0; border-radius: 8px; padding: 8px; overflow-x: auto; max-height: 260px; }
+  #controls .ctl-text input { font-size: 1.35rem; border: 2px solid var(--accent); border-radius: 10px; }
+  #recipeJson { font-size: .72rem; background: var(--code-bg); border-radius: 8px; padding: 8px; overflow-x: auto; max-height: 260px; }
   .foot-note { font-size: .72rem; color: var(--mut); margin-top: 8px; }
   footer { text-align: center; font-size: .75rem; color: var(--mut); padding: 12px; }
-  footer a { color: var(--navy); }
+  footer a { color: var(--accent); }
 </style>
+<script>
+  // set the theme before first paint so there's no light flash on dark loads.
+  // stored choice wins; otherwise follow the OS. main.js wires the toggle.
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem('loom:theme'); } catch (e) {}
+    var dark = stored ? stored === 'dark'
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
 </head>
 <body>
 <header>
@@ -69,6 +101,8 @@
     <h1>FabMo - Loom</h1>
     <div class="sub">A ShopBot Project</div>
   </div>
+  <div class="spacer"></div>
+  <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
 </header>
 <main>
   <section class="panel">
@@ -109,7 +143,6 @@
         <button id="btn3d" class="small">3D</button>
         <button id="btn2d" class="small ghost">2D</button>
       </div>
-      <button id="zxBtn" class="small ghost" style="position:absolute; top:8px; left:8px; z-index:5; display:none" title="Shallow carves are a few percent of board size and read flat at true scale — the preview can exaggerate depth for readability. Click to toggle."></button>
       <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
       <div id="preview3d"></div>
     </div>

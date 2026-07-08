@@ -478,6 +478,10 @@ export const CATALOG = {
         target: { type: 'region', rings: regions.flatMap(r => [ccw(r.outer), ...r.holes.map(cwr)]), depth: p.maxDepth },
         bbox,
         previewRegions: regions,
+        // analytic ideal V-surface inputs for the 3D preview (see
+        // vcarve-surface.mjs): render smooth groove walls instead of the
+        // toolpath's scallops. Op-local frame, same as moves/regions.
+        previewVee: { branches: ma.branches, regions, includedAngle: p.includedAngle, maxDepth: p.maxDepth },
       };
     },
   },
