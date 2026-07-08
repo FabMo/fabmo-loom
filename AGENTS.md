@@ -116,6 +116,25 @@ yet in the catalog) → catalog integration here. The integration checklist:
 Declines logged by users are the backlog for this section — a decline
 converts to a feature by exactly this list.
 
+## World-data references (the terrain pattern)
+
+Some capabilities need real-world data too big to embed (elevation
+grids). The pattern: the recipe stores a REFERENCE (`terrains:` — id +
+place-name query or lat/lng box), a BROWSER-ONLY resolver
+(`app/terrain-fetch.mjs`) geocodes and fetches public data on the user's
+own connection, pins the resolved bbox/zoom/meta back into the recipe
+(the document names an exact region from then on), and hands grids to
+`runRecipe` as a plain argument. Three invariants when extending this:
+
+1. The network lives ABOVE the rail. Lowering strategies must be pure
+   functions of the resolved grid — the gauntlet feeds them synthetic
+   fixtures and never fetches.
+2. The LLM authors references, never data. `set_terrain` carries a query
+   or a box; elevation numbers the model "knows" are not data sources.
+3. Resolved metadata (center lat/lng, elevation range) is pinned into
+   the recipe so later intent turns can author true facts (coordinates
+   carved on a plaque) from the document instead of from model memory.
+
 ## Mounting a guest app
 
 A whole sibling app can register itself as catalog verbs — the biggest

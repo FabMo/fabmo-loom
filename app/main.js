@@ -9,6 +9,7 @@ import { svgAssetToRegions } from './svg.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
+import { resolveTerrains } from './terrain-fetch.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
 import { FONTS } from './fonts.mjs';
@@ -199,11 +200,30 @@ async function addAssetFile(f) {
 
 function setBadge(cls, text) { const b = $('badge'); b.className = `badge ${cls}`; b.textContent = text; }
 
+let weaveSeq = 0;   // stale async weaves (terrain still fetching) must not clobber newer ones
 function runAndRender() {
   if (!LOADED_FONTS) return;
   setBadge('wait', 'computing…');
-  requestAnimationFrame(() => setTimeout(() => {
-    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS));
+  const seq = ++weaveSeq;
+  requestAnimationFrame(() => setTimeout(async () => {
+    // terrain references resolve ABOVE the rail: geocode + public DEM
+    // tiles fetched on the user's own connection, cached per region, the
+    // resolved bbox/meta pinned back into the recipe. The weave below
+    // stays a pure function of the returned grids.
+    let terrains = {};
+    if (recipe.terrains?.length) {
+      try {
+        terrains = await resolveTerrains(recipe, (msg) => setBadge('wait', msg));
+        persist();   // keep the pinned bbox/meta
+      } catch (e) {
+        if (seq !== weaveSeq) return;
+        result = { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } };
+        render();
+        return;
+      }
+    }
+    if (seq !== weaveSeq) return;
+    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains));
     render();
   }, 0));
 }

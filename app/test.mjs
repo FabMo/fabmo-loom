@@ -34,7 +34,26 @@ const quiet = (fn) => {
   console.log = () => {};
   try { return fn(); } finally { console.log = orig; }
 };
-const run = (recipe, values) => quiet(() => runRecipe(recipe, values ?? controlDefaults(recipe), FONT_SHELF));
+// synthetic DEM fixture — a meandering canyon through a high plain, fully
+// deterministic. Stands in for the browser-fetched elevation grid so the
+// terrain lowering (a pure function of grid + params) tests offline.
+const TERRAIN_FIXTURE = (() => {
+  const cols = 240, rows = 180;
+  const elev = new Float32Array(cols * rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c / (cols - 1), y = r / (rows - 1);
+      const meander = 0.5 + 0.18 * Math.sin(x * 5.2) + 0.08 * Math.sin(x * 13.7 + 1.3);
+      const gorge = 950 * Math.exp(-((y - meander) ** 2) / (2 * 0.06 ** 2));
+      const ridges = 120 * Math.sin(x * 21 + y * 7) * Math.sin(y * 17 - x * 3);
+      elev[r * cols + c] = 2100 - gorge + ridges;
+    }
+  }
+  return { gc: { grid: { elev, cols, rows }, meta: { name: 'Test Canyon', centerLat: 36.06, centerLng: -112.14 } } };
+})();
+
+const run = (recipe, values, terrains = TERRAIN_FIXTURE) =>
+  quiet(() => runRecipe(recipe, values ?? controlDefaults(recipe), FONT_SHELF, terrains));
 
 // ---------------- 1. empty recipe is honest ----------------
 
@@ -2321,6 +2340,110 @@ console.log('--- texture_text: letters rendered as texture, face stays smooth --
       pass('intent layer: pond-drop plaque + textured word apply, weave, and verify (2 heightmap targets)');
     } else fail(`intent recipe did not weave: ok=${woven.ok} err=${woven.errors?.join(' | ')}`);
   } else fail(`intent apply wrong: applied=${res.applied.length} skipped=${JSON.stringify(res.skipped)}`);
+}
+
+// ---------------- terrain_relief: real-world relief + the proud plaque ----------------
+
+console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
+{
+  const base = () => ({ ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.75 }, terrains: [{ id: 'gc', query: 'Grand Canyon' }] });
+  // the full job from the prompt: name + coordinates v-carved in the lower-left,
+  // terrain flowing around their pad, cutout last
+  const plaque = () => ({ ...base(), pipeline: [
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -3.0, posY: -2.0 } },
+    { id: 'coords', strategy: 'vcarve_text', params: { text: '36.06N 112.14W', letterHeight: 0.25, place: 'below', gap: 0.15 } },
+    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 10, depth: 0.35 } },
+    { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } },
+  ] });
+
+  const r = run(plaque());
+  const tgt = r.report?.stats.targets?.find((t) => t.type === 'heightmap');
+  if (r.ok && tgt && (tgt.gouges ?? 0) === 0 && (tgt.maskViolations ?? 0) === 0) {
+    // brute force the composition: the pad is an uncut plateau at stock top
+    // with the letters carved INTO it, and the terrain around it actually
+    // carves deep
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const px = r.preview.placement.x, py = r.preview.placement.y;
+    // content bbox from the two text ops' preview outlines
+    let cb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const id of ['name', 'coords']) {
+      for (const rg of r.preview.built.find((b) => b.op.id === id).r.previewRegions) {
+        for (const q of rg.outer) {
+          cb = { minX: Math.min(cb.minX, q.x), minY: Math.min(cb.minY, q.y), maxX: Math.max(cb.maxX, q.x), maxY: Math.max(cb.maxY, q.y) };
+        }
+      }
+    }
+    // plateau: sample the pad ring area (between content and pad edge, on all
+    // four sides) — must sit at stock top
+    let plateauBad = 0;
+    const padPts = [];
+    for (let x = cb.minX; x <= cb.maxX; x += 0.4) padPts.push([x, cb.maxY + 0.15], [x, cb.minY - 0.15]);
+    for (let y = cb.minY; y <= cb.maxY; y += 0.4) padPts.push([cb.minX - 0.15, y], [cb.maxX + 0.15, y]);
+    for (const [x, y] of padPts) if (surfaceAt(sim, x + px, y + py) < -0.002) plateauBad++;
+    // letters: carved into the plateau
+    const letterZ = surfaceAt(sim, (cb.minX + cb.maxX) / 2 + px, -2.0 + py - 0.02);
+    // terrain: the canyon carves deep somewhere well away from the pad
+    let deepCells = 0;
+    for (let y = 0.5; y < r.preview.stock.h - 0.5; y += 0.1) {
+      for (let x = r.preview.stock.w / 2; x < r.preview.stock.w - 0.5; x += 0.1) {
+        if (surfaceAt(sim, x, y) < -0.25) deepCells++;
+      }
+    }
+    if (plateauBad === 0 && deepCells > 100) {
+      pass(`plaque composition verified: ${tgt.samples} samples 0 gouges; pad plateau uncut at ${padPts.length} probes, canyon reaches < -0.25" in ${deepCells} probes (letters at ${letterZ.toFixed(3)}")`);
+    } else fail(`composition geometry off: plateauBad=${plateauBad} deepCells=${deepCells}`);
+  } else fail(`plaque composition failed: ok=${r.ok} gouges=${tgt?.gouges} maskViol=${tgt?.maskViolations} err=${r.errors?.join(' | ')}`);
+
+  // terrain standing alone: whole rectangle, no pad
+  const alone = run({ ...base(), pipeline: [{ id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 8, depth: 0.3 } }] });
+  const aloneBuilt = alone.preview?.built?.find((b) => b.op.id === 'land');
+  if (alone.ok && aloneBuilt.r.previewRegions[0].holes.length === 0) pass('terrain alone verifies: full rectangle, no pad');
+  else fail(`terrain alone: ok=${alone.ok} err=${alone.errors?.join(' | ')}`);
+
+  // honest failures
+  const unknown = run({ ...base(), pipeline: [{ id: 'land', strategy: 'terrain_relief', params: { terrain: 'mars' } }] });
+  if (!unknown.ok && unknown.errors.some((e) => /unknown terrain "mars".*gc/.test(e))) pass('unknown terrain id names the defined ones: clean error');
+  else fail(`unknown terrain not handled: ${JSON.stringify(unknown.errors)}`);
+
+  const unfetched = run({ ...base(), pipeline: [{ id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc' } }] }, undefined, {});
+  if (!unfetched.ok && unfetched.errors.some((e) => /not fetched yet/.test(e))) pass('declared-but-unfetched terrain: honest "not fetched yet" state');
+  else fail(`unfetched terrain not handled: ${JSON.stringify(unfetched.errors)}`);
+
+  const poking = run({ ...base(), pipeline: [
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -4.8, posY: -2.0 } },
+    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 10 } },
+  ] });
+  if (!poking.ok && poking.errors.some((e) => /pokes outside/.test(e))) pass('pad poking outside the terrain rectangle: clean error with the fix');
+  else fail(`poking pad not handled: ${JSON.stringify(poking.errors)}`);
+
+  const tooDeep = run({ ...base(), pipeline: [{ id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', depth: 0.8 } }] });
+  if (!tooDeep.ok && tooDeep.errors.some((e) => /not less than/.test(e))) pass('relief deeper than stock: clean error');
+  else fail(`too-deep not handled: ${JSON.stringify(tooDeep.errors)}`);
+
+  // through the intent layer: the model authors the reference, never the data
+  const res = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'grand canyon plaque', actions: [
+    { kind: 'set_terrain', terrain: { id: 'land', query: 'Grand Canyon' } },
+    { kind: 'add_operation', operation: { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -3.0, posY: -2.0 } } },
+    { kind: 'add_operation', operation: { id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land', width: 10, depth: 0.35 } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+  ], declined: [] });
+  if (res.applied.length === 4 && !res.skipped.length) {
+    const woven = run({ ...res.recipe, stock: { thickness: 0.75 } }, undefined, { land: TERRAIN_FIXTURE.gc });
+    if (woven.ok) pass('intent layer: set_terrain + relief + cutout apply and verify');
+    else fail(`intent terrain recipe did not weave: ${woven.errors?.join(' | ')}`);
+  } else fail(`intent terrain apply wrong: applied=${res.applied.length} skipped=${JSON.stringify(res.skipped)}`);
+
+  const badRef = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'set_terrain', terrain: { id: 'land' } },
+  ], declined: [] });
+  if (badRef.skipped.length === 1 && /query or a full/.test(badRef.skipped[0])) pass('set_terrain without query or box: skipped with reason');
+  else fail(`bad set_terrain not skipped: ${JSON.stringify(badRef.skipped)}`);
+
+  const blocked = applyActions(migrateRecipe({ ...structuredClone(EMPTY_RECIPE), terrains: [{ id: 'land', query: 'x' }], pipeline: [{ id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land' } }] }), { summary: 'x', actions: [
+    { kind: 'remove_terrain', id: 'land' },
+  ], declined: [] });
+  if (blocked.skipped.length === 1 && /still referenced/.test(blocked.skipped[0])) pass('remove_terrain refused while an op references it');
+  else fail(`remove_terrain not blocked: ${JSON.stringify(blocked.skipped)}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

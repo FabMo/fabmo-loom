@@ -135,5 +135,32 @@ console.log('--- live prompt 5: "engrave a name and cut it out as a heart" → f
   } else fail(`prompt 5: fit=${!!fitShape} verified=${r.ok} errors=${r.errors?.join(' | ')}`);
 }
 
+console.log('--- live prompt 6: the Grand Canyon plaque → terrain reference ---');
+{
+  // the terrain crossover: the model must author a set_terrain REFERENCE
+  // (never elevation data), carve the name + coordinates BEFORE the
+  // relief (the pad wraps them), and cut out last
+  recipe = structuredClone(EMPTY_RECIPE);
+  const payload = await parse(recipe, 'Make me a terrain map of the grand canyon with a plaque embedded in the left hand corner with the latitude and longitude vcarved along with the name "Grand Canyon"');
+  const out = applyActions(recipe, payload);
+  recipe = out.recipe;
+  console.log(`    model: "${payload.summary}" | applied: ${out.applied.join('; ')}${out.skipped.length ? ` | skipped: ${out.skipped.join('; ')}` : ''}${out.declined.length ? ` | declined: ${out.declined.map(d => d.what).join('; ')}` : ''}`);
+  const terr = (recipe.terrains ?? [])[0];
+  const relief = recipe.pipeline.find(o => o.strategy === 'terrain_relief');
+  const texts = recipe.pipeline.filter(o => /text/.test(o.strategy));
+  const reliefIdx = recipe.pipeline.findIndex(o => o.strategy === 'terrain_relief');
+  const textsFirst = texts.length >= 2 && recipe.pipeline.findIndex(o => /text/.test(o.strategy)) < reliefIdx;
+  const cutLast = /cutout/.test(recipe.pipeline[recipe.pipeline.length - 1]?.strategy ?? '');
+  // weave against a synthetic grid — the live test runs in Node, where the
+  // browser resolver doesn't; the reference is what's being tested
+  const cols = 200, rows = 150, elev = new Float32Array(cols * rows);
+  for (let i = 0; i < elev.length; i++) elev[i] = 1500 + 600 * Math.sin((i % cols) / 17) * Math.sin(Math.floor(i / cols) / 13);
+  const grids = terr ? { [terr.id]: { grid: { elev, cols, rows }, meta: { name: 'fixture' } } } : {};
+  const r = quiet(() => runRecipe(recipe, controlDefaults(recipe), FONT, grids));
+  if (terr?.query && relief?.params.terrain === terr.id && textsFirst && cutLast && r.ok) {
+    pass(`terrain plaque woven live: terrain "${terr.id}" (${terr.query}), ${texts.length} text ops before the relief, cutout last, verified`);
+  } else fail(`prompt 6: terrain=${JSON.stringify(terr)} relief→${relief?.params.terrain} textsFirst=${textsFirst} cutLast=${cutLast} verified=${r.ok} errors=${r.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LIVE INTENT CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

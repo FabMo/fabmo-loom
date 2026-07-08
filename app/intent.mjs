@@ -28,7 +28,7 @@ export const ACTION_TOOL = {
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'set_shape', 'remove_shape', 'add_operation', 'set_operation', 'remove_operation'] },
+            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'set_shape', 'remove_shape', 'set_terrain', 'remove_terrain', 'add_operation', 'set_operation', 'remove_operation'] },
             name: { type: 'string', description: 'set_name: the new recipe/app name' },
             thickness: { type: 'number', description: 'set_thickness: the stock material thickness, inches (through-cuts use it)' },
             control: {
@@ -55,6 +55,18 @@ export const ACTION_TOOL = {
                 params: { type: 'object', description: 'literal values, or {"ctrl":"controlId"} bindings' },
                 after: { type: 'string', description: 'optional op id to insert after (add_operation)' },
               },
+            },
+            terrain: {
+              type: 'object', description: 'set_terrain: a real-world terrain reference, resolved and fetched by the app in the user\'s browser (never by you). Give a place-name query (geocoded on first weave) OR an explicit lat/lng box for precise regions. Referenced by terrain_relief\'s terrain param.',
+              properties: {
+                id: { type: 'string', description: 'the name (letters/digits/_)' },
+                query: { type: 'string', description: 'place-name search, e.g. "Grand Canyon" — the app geocodes it and pins the resolved box into the recipe' },
+                south: { type: 'number', description: 'explicit region instead of query: south latitude, degrees' },
+                west: { type: 'number', description: 'explicit region: west longitude, degrees' },
+                north: { type: 'number', description: 'explicit region: north latitude, degrees' },
+                east: { type: 'number', description: 'explicit region: east longitude, degrees' },
+              },
+              required: ['id'],
             },
             derived: {
               type: 'object', description: 'set_derived: a named intermediate value, usable as {id} in any expression',
@@ -158,10 +170,11 @@ An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <i
   const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}
 GLYPH DROPDOWN: to let the user SWITCH the symbol, first add a "choice" control whose option VALUES are glyph ids (label them nicely) and bind glyph.of to it: add_control {id:"symbol", type:"choice", default:"men", options:[{value:"men",label:"Men"},{value:"women",label:"Women"},{value:"restroom",label:"All-gender"},{value:"accessible",label:"Accessible"}]} then set_shape {id:"fig", glyph:{of:{ctrl:"symbol"}, width:2}}. Offer the glyphs relevant to the sign. Create the control BEFORE the set_shape.
 SIGN LAYOUT — pipeline order is MACHINING order, NOT position: every text/glyph/braille element defaults to the SAME spot (centered on the content so far) and they OVERLAP unless you stack them. To stack a sign vertically, set place:"below" on each element after the top one — it drops that element a gap beneath everything machined so far, with NO coordinates to compute. Top-to-bottom = pipeline order. Pick the SPECIFIC glyph: a men's room sign is glyph "men" + text "Men"; women's is "women"; only an all-gender/family restroom uses "restroom". SIGN TEXT IS EDITABLE: bind the visible text AND the braille to text controls so the user can retype them — and when the braille says the same thing as the visible sign text, bind BOTH to the SAME control (ADA wants them identical, and one edit then updates both). A men's sign, in full: add_control {id:"label", type:"text", default:"Men"}; set_shape fig = glyph {of:"men", width:2}; pocket_shape shape:"fig" (the glyph, on top); vcarve_text text:{ctrl:"label"} place:"below" (drops under the glyph); braille_text text:{ctrl:"label"} place:"below" (same control — braille tracks the text); tag_cutout last (the plaque). Only reach for posX/posY when the user wants a specific off-center position.`;
+  const terrainSection = `\n\nTERRAIN (real-world elevation carving): set_terrain {id, query:"<place name>"} stores a REFERENCE — the app geocodes it and downloads public elevation tiles IN THE USER'S BROWSER on the next weave (you never fetch or invent elevation data), then pins the resolved lat/lng box and metadata into the recipe. Reference it from terrain_relief's terrain param. Once resolved, the terrain entry in CURRENT RECIPE carries meta (center lat/lng, elevation range, place name) — when the user wants coordinates CARVED on the piece, prefer those resolved numbers over memory; on the first turn (before any weave) your best-knowledge coordinates are fine and can be corrected after resolution. The classic terrain plaque, in full: add_control {id:"place", type:"text", default:"Grand Canyon"}; set_terrain {id:"land", query:"Grand Canyon"}; vcarve_text text:{ctrl:"place"} letterHeight 0.5 posX -3.2 posY -2.2 (the lower-left corner of a 10"-wide terrain); vcarve_text "36.06°N 112.14°W" letterHeight 0.3 place:"below"; terrain_relief terrain:"land" width 10 (reserves a flat pad around the text automatically); tag_cutout buffer 0.4 LAST. For a precise region ("the stretch of coast from X to Y") give set_terrain an explicit south/west/north/east box instead of a query.`;
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
 AVAILABLE STRATEGIES (the complete list — nothing else exists):
-${catalogDoc()}${assetSection}${glyphSection}
+${catalogDoc()}${assetSection}${glyphSection}${terrainSection}
 
 RULES:
 - Only these strategies and their listed params. A request needing anything else (raster images/photos, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
@@ -335,6 +348,41 @@ export function applyActions(recipe, payload) {
         if (bs.error) { skipped.push(`set_shape "${s.id}": ${bs.error}`); break; }
         next.shapes = finalShapes;
         applied.push(`shape "${s.id}" (${forms[0] === 'path' ? (s.open ? 'curve' : 'outline') : forms[0]})`);
+        break;
+      }
+      case 'set_terrain': {
+        const t = a.terrain;
+        if (!t?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(t.id)) {
+          skipped.push('set_terrain: needs an id (letters/digits/_)'); break;
+        }
+        const hasBox = [t.south, t.west, t.north, t.east].every((v) => Number.isFinite(v));
+        if (!t.query?.trim() && !hasBox) {
+          skipped.push(`set_terrain "${t.id}": give a place-name query or a full south/west/north/east box`); break;
+        }
+        if (hasBox && !(t.south < t.north && t.west < t.east && Math.abs(t.south) <= 85 && Math.abs(t.north) <= 85)) {
+          skipped.push(`set_terrain "${t.id}": box must have south < north (within ±85°) and west < east`); break;
+        }
+        const entry = {
+          id: t.id,
+          ...(t.query?.trim() ? { query: t.query.trim() } : {}),
+          ...(hasBox ? { bbox: { south: t.south, west: t.west, north: t.north, east: t.east } } : {}),
+        };
+        next.terrains ??= [];
+        const existing = next.terrains.findIndex((x) => x.id === t.id);
+        // an edited reference drops its pinned resolution — the app
+        // re-resolves and re-pins on the next weave
+        if (existing >= 0) next.terrains[existing] = entry;
+        else next.terrains.push(entry);
+        applied.push(`terrain "${t.id}" (${entry.query ?? `${t.south}..${t.north}, ${t.west}..${t.east}`})`);
+        break;
+      }
+      case 'remove_terrain': {
+        next.terrains ??= [];
+        const used = next.pipeline.some((o) => o.params && o.params.terrain === a.id);
+        if (used) { skipped.push(`remove_terrain: "${a.id}" is still referenced by an operation`); break; }
+        const before = next.terrains.length;
+        next.terrains = next.terrains.filter((x) => x.id !== a.id);
+        before === next.terrains.length ? skipped.push(`remove_terrain: no "${a.id}"`) : applied.push(`removed terrain "${a.id}"`);
         break;
       }
       case 'remove_shape': {

@@ -1007,6 +1007,106 @@ export const CATALOG = {
     },
   },
 
+  terrain_relief: {
+    doc: 'Carve a REAL-WORLD TERRAIN RELIEF — mountains, canyons, coastlines — from public elevation data (a terrains-section reference; see the TERRAIN section). A ballnose rasters the landscape into the board: highest point = stock top, lowest = "depth" down; the rectangle is centered ON THE ORIGIN, "width" inches wide, height following the region\'s true aspect. THE PLAQUE TRICK: any content machined BEFORE this op (a v-carved name, coordinates) gets a flat rounded-rect PAD reserved around it out to padBuffer — the terrain flows around the pad and the content sits on an uncut plateau at stock top, like a surveyor\'s marker. So the order is: v-carve the plaque text first (posX/posY somewhere INSIDE the terrain rectangle — e.g. a corner: x ≈ -width/2 + 2, y ≈ -height/2 + 1), then terrain_relief, then a cutout LAST to free the board. The pad must land fully inside the terrain rectangle (checked). Without prior content there is no pad — the terrain fills the whole rectangle. The motion is checked against the declared 3D surface. Requires a BALLNOSE bit. NOT for texture (use texture_field) or single shapes (dish/pocket): this is for real places.',
+    params: {
+      terrain: { type: 'string', doc: 'the id of a terrains-section entry (set_terrain) — the region to carve' },
+      width: { type: 'number', default: 10, min: 2, max: 48, doc: 'physical width of the carved rectangle, inches; height follows the region\'s aspect', bindable: true },
+      depth: { type: 'number', default: 0.4, min: 0.05, max: 2, doc: 'relief depth in inches — the lowest elevation carves this deep, the highest stays at stock top; must be less than the stock thickness', bindable: true },
+      padBuffer: { type: 'number', default: 0.3, min: 0.1, doc: 'how far the flat plaque pad extends past the prior content, inches', bindable: true },
+      toolDiameter: { type: 'number', default: 0.125, doc: 'BALLNOSE bit diameter, inches — this strategy requires a ballnose' },
+      stepoverPct: { type: 'number', default: 20, min: 5, max: 45, doc: 'stepover as a percentage of the bit diameter; smaller = smoother terrain, longer cut' },
+      feedRate: { type: 'number', default: 100, doc: 'inches per minute' },
+    },
+    run(p, ctx) {
+      const t = ctx.terrains?.[p.terrain];
+      if (!t) {
+        const declared = (ctx.terrainSpecs ?? []).some((s) => s.id === p.terrain);
+        if (declared) return { error: `terrain "${p.terrain}" is not fetched yet — the app downloads the elevation data in your browser when it weaves; if this persists, check the connection` };
+        const known = (ctx.terrainSpecs ?? []).map((s) => s.id);
+        return { error: `unknown terrain "${p.terrain}" — ${known.length ? `defined terrains: ${known.join(', ')}` : 'add one with set_terrain first'}` };
+      }
+      const { elev, cols: dCols, rows: dRows } = t.grid;
+      if (!elev?.length || dCols < 2 || dRows < 2) return { error: `terrain "${p.terrain}" has no usable elevation grid` };
+      if (p.depth >= ctx.stock.thickness) return { error: `relief depth ${p.depth}" is not less than the ${ctx.stock.thickness}" stock — reduce depth or set a thicker stock` };
+      const R = p.toolDiameter / 2;
+      const warnings = [...(t.meta?.warnings ?? [])];
+
+      // the carved rectangle, centered on the origin; height from the DEM
+      // grid's aspect (web-mercator is conformal, so pixel aspect ≈ ground
+      // aspect over carving-scale extents)
+      const W = p.width, H = p.width * ((dRows - 1) / (dCols - 1));
+      const x0 = -W / 2, y0 = -H / 2, x1 = W / 2, y1 = H / 2;
+
+      // elevation range → z: highest point at stock top, lowest at -depth
+      let eMin = Infinity, eMax = -Infinity;
+      for (let i = 0; i < elev.length; i++) { const e = elev[i]; if (e < eMin) eMin = e; if (e > eMax) eMax = e; }
+      const eSpan = Math.max(1e-6, eMax - eMin);
+
+      // the plaque pad: a flat rounded-rect plateau reserved around the
+      // content machined so far (the v-carved name/coordinates). Mask hole
+      // keeps the tool center off it; heightmap 0 inside it makes the ball
+      // feather the pad wall down to the terrain.
+      const guard = 0.03;
+      const b = ctx.contentBBox;
+      let padRing = null;
+      if (b) {
+        const px0 = b.minX - p.padBuffer, py0 = b.minY - p.padBuffer, px1 = b.maxX + p.padBuffer, py1 = b.maxY + p.padBuffer;
+        if (px0 < x0 + guard || py0 < y0 + guard || px1 > x1 - guard || py1 > y1 - guard) {
+          return { error: `the plaque pad (content + ${p.padBuffer}" buffer, ${(px1 - px0).toFixed(1)}"×${(py1 - py0).toFixed(1)}") pokes outside the ${W.toFixed(1)}"×${H.toFixed(1)}" terrain — move the text (posX/posY), shrink it, or widen the terrain` };
+        }
+        const cornerR = Math.min(0.4, p.padBuffer * 1.2);
+        padRing = roundedRectRing(px0, py0, px1, py1, cornerR);
+      }
+
+      const rectRing = roundedRectRing(x0 + guard, y0 + guard, x1 - guard, y1 - guard, 0.02);
+      const mask = { outer: rectRing, holes: padRing ? [padRing] : [] };
+
+      const ext = R + 0.05;
+      const grid = textureGrid(x0, y0, x1, y1, ext);
+      const { cols, rows, cell, ox, oy } = grid;
+      const insidePad = padRing ? insideGridEvenOdd([padRing], grid) : null;
+      const heights = new Float64Array(cols * rows);
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const i = row * cols + col;
+          if (insidePad && insidePad[i]) continue;   // the pad: uncut stock top
+          // bilinear sample of the DEM at this stock position (clamped —
+          // the ext apron reuses the edge row/col)
+          const fx = Math.min(Math.max(((ox + col * cell) - x0) / W, 0), 1) * (dCols - 1);
+          const fy = Math.min(Math.max(((oy + row * cell) - y0) / H, 0), 1) * (dRows - 1);
+          const c0 = Math.min(dCols - 2, Math.floor(fx)), r0 = Math.min(dRows - 2, Math.floor(fy)), tx = fx - c0, ty = fy - r0;
+          const j = r0 * dCols + c0;
+          const e = elev[j] + (elev[j + 1] - elev[j]) * tx + (elev[j + dCols] - elev[j]) * ty
+            + (elev[j] - elev[j + 1] - elev[j + dCols] + elev[j + dCols + 1]) * tx * ty;
+          heights[i] = -(1 - (e - eMin) / eSpan) * p.depth;
+        }
+      }
+      const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
+
+      const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
+        stepoverPct: p.stepoverPct, depthPerPass: 0.25, safeZ: ctx.safeZ,
+        mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
+      });
+      if (!g.moves.length) {
+        return { error: `terrain produced no cutting moves — ${g.warnings[0] ?? 'the relief may be flatter than the cut threshold'}` };
+      }
+      // the terrain IS content: a following cutout wraps the whole rectangle
+      const outline = roundedRectRing(x0, y0, x1, y1, 0.02);
+      noteContent(ctx, [outline]);
+      return {
+        tool: { name: `${p.toolDiameter}" ballnose`, diameter: p.toolDiameter, kind: 'ball' },
+        cutter: { type: 'ball', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves: g.moves,
+        warnings: [...warnings, ...g.warnings],
+        target: g.target,
+        bbox: { minX: x0, minY: y0, maxX: x1, maxY: y1 },
+        previewRegions: [{ outer: rectRing, holes: padRing ? [padRing] : [] }],
+      };
+    },
+  },
+
   bore_hole: {
     doc: 'Drill round HOLES — a hang hole for a tag, mounting/screw holes, dowel holes, or a whole PATTERN of holes. Peck-plunges an endmill (plus one orbit per depth pass when the hole is larger than the bit) so each hole comes out the designed size; through the stock by default. Holes must be between 1× and 3× the bit diameter (a wider recess is pocket_shape\'s job). THREE ways to place: (1) position — relative to the content machined so far ("above" is the classic hang hole; "corners" places FOUR around it); (2) along — a shape id from the shapes section: "count" holes spaced EVENLY BY ARC LENGTH along it (an open curve runs end to end, endMargin inset; a closed shape\'s outline goes evenly around — bolt circles). "Five holes along the arch centerline" is a one-line open curve shape (the mid-radius arc) plus along: that id, count: 5 — the machine does the spacing math, and the pattern rides the same sliders as the shape; (3) at — EXPLICIT centers as semicolon-separated "x y" pairs in the working frame, {arithmetic} allowed, for irregular layouts. Holes must land INSIDE the part a later cutout frees (its fit check refuses strays).',
     params: {

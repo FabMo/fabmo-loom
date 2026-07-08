@@ -44,6 +44,14 @@ export const EMPTY_RECIPE = {
   // SVG assets are consumed via the shapes section ({ id, asset: {of,
   // width?, height?} }); raster images await the image strategies.
   assets: [],
+  // terrain FETCH SPECS — references, not data: { id, query, bbox?:
+  // {south, west, north, east}, zoom?, meta? }. The model authors the
+  // query; the app resolves it in the BROWSER (geocode → public DEM
+  // tiles) and pins the resolved bbox/zoom/meta back into the entry so
+  // the document names an exact region from then on. The elevation grid
+  // itself never enters the recipe — it is re-fetched (and cached) on
+  // the user's own connection and handed to runRecipe as `terrains`.
+  terrains: [],
 };
 
 // old saved recipes load forever: fill in the fields their era lacked
@@ -52,6 +60,7 @@ export function migrateRecipe(recipe) {
   recipe.derived ??= [];
   recipe.shapes ??= [];
   recipe.assets ??= [];
+  recipe.terrains ??= [];
   return recipe;
 }
 
@@ -375,7 +384,7 @@ function resolveParams(entry, params, controlValues, vars, errors, opId) {
  *                        see fonts.mjs); strategies look up by param
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
-export function runRecipe(recipe, controlValues, fonts) {
+export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
   const errors = [];
   const stock = recipe.stock;
   if (!recipe.pipeline.length) {
@@ -425,6 +434,11 @@ export function runRecipe(recipe, controlValues, fonts) {
   const ctx = {
     fonts,
     vars,
+    // resolved elevation grids keyed by terrain id ({ grid: {elev, cols,
+    // rows}, meta }); terrainSpecs = the recipe's declared references, so
+    // an entry can tell "unknown id" from "declared but not fetched yet"
+    terrains,
+    terrainSpecs: recipe.terrains ?? [],
     shapes: bs.shapes,
     stock: { thickness: stock.thickness },   // W×H not known until content runs
     safeZ: 0.5,
