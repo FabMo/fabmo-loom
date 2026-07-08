@@ -33,9 +33,9 @@ const RECIPE = {
   derived: [], shapes: [], assets: [],
   terrains: [{ id: 'land', query: 'Grand Canyon' }],
   pipeline: [
-    { id: 'name', strategy: 'vcarve_text', params: { text: { ctrl: 'place' }, letterHeight: 0.35, posX: -3.0, posY: -2.0 } },
+    { id: 'name', strategy: 'vcarve_text', params: { text: { ctrl: 'place' }, letterHeight: 0.35 } },
     { id: 'coords', strategy: 'vcarve_text', params: { text: '36.06N 112.14W', letterHeight: 0.25, place: 'below', gap: 0.15 } },
-    { id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land', width: 10, depth: 0.35 } },
+    { id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land', width: 10, depth: 0.35, plaque: 'sw' } },
     { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } },
   ],
 };

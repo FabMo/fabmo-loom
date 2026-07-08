@@ -1008,11 +1008,12 @@ export const CATALOG = {
   },
 
   terrain_relief: {
-    doc: 'Carve a REAL-WORLD TERRAIN RELIEF — mountains, canyons, coastlines — from public elevation data (a terrains-section reference; see the TERRAIN section). A ballnose rasters the landscape into the board: highest point = stock top, lowest = "depth" down; the rectangle is centered ON THE ORIGIN, "width" inches wide, height following the region\'s true aspect. THE PLAQUE TRICK: any content machined BEFORE this op (a v-carved name, coordinates) gets a flat rounded-rect PAD reserved around it out to padBuffer — the terrain flows around the pad and the content sits on an uncut plateau at stock top, like a surveyor\'s marker. So the order is: v-carve the plaque text first (posX/posY somewhere INSIDE the terrain rectangle — e.g. a corner: x ≈ -width/2 + 2, y ≈ -height/2 + 1), then terrain_relief, then a cutout LAST to free the board. The pad must land fully inside the terrain rectangle (checked). Without prior content there is no pad — the terrain fills the whole rectangle. The motion is checked against the declared 3D surface. Requires a BALLNOSE bit. NOT for texture (use texture_field) or single shapes (dish/pocket): this is for real places.',
+    doc: 'Carve a REAL-WORLD TERRAIN RELIEF — mountains, canyons, coastlines — from public elevation data (a terrains-section reference; see the TERRAIN section). A ballnose rasters the landscape into the board: highest point = stock top, lowest = "depth" down; "width" inches wide, height following the region\'s true aspect. THE PLAQUE TRICK: any content machined BEFORE this op (a v-carved name, coordinates) gets a flat rounded-rect PAD reserved around it out to padBuffer — the terrain flows around the pad and the content sits on an uncut plateau at stock top, like a surveyor\'s marker. NO COORDINATES NEEDED: leave the text ops at their default position (stack lines with place:"below") and say WHERE with the "plaque" param — "sw" puts the pad in the lower-left corner of the terrain, "center" in the middle; the terrain rectangle positions itself around the content. Never compute posX/posY for plaque text — you cannot know rendered text widths. So the order is: v-carve the plaque text first (no coordinates), then terrain_relief with plaque, then a cutout LAST to free the board. Without prior content there is no pad — the terrain fills the whole rectangle. The motion is checked against the declared 3D surface. Requires a BALLNOSE bit. NOT for texture (use texture_field) or single shapes (dish/pocket): this is for real places.',
     params: {
       terrain: { type: 'string', doc: 'the id of a terrains-section entry (set_terrain) — the region to carve' },
       width: { type: 'number', default: 10, min: 2, max: 48, doc: 'physical width of the carved rectangle, inches; height follows the region\'s aspect', bindable: true },
       depth: { type: 'number', default: 0.4, min: 0.05, max: 2, doc: 'relief depth in inches — the lowest elevation carves this deep, the highest stays at stock top; must be less than the stock thickness', bindable: true },
+      plaque: { type: 'string', default: 'center', doc: 'where the prior content\'s pad sits IN the terrain: "sw" (lower-left), "nw", "se", "ne", or "center" — the rectangle places itself around the content, no coordinates' },
       padBuffer: { type: 'number', default: 0.3, min: 0.1, doc: 'how far the flat plaque pad extends past the prior content, inches', bindable: true },
       toolDiameter: { type: 'number', default: 0.125, doc: 'BALLNOSE bit diameter, inches — this strategy requires a ballnose' },
       stepoverPct: { type: 'number', default: 20, min: 5, max: 45, doc: 'stepover as a percentage of the bit diameter; smaller = smoother terrain, longer cut' },
@@ -1032,11 +1033,32 @@ export const CATALOG = {
       const R = p.toolDiameter / 2;
       const warnings = [...(t.meta?.warnings ?? [])];
 
-      // the carved rectangle, centered on the origin; height from the DEM
-      // grid's aspect (web-mercator is conformal, so pixel aspect ≈ ground
-      // aspect over carving-scale extents)
+      // the carved rectangle; height from the DEM grid's aspect
+      // (web-mercator is conformal, so pixel aspect ≈ ground aspect over
+      // carving-scale extents). The rectangle POSITIONS ITSELF around the
+      // content per `plaque` — the model never computes corner coordinates
+      // (it cannot know rendered text widths; the sign-stacking lesson).
+      const PLAQUE_SPOTS = ['center', 'sw', 'nw', 'se', 'ne'];
+      if (!PLAQUE_SPOTS.includes(p.plaque)) {
+        return { error: `unknown plaque spot "${p.plaque}" — use ${PLAQUE_SPOTS.join(', ')}` };
+      }
       const W = p.width, H = p.width * ((dRows - 1) / (dCols - 1));
-      const x0 = -W / 2, y0 = -H / 2, x1 = W / 2, y1 = H / 2;
+      const b = ctx.contentBBox;
+      let x0, y0;
+      if (!b) {
+        x0 = -W / 2; y0 = -H / 2;
+      } else {
+        const inset = 0.35;   // the pad sits this far in from the rectangle edge
+        const padX0 = b.minX - p.padBuffer, padY0 = b.minY - p.padBuffer;
+        const padX1 = b.maxX + p.padBuffer, padY1 = b.maxY + p.padBuffer;
+        x0 = p.plaque === 'sw' || p.plaque === 'nw' ? padX0 - inset
+          : p.plaque === 'se' || p.plaque === 'ne' ? padX1 + inset - W
+          : (b.minX + b.maxX) / 2 - W / 2;
+        y0 = p.plaque === 'sw' || p.plaque === 'se' ? padY0 - inset
+          : p.plaque === 'nw' || p.plaque === 'ne' ? padY1 + inset - H
+          : (b.minY + b.maxY) / 2 - H / 2;
+      }
+      const x1 = x0 + W, y1 = y0 + H;
 
       // elevation range → z: highest point at stock top, lowest at -depth
       let eMin = Infinity, eMax = -Infinity;
@@ -1048,12 +1070,11 @@ export const CATALOG = {
       // keeps the tool center off it; heightmap 0 inside it makes the ball
       // feather the pad wall down to the terrain.
       const guard = 0.03;
-      const b = ctx.contentBBox;
       let padRing = null;
       if (b) {
         const px0 = b.minX - p.padBuffer, py0 = b.minY - p.padBuffer, px1 = b.maxX + p.padBuffer, py1 = b.maxY + p.padBuffer;
         if (px0 < x0 + guard || py0 < y0 + guard || px1 > x1 - guard || py1 > y1 - guard) {
-          return { error: `the plaque pad (content + ${p.padBuffer}" buffer, ${(px1 - px0).toFixed(1)}"×${(py1 - py0).toFixed(1)}") pokes outside the ${W.toFixed(1)}"×${H.toFixed(1)}" terrain — move the text (posX/posY), shrink it, or widen the terrain` };
+          return { error: `the plaque pad (content + ${p.padBuffer}" buffer, ${(px1 - px0).toFixed(1)}"×${(py1 - py0).toFixed(1)}") does not fit the ${W.toFixed(1)}"×${H.toFixed(1)}" terrain — widen the terrain or shrink the text` };
         }
         const cornerR = Math.min(0.4, p.padBuffer * 1.2);
         padRing = roundedRectRing(px0, py0, px1, py1, cornerR);

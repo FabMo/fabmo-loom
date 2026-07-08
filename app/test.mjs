@@ -2347,12 +2347,13 @@ console.log('--- texture_text: letters rendered as texture, face stays smooth --
 console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
 {
   const base = () => ({ ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.75 }, terrains: [{ id: 'gc', query: 'Grand Canyon' }] });
-  // the full job from the prompt: name + coordinates v-carved in the lower-left,
-  // terrain flowing around their pad, cutout last
+  // the full job from the prompt: name + coordinates v-carved with ZERO
+  // coordinates (default position + place:"below"), the terrain rectangle
+  // positioning itself so their pad sits in the lower-left, cutout last
   const plaque = () => ({ ...base(), pipeline: [
-    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -3.0, posY: -2.0 } },
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35 } },
     { id: 'coords', strategy: 'vcarve_text', params: { text: '36.06N 112.14W', letterHeight: 0.25, place: 'below', gap: 0.15 } },
-    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 10, depth: 0.35 } },
+    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 10, depth: 0.35, plaque: 'sw' } },
     { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } },
   ] });
 
@@ -2389,9 +2390,16 @@ console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
         if (surfaceAt(sim, x, y) < -0.25) deepCells++;
       }
     }
-    if (plateauBad === 0 && deepCells > 100) {
-      pass(`plaque composition verified: ${tgt.samples} samples 0 gouges; pad plateau uncut at ${padPts.length} probes, canyon reaches < -0.25" in ${deepCells} probes (letters at ${letterZ.toFixed(3)}")`);
-    } else fail(`composition geometry off: plateauBad=${plateauBad} deepCells=${deepCells}`);
+    // the semantic corner: the pad ring must hug the rectangle's SW corner
+    // (within the fixed edge inset + guard + a little slack)
+    const relief = r.preview.built.find((b2) => b2.op.id === 'land').r;
+    const rects = relief.previewRegions[0];
+    const bb = (ring) => ring.reduce((a, q) => ({ minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y) }), { minX: Infinity, minY: Infinity });
+    const rectBB = bb(rects.outer), padBB = bb(rects.holes[0]);
+    const swOk = padBB.minX - rectBB.minX < 0.5 && padBB.minY - rectBB.minY < 0.5;
+    if (plateauBad === 0 && deepCells > 100 && swOk) {
+      pass(`plaque composition verified, zero coordinates: pad hugs the SW corner (${(padBB.minX - rectBB.minX).toFixed(2)}"/${(padBB.minY - rectBB.minY).toFixed(2)}" in), plateau uncut at ${padPts.length} probes, canyon < -0.25" in ${deepCells} probes (letters at ${letterZ.toFixed(3)}")`);
+    } else fail(`composition geometry off: plateauBad=${plateauBad} deepCells=${deepCells} swOk=${swOk}`);
   } else fail(`plaque composition failed: ok=${r.ok} gouges=${tgt?.gouges} maskViol=${tgt?.maskViolations} err=${r.errors?.join(' | ')}`);
 
   // terrain standing alone: whole rectangle, no pad
@@ -2409,12 +2417,20 @@ console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
   if (!unfetched.ok && unfetched.errors.some((e) => /not fetched yet/.test(e))) pass('declared-but-unfetched terrain: honest "not fetched yet" state');
   else fail(`unfetched terrain not handled: ${JSON.stringify(unfetched.errors)}`);
 
+  // the rectangle places itself around the content, so the only unfittable
+  // case left is text genuinely bigger than the terrain
   const poking = run({ ...base(), pipeline: [
-    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -4.8, posY: -2.0 } },
-    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 10 } },
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 1.4 } },
+    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', width: 6, plaque: 'sw' } },
   ] });
-  if (!poking.ok && poking.errors.some((e) => /pokes outside/.test(e))) pass('pad poking outside the terrain rectangle: clean error with the fix');
-  else fail(`poking pad not handled: ${JSON.stringify(poking.errors)}`);
+  if (!poking.ok && poking.errors.some((e) => /does not fit/.test(e))) pass('pad bigger than the terrain: clean error with the fix');
+  else fail(`oversized pad not handled: ${JSON.stringify(poking.errors)}`);
+  const badSpot = run({ ...base(), pipeline: [
+    { id: 'name', strategy: 'vcarve_text', params: { text: 'Hi', letterHeight: 0.5 } },
+    { id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', plaque: 'left' } },
+  ] });
+  if (!badSpot.ok && badSpot.errors.some((e) => /unknown plaque spot/.test(e))) pass('unknown plaque spot named with the choices: clean error');
+  else fail(`bad plaque spot not handled: ${JSON.stringify(badSpot.errors)}`);
 
   const tooDeep = run({ ...base(), pipeline: [{ id: 'land', strategy: 'terrain_relief', params: { terrain: 'gc', depth: 0.8 } }] });
   if (!tooDeep.ok && tooDeep.errors.some((e) => /not less than/.test(e))) pass('relief deeper than stock: clean error');
@@ -2423,8 +2439,8 @@ console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
   // through the intent layer: the model authors the reference, never the data
   const res = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'grand canyon plaque', actions: [
     { kind: 'set_terrain', terrain: { id: 'land', query: 'Grand Canyon' } },
-    { kind: 'add_operation', operation: { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35, posX: -3.0, posY: -2.0 } } },
-    { kind: 'add_operation', operation: { id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land', width: 10, depth: 0.35 } } },
+    { kind: 'add_operation', operation: { id: 'name', strategy: 'vcarve_text', params: { text: 'Grand Canyon', letterHeight: 0.35 } } },
+    { kind: 'add_operation', operation: { id: 'relief', strategy: 'terrain_relief', params: { terrain: 'land', width: 10, depth: 0.35, plaque: 'sw' } } },
     { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
   ], declined: [] });
   if (res.applied.length === 4 && !res.skipped.length) {
