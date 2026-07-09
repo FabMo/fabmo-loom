@@ -99,7 +99,7 @@
   <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
   <div>
     <h1>FabMo - Loom</h1>
-    <div class="sub">A ShopBot Project</div>
+    <div class="sub">A ShopBot Project · <span id="app-version">v0.55</span></div>
   </div>
   <div class="spacer"></div>
   <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
@@ -112,12 +112,11 @@
       <button id="generate">Generate</button>
       <button id="reset" class="ghost small">Start over</button>
     </div>
-    <div class="chips" id="chips" hidden>
-      <button data-p="an app to engrave names">an app to engrave names</button>
-      <button data-p="now add a cutout around the names, about a quarter inch of buffer, rounded corners">add a cutout around the names</button>
-      <button data-p="add holding tabs to the cutout">add tabs to the cutout</button>
-      <button data-p="make it outline the letters instead of v-carving them">outline style instead</button>
-    </div>
+    <!-- Suggested prompts are teaching aids, not shortcuts: full sentences
+         with ___ blanks, filled by renderChips() from the recipe state.
+         Clicking never submits — it drops the sentence in the box with the
+         first blank selected, so the last step of every chip is typing. -->
+    <div class="chips" id="chips"></div>
     <div id="history"></div>
 
     <details id="keyBox">

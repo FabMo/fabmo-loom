@@ -90,6 +90,7 @@ function renderControls() {
     host.append(wrap);
   }
   renderAssets();
+  renderChips();
   // the debug view elides asset payloads the same way the LLM prompt does
   $('recipeJson').textContent = JSON.stringify(promptRecipeView(recipe), null, 2);
 }
@@ -469,6 +470,11 @@ function addTurn(html, isErr = false) {
 async function generate() {
   const utterance = $('prompt').value.trim();
   if (!utterance || busy) return;
+  if (utterance.includes(BLANK)) {
+    selectBlank();
+    addTurn('Fill in the blanks (___) first — Tab jumps to the next one.', true);
+    return;
+  }
   const key = localStorage.getItem('loom:apiKey');
   if (!key) {
     $('keyBox').open = true;
@@ -542,6 +548,63 @@ function pickExisting(values, rec) {
 }
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
+// ------------------------------------------------------------------ chips
+// Suggested prompts are teaching aids: every chip is the FULL sentence it
+// puts in the box (what you see is what the model gets), with ___ blanks
+// the user completes — clicking never submits, so the last step of every
+// chip is typing. Empty recipe → one chip per kind of thing you can SAY
+// (create / style / material constraint / ask for a slider); once the
+// pipeline has ops → refinements aimed at THIS recipe, picked rule-based
+// from its strategies. No LLM call is involved in suggesting.
+
+const BLANK = '___';
+
+const STARTER_CHIPS = [
+  `make me a sign that says ${BLANK}, about ${BLANK} inches wide`,
+  `a round coaster with the initials ${BLANK} v-carved in the middle`,
+  `a nameplate for ${BLANK} with a slider for the letter height`,
+  `engrave ${BLANK} in outlined letters, sized to fit the ${BLANK}-inch board I have`,
+];
+
+const TEXT_STRATEGIES = new Set(['vcarve_text', 'outline_text', 'pocket_text', 'texture_text']);
+const CUTOUT_STRATEGIES = new Set(['disc_cutout', 'shape_cutout', 'tag_cutout']);
+const TEXTURE_STRATEGIES = new Set(['texture_field', 'texture_text']);
+
+function refinementChips(rec) {
+  const strategies = new Set((rec.pipeline ?? []).map((op) => op.strategy));
+  const any = (set) => [...strategies].some((s) => set.has(s));
+  const chips = [];
+  if (strategies.has('vcarve_text')) chips.push('make the letters outlined instead of v-carved');
+  else if (strategies.has('outline_text')) chips.push('make the letters v-carved instead of outlined');
+  if (!any(CUTOUT_STRATEGIES)) chips.push(`cut it out with a ${BLANK} inch border and holding tabs`);
+  if (!any(TEXTURE_STRATEGIES) && any(TEXT_STRATEGIES)) chips.push(`add a hammered texture around the ${BLANK}`);
+  chips.push(`let me adjust the ${BLANK} with a slider`);
+  chips.push(`move the ${BLANK} toward the ${BLANK}`);
+  return chips.slice(0, 4);
+}
+
+function renderChips() {
+  const host = $('chips');
+  host.innerHTML = '';
+  const list = (recipe.pipeline ?? []).length ? refinementChips(recipe) : STARTER_CHIPS;
+  for (const text of list) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = text;
+    host.append(b);
+  }
+}
+
+// Select the next ___ in the prompt box (from `from`), so typing replaces it.
+function selectBlank(from = 0) {
+  const box = $('prompt');
+  const i = box.value.indexOf(BLANK, from);
+  if (i === -1) return false;
+  box.focus();
+  box.setSelectionRange(i, i + BLANK.length);
+  return true;
+}
+
 // ------------------------------------------------------------------ files
 
 function download(name, content, type = 'text/plain') {
@@ -558,8 +621,21 @@ const slug = (t) => t.trim().replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'loo
 $('generate').addEventListener('click', generate);
 $('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) generate(); });
 $('chips').addEventListener('click', (e) => {
-  const p = e.target?.dataset?.p;
-  if (p) { $('prompt').value = p; generate(); }
+  const b = e.target.closest('button');
+  if (!b) return;
+  $('prompt').value = b.textContent;
+  if (!selectBlank()) {
+    const box = $('prompt');
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+});
+// Tab hops to the next blank while any remain; otherwise Tab keeps its default
+$('prompt').addEventListener('keydown', (e) => {
+  if (e.key === 'Tab' && !e.shiftKey && $('prompt').value.includes(BLANK)) {
+    const from = $('prompt').selectionEnd ?? 0;
+    if (selectBlank(from) || selectBlank(0)) e.preventDefault();
+  }
 });
 $('btn3d').addEventListener('click', () => { viewMode = '3d'; localStorage.setItem('loom:view', '3d'); refreshPreview(); });
 $('btn2d').addEventListener('click', () => { viewMode = '2d'; localStorage.setItem('loom:view', '2d'); refreshPreview(); });
