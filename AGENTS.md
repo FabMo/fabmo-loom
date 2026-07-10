@@ -173,7 +173,19 @@ possible macro-strategy. The contract a guest must satisfy:
    3D view blending every panel between its spot in the machined board
    and its assembled pose (app/assembly3d.mjs). Purely visual — the
    verifier neither sees nor trusts it.
-5. **Optionally, a `handoff` hook** — round-tripping out of Loom:
+5. **Optionally, published `frames`** — native verbs mounted on guest
+   geometry. `run()` may return `frames: [{ id, cx, cy, rot, w, h }]`
+   (e.g. each furniture panel's placed body: center, rotation in
+   degrees, panel-local dims). Any LATER pipeline op may carry
+   `frame: "<id>"` at the op level: the runtime runs it in a clean
+   frame-local context (content centers on the frame; place/posX/posY
+   compose frame-locally; consecutive framed ops on the same frame see
+   each other as content), then rotates + translates the whole result —
+   moves, target rings, previews — into place. Rings-based results only;
+   heightmap targets are refused with a clear error. The gate is
+   unchanged: framed content that strays across the guest's own cuts is
+   a footprint overlap and the job is refused.
+6. **Optionally, a `handoff` hook** — round-tripping out of Loom:
    `handoff: { label, carry(params, { evalNumber, vars, recipeName }) }`
    on the entry. `carry` receives RAW params (control bindings arrive as
    `{ ctrl: id }` — resolve via `vars`; expression strings via

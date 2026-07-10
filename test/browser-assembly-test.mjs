@@ -49,6 +49,11 @@ const RECIPE = {
       },
       tabs: true,
     },
+  }, {
+    // engraving on a panel: rides the seat through nesting + the verify gate
+    id: 'engrave', strategy: 'vcarve_text',
+    params: { text: 'EMMA', letterHeight: 2.5, font: 'serif' },
+    frame: 'seat',
   }],
 };
 

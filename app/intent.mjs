@@ -54,6 +54,7 @@ export const ACTION_TOOL = {
                 strategy: { type: 'string' },
                 params: { type: 'object', description: 'literal values, or {"ctrl":"controlId"} bindings' },
                 after: { type: 'string', description: 'optional op id to insert after (add_operation)' },
+                frame: { type: 'string', description: 'mount this operation INSIDE a frame published by an EARLIER operation (a furniture panel id like "seat"): the content is authored panel-local — it centers on that panel\'s face, place/posX/posY compose within the panel — and rides the panel wherever it nests, at any rotation. Omit for ordinary shared-frame operations.' },
               },
             },
             terrain: {
@@ -189,6 +190,7 @@ RULES:
 - Content INSIDE a shaped outline ("engrave a name and cut it out as a heart") is a FIT, not a guess: author the base outline at any convenient size CENTERED ON THE ORIGIN, then set_shape tag = fit {of: base, margin: m} and cut/pocket THAT. fit scales the base uniformly (about the origin) until everything machined before the referencing op clears its edge by margin — so a longer name simply makes a bigger heart, exactly like tag_cutout's buffer. Bind margin to a control; put the content operations FIRST in the pipeline. Never size such a shape with a fixed width — a width the user's text has outgrown is a fit conflict.
 - Give every authored shape the controls a user would naturally grab, and pick the shape's OWN parameters over generic stretch: an arch gets radius and band thickness, a rounded shape gets its corner radius, a star gets inner/outer radius. Organic outlines (hearts, shields, leaves) distort badly under independent width/height — give them ONE uniform size control, or better, fit + a margin control when content sits inside. Independent width/height stretch is right only for boxy shapes (plaques, frames, rectangles).
 - A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: whole-rim = a band-derived shape pocketed with edgeTreatment true; a PARTIAL edge (one side only) = a pocket_shape "custom" band you author hugging that edge — the recipe is in pocket_shape's doc.
+- Content ON A PART of a larger build ("carve EMMA in the bench seat") is NOT a decline when an operation publishes FRAMES (furniture_design publishes each panel id): put the content op AFTER the publisher with "frame": "<panel id>" on the OPERATION (not in params). Framed content authors panel-local — it centers on the panel face; place:"below"/posX/posY compose within the panel — and follows the panel wherever it nests. Surface textures can't ride a frame yet; text engraving and outlines can.
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - If the recipe is empty and the user asks for an app, also set_name it.
@@ -406,6 +408,7 @@ export function applyActions(recipe, payload) {
         const vp = validParams(o.strategy, o.params);
         if (vp.bad) { skipped.push(`add_operation "${o.id}": ${vp.bad}`); break; }
         const op = { id: o.id, strategy: o.strategy, params: vp.out };
+        if (o.frame) op.frame = String(o.frame);
         const idx = o.after ? next.pipeline.findIndex(x => x.id === o.after) : -1;
         idx >= 0 ? next.pipeline.splice(idx + 1, 0, op) : next.pipeline.push(op);
         applied.push(`operation "${o.id}" (${o.strategy})`);
@@ -429,6 +432,9 @@ export function applyActions(recipe, payload) {
         const vp = validParams(op.strategy, a.operation?.params);
         if (vp.bad) { skipped.push(`set_operation "${op.id}": ${vp.bad}`); break; }
         op.params = { ...op.params, ...vp.out };
+        if (a.operation?.frame !== undefined) {
+          a.operation.frame ? op.frame = String(a.operation.frame) : delete op.frame;
+        }
         applied.push(`operation "${op.id}" updated`);
         break;
       }

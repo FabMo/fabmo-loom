@@ -1955,6 +1955,9 @@ console.log('--- guest mount: register, weave, verify ---');
               world: { origin: [0, 0, sz], u: [1, 0, 0], v: [0, 0, -1] },
             }],
           },
+          // frames contract: a clear face beside the pads, TURNED 90°,
+          // for native verbs to mount into (see the framed-vcarve checks)
+          frames: [{ id: 'face', cx: 2 * sz + 2.5, cy: sz / 2, rot: 90, w: 4, h: 4 }],
         };
       },
     },
@@ -1999,6 +2002,50 @@ console.log('--- guest mount: register, weave, verify ---');
       pass(`guest expression param rides the slider: stock ${r.preview.stock.w}" → ${r3.preview.stock.w}" at size 3`);
     } else fail(`guest slider response wrong: ${w3} ${r3.errors?.join(' | ')}`);
   }
+
+  // FRAMES: native verbs mount inside guest geometry — panel-local
+  // authoring, whole-result transform, unchanged gate
+  const fr = applyActions(structuredClone(res.recipe), { summary: 'framed carve', actions: [
+    { kind: 'add_operation', operation: { id: 'carve', strategy: 'vcarve_text', params: { text: 'MMM', letterHeight: 0.8 }, frame: 'face' } },
+  ], declined: [] });
+  if (fr.applied.length === 1 && fr.recipe.pipeline.at(-1).frame === 'face') {
+    pass('intent layer carries the op-level frame field');
+  } else fail(`frame field lost: ${JSON.stringify(fr.recipe.pipeline.at(-1))}`);
+  const rf = run(fr.recipe);
+  if (rf.ok) pass('framed vcarve VERIFIES through the unchanged gate');
+  else fail(`framed vcarve rejected: ${rf.errors?.join(' | ')}`);
+  if (rf.ok) {
+    let bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const b of rf.preview.built.filter(x => x.op.id === 'carve')) {
+      for (const ring of b.r.target?.rings ?? []) for (const q of ring) {
+        bb.minX = Math.min(bb.minX, q.x); bb.maxX = Math.max(bb.maxX, q.x);
+        bb.minY = Math.min(bb.minY, q.y); bb.maxY = Math.max(bb.maxY, q.y);
+      }
+    }
+    const cx = (bb.minX + bb.maxX) / 2, cy = (bb.minY + bb.maxY) / 2;
+    const sz = 2;   // the u2 control default
+    if (Math.abs(cx - (2 * sz + 2.5)) < 0.2 && Math.abs(cy - sz / 2) < 0.2) {
+      pass(`framed content lands at the frame center (${cx.toFixed(2)}, ${cy.toFixed(2)})`);
+    } else fail(`framed content at (${cx.toFixed(2)}, ${cy.toFixed(2)}), frame at (${2 * sz + 2.5}, ${sz / 2})`);
+    // "MMM" is a wide block; the frame turns 90° — the placed block must be TALL
+    if (bb.maxY - bb.minY > (bb.maxX - bb.minX) * 1.5) {
+      pass(`frame rotation baked into the content (${(bb.maxX - bb.minX).toFixed(2)}" wide × ${(bb.maxY - bb.minY).toFixed(2)}" tall)`);
+    } else fail(`content not rotated: ${(bb.maxX - bb.minX).toFixed(2)} × ${(bb.maxY - bb.minY).toFixed(2)}`);
+  }
+  // unknown frame: refused, names what exists
+  const badFrame = structuredClone(fr.recipe);
+  badFrame.pipeline.at(-1).frame = 'lid';
+  const rbf = run(badFrame);
+  if (!rbf.ok && rbf.errors[0].includes('no frame "lid"') && rbf.errors[0].includes('face')) {
+    pass('unknown frame refused, published frames named');
+  } else fail(`unknown-frame error wrong: ${rbf.errors?.join(' | ')}`);
+  // surface targets can't ride a frame yet — clean refusal, not garbage motion
+  const dishFrame = structuredClone(res.recipe);
+  dishFrame.pipeline.push({ id: 'dish', strategy: 'dish_shape', params: {}, frame: 'face' });
+  const rdf = run(dishFrame);
+  if (!rdf.ok && rdf.errors[0].includes('surface targets')) {
+    pass('heightmap op in a frame: honest refusal with the reason');
+  } else fail(`heightmap-frame error wrong: ${rdf.errors?.join(' | ')}`);
 
   // guardrails: no shadowing native verbs, no malformed entries
   const dup = registerCatalogEntries({ pocket_shape: { doc: 'evil', params: {}, run: () => ({}) } });

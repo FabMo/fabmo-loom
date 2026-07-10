@@ -325,6 +325,82 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
   return { shapes, warnings, pending, resolve };
 }
 
+// ---- frames: native verbs mounted inside guest geometry -------------
+//
+// An op may PUBLISH frames (`r.frames`: [{ id, cx, cy, rot, w, h }] —
+// e.g. the furniture guest publishes each placed panel body), and any
+// LATER op may carry `frame: "<id>"` at the op level. A framed op runs
+// in a clean panel-local context (content centers on the panel face,
+// place/posX/posY compose panel-locally), then its whole result —
+// moves, target rings, previews — is rotated by `rot` and translated to
+// (cx, cy), so everything downstream (compose, verify, sim) sees
+// ordinary working-frame ops and the export gate is unchanged. A carve
+// that strays off its panel overlaps the panel's own cuts and is
+// REFUSED by the same footprint machinery that guards everything else.
+
+function frameTransformers(frame) {
+  const th = ((frame.rot ?? 0) * Math.PI) / 180;
+  const cos = Math.cos(th), sin = Math.sin(th);
+  const pt = (q) => ({
+    ...q,
+    x: +(frame.cx + q.x * cos - q.y * sin).toFixed(6),
+    y: +(frame.cy + q.x * sin + q.y * cos).toFixed(6),
+  });
+  const ring = (rr) => rr.map(pt);
+  const region = (rg) => ({ ...rg, outer: ring(rg.outer), holes: (rg.holes ?? []).map(ring) });
+  const moves = (arr) => {
+    let last = { x: 0, y: 0 };   // ops open with a rapid XY, so this never leaks
+    return arr.map((m) => {
+      if (m.x === undefined && m.y === undefined) return { ...m };
+      const x = m.x ?? last.x, y = m.y ?? last.y;
+      last = { x, y };
+      const out = { ...m, ...pt({ x, y }) };
+      if (m.i !== undefined || m.j !== undefined) {
+        // arc centers are relative vectors: rotate, don't translate;
+        // rotation is proper so `cw` is preserved
+        const i = m.i ?? 0, j = m.j ?? 0;
+        out.i = +(i * cos - j * sin).toFixed(6);
+        out.j = +(i * sin + j * cos).toFixed(6);
+      }
+      return out;
+    });
+  };
+  return { pt, ring, region, moves };
+}
+
+// transform one strategy result into its frame, in place. Returns
+// { error } for result shapes that can't ride a frame yet.
+function applyFrame(r, frame, opId) {
+  const t = frameTransformers(frame);
+  for (const sub of (r.ops ?? [r])) {
+    if (sub.target?.type === 'heightmap') {
+      return { error: `"${opId}" machines a 3D surface — surface targets can't mount into a frame yet (texture on a panel is a future move); engraving and outline text work today` };
+    }
+    if (sub.moves) sub.moves = t.moves(sub.moves);
+    if (sub.target?.rings) sub.target = { ...sub.target, rings: sub.target.rings.map(t.ring) };
+    if (sub.previewRing) sub.previewRing = t.ring(sub.previewRing);
+    if (sub.previewRegions) sub.previewRegions = sub.previewRegions.map(t.region);
+    if (sub.previewVee) {
+      sub.previewVee = {
+        ...sub.previewVee,
+        branches: sub.previewVee.branches.map((b) => b.map(t.pt)),
+        regions: sub.previewVee.regions.map(t.region),
+      };
+    }
+  }
+  if (r.bbox) {
+    const corners = [
+      { x: r.bbox.minX, y: r.bbox.minY }, { x: r.bbox.maxX, y: r.bbox.minY },
+      { x: r.bbox.minX, y: r.bbox.maxY }, { x: r.bbox.maxX, y: r.bbox.maxY },
+    ].map(t.pt);
+    r.bbox = {
+      minX: Math.min(...corners.map((q) => q.x)), minY: Math.min(...corners.map((q) => q.y)),
+      maxX: Math.max(...corners.map((q) => q.x)), maxY: Math.max(...corners.map((q) => q.y)),
+    };
+  }
+  return null;
+}
+
 // every cut point the pipeline has produced so far — what a fit-derived
 // shape must wrap. True outlines when strategies recorded them, bbox
 // perimeter as the fallback (same preference order as the cutout's own
@@ -455,6 +531,8 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
   // Collected op-level and handed to the preview; app/assembly3d.mjs
   // renders it as the parts rising out of the machined board.
   const assemblies = [];
+  // published frames (id → {cx, cy, rot, w, h, ctx}) — see applyFrame above
+  const frames = {};
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
@@ -468,9 +546,44 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
       if (e) { errors.push(`op "${op.id}": ${e.error}`); break; }
     }
     if (errors.length) break;
-    const r = entry.run(p, ctx);
+    // framed ops run in the frame's own persistent context: content
+    // centers on the panel face, and a second framed op on the SAME
+    // panel sees the first as content-so-far (place:"below" stacks
+    // panel-locally, exactly like it does on a sign)
+    let frame = null;
+    if (op.frame) {
+      frame = frames[op.frame];
+      if (!frame) {
+        const have = Object.keys(frames);
+        errors.push(`op "${op.id}": no frame "${op.frame}" — ${have.length
+          ? `published frames: ${have.join(', ')}`
+          : 'the operation that publishes frames (the furniture build) must come BEFORE this one'}`);
+        break;
+      }
+      frame.ctx ??= { ...ctx, contentBBox: null, contentRings: [] };
+    }
+    const r = entry.run(p, frame ? frame.ctx : ctx);
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
+    if (frame) {
+      // panel-local extent accumulates BEFORE the transform (that is what
+      // the next framed op on this panel must compose against)
+      const lb = r.bbox;
+      if (lb) {
+        frame.ctx.contentBBox = frame.ctx.contentBBox
+          ? {
+              minX: Math.min(frame.ctx.contentBBox.minX, lb.minX), minY: Math.min(frame.ctx.contentBBox.minY, lb.minY),
+              maxX: Math.max(frame.ctx.contentBBox.maxX, lb.maxX), maxY: Math.max(frame.ctx.contentBBox.maxY, lb.maxY),
+            }
+          : { ...lb };
+        if (lb.maxX - lb.minX > frame.w + 1e-6 || lb.maxY - lb.minY > frame.h + 1e-6) {
+          strategyWarnings.push(`op "${op.id}": the content (${(lb.maxX - lb.minX).toFixed(1)}" × ${(lb.maxY - lb.minY).toFixed(1)}") overflows the "${op.frame}" panel (${frame.w}" × ${frame.h}") — it will cross the panel's own cuts and be refused`);
+        }
+      }
+      const fe = applyFrame(r, frame, op.id);
+      if (fe) { errors.push(`op "${op.id}": ${fe.error}`); break; }
+    }
     if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
+    for (const f of r.frames ?? []) frames[f.id] = { ...f };
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
     // pocket + a smaller-bit rest pass = two tools); each sub-op carries
     // its own tool, moves, and declared target
