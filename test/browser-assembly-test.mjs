@@ -73,7 +73,8 @@ try {
 
   await page.evaluateOnNewDocument((r) => {
     localStorage.setItem('loom:recipe', JSON.stringify(r));
-    localStorage.setItem('loom:view', '3d');
+    // deliberately 2D: the first assembled weave must switch to 3D itself
+    localStorage.setItem('loom:view', '2d');
   }, RECIPE);
 
   const resp = await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -97,6 +98,47 @@ try {
   const count = await page.evaluate(() => window.loomAssembly?.layer?.count);
   if (count === 4) pass('assembly layer holds all 4 bench panels');
   else fail(`panel count ${count}`);
+
+  // the reveal: first assembled weave auto-switches 2D → 3D and plays the
+  // intro to fully assembled without anyone touching the scrub
+  const on3d = await page.evaluate(() =>
+    getComputedStyle(document.getElementById('preview3d')).display !== 'none' &&
+    getComputedStyle(document.getElementById('preview')).display === 'none');
+  if (on3d) pass('first assembled weave auto-switched the 2D view to 3D');
+  else fail('view stayed 2D after the first assembled weave');
+  const ti = Date.now();
+  let introBlend = 0;
+  while (Date.now() - ti < 10000) {
+    introBlend = await page.evaluate(() => window.loomAssembly.blend());
+    if (introBlend >= 0.999) break;
+    await new Promise((res) => setTimeout(res, 200));
+  }
+  if (introBlend >= 0.999) pass('intro played itself to the assembled pose (blend → 1)');
+  else fail(`intro never finished: blend ${introBlend}`);
+
+  // ...and only once: park the scrub mid-way, tweak a size, re-weave — the
+  // pose must hold exactly where the user left it, no replay
+  await page.$eval('#assembleSlider', (el) => {
+    el.value = '0.3';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.evaluate(() => {
+    const inp = document.querySelector('#controls input');
+    inp.value = '34';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const tr = Date.now();
+  while (Date.now() - tr < 30000) {
+    if ((await badge()) === 'VERIFIED') break;
+    await new Promise((res) => setTimeout(res, 300));
+  }
+  await new Promise((res) => setTimeout(res, 1500));   // a replay would be mid-tween now
+  const noReplay = await page.evaluate(() => ({
+    blend: window.loomAssembly.blend(), playing: window.loomAssembly.introPlaying(),
+  }));
+  if (Math.abs(noReplay.blend - 0.3) < 1e-6 && !noReplay.playing) {
+    pass('tweak re-weave does NOT replay the intro (blend held at 0.3)');
+  } else fail(`intro replayed on tweak: ${JSON.stringify(noReplay)}`);
 
   // positions at blend 0 vs blend 1 — the panels must MOVE
   const posAt = async (t) => page.evaluate((tv) => {

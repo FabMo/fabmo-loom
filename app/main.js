@@ -274,7 +274,16 @@ function render() {
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
   renderHandoffs();
+  // the reveal: the first VERIFIED weave of the session that carries an
+  // assembly jumps to 3D and plays the piece rising out of the board.
+  // Once per session — tweak prompts and slider drags re-weave with the
+  // assembly still present, and a mid-edit rejected weave must not re-arm
+  // it, so the flag never resets. The in-memory viewMode flip deliberately
+  // skips localStorage: an automation shouldn't rewrite the user's choice.
+  const introNow = !assemblyIntroShown && r.ok && (r.preview?.assemblies?.length ?? 0) > 0;
+  if (introNow) { assemblyIntroShown = true; viewMode = '3d'; }
   refreshPreview();
+  if (introNow) playAssemblyIntro();
 }
 
 // "Continue in <app>" — a catalog entry may declare a `handoff` hook
@@ -354,6 +363,7 @@ function refreshPreview() {
     view3d.update(sim, stock, 1, featureDepth ? -featureDepth : null);
     syncAssembly(pre, stock);
   } else {
+    cancelAssemblyIntro();
     $('assembleWrap').style.display = 'none';
     draw();
   }
@@ -365,6 +375,32 @@ function refreshPreview() {
 // persists so dragging a size slider doesn't collapse the piece.
 let assemblyLayer = null;
 let assemblyBlend = 0;
+let assemblyIntroShown = false;   // the reveal plays once per session
+let assemblyIntroRaf = 0;
+
+function cancelAssemblyIntro() {
+  if (assemblyIntroRaf) { cancelAnimationFrame(assemblyIntroRaf); assemblyIntroRaf = 0; }
+}
+
+// scrub the Assemble slider 0 → 1 on the app's behalf: a short hold on the
+// flat board (the cut has to register before the parts leave it), then a
+// smoothstep rise. Reads assemblyLayer fresh each frame so a re-weave
+// mid-flight (geometry rebuilt) keeps animating the new layer.
+function playAssemblyIntro() {
+  if (!assemblyLayer) return;
+  cancelAssemblyIntro();
+  const HOLD = 500, RISE = 2600;
+  let start = null;
+  const step = (ts) => {
+    start ??= ts;
+    const t = Math.min(1, Math.max(0, (ts - start - HOLD) / RISE));
+    assemblyBlend = t * t * (3 - 2 * t);
+    $('assembleSlider').value = String(assemblyBlend);
+    if (assemblyLayer && view3d) { assemblyLayer.setBlend(assemblyBlend); view3d.render(); }
+    assemblyIntroRaf = t < 1 ? requestAnimationFrame(step) : 0;
+  };
+  assemblyIntroRaf = requestAnimationFrame(step);
+}
 
 function syncAssembly(pre, stock) {
   if (assemblyLayer) {
@@ -379,11 +415,12 @@ function syncAssembly(pre, stock) {
   view3d.scene.add(assemblyLayer.group);
   $('assembleSlider').value = String(assemblyBlend);
   assemblyLayer.setBlend(assemblyBlend);
-  window.loomAssembly = { layer: assemblyLayer, blend: () => assemblyBlend };   // test handle
+  window.loomAssembly = { layer: assemblyLayer, blend: () => assemblyBlend, introPlaying: () => assemblyIntroRaf !== 0 };   // test handle
   view3d.render();
 }
 
 $('assembleSlider').addEventListener('input', () => {
+  cancelAssemblyIntro();   // the user's hand on the scrub outranks the show
   assemblyBlend = parseFloat($('assembleSlider').value);
   if (assemblyLayer && view3d) {
     assemblyLayer.setBlend(assemblyBlend);
