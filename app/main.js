@@ -243,11 +243,22 @@ function render() {
 
   if (r.ok) {
     setBadge('ok', 'VERIFIED');
-    $('verdictText').textContent = 'this exact motion was measured, not assumed';
-    $('numbers').innerHTML = targetLines + `<br><b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b>` +
+    // machine time is the headline number a person plans around — the
+    // wall-clock estimate (plunge-aware cutting + jogs + toolchanges)
+    // rides next to the badge, the breakdown stays in the numbers line
+    const runMin = r.report.stats.estRunTimeMin;
+    const runTxt = runMin >= 90 ? `${(runMin / 60).toFixed(1)} hr` : `${Math.max(1, Math.round(runMin))} min`;
+    $('verdictText').textContent = `this exact motion was measured, not assumed · ≈ ${runTxt} on the machine`;
+    $('numbers').innerHTML = targetLines + `<br><b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
       (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '');
     const st = r.preview?.stock;
-    $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"` : '';
+    // sheet-fit tag: only meaningful once the board outgrows scrap size —
+    // 4×8 (96×48) is the standard full-size ShopBot bed, either way around
+    const fits48 = st && ((st.w <= 96.01 && st.h <= 48.01) || (st.w <= 48.01 && st.h <= 96.01));
+    const sheetTag = st && Math.max(st.w, st.h) > 24
+      ? (fits48 ? ' — fits one 4×8 sheet ✓' : ' — does NOT fit a 4×8 sheet')
+      : '';
+    $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"${sheetTag}` : '';
   } else {
     // EMPTY is only the nothing-here state; every real failure is
     // REJECTED with its reason — a fit conflict must never read as

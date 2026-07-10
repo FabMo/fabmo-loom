@@ -150,16 +150,23 @@ possible macro-strategy. The contract a guest must satisfy:
 3. **Working-frame output**: `run()` returns Loom sub-ops (`{ subName,
    tool: {name, diameter}, cutter, feedRate, plungeRate, moves, target,
    allowOverlap? }`) with any internal layout ALREADY baked into the
-   moves/targets (translate rings and move endpoints; rotation is not
-   yet supported for baking). Loom composes, verifies, and posts exactly
-   as for native ops — the export gate is unchanged.
+   moves/targets. Translation is trivial; quarter-turn rotation is also
+   bakeable if done RIGHT: rotate rings and move endpoints identically
+   (an axis-hold move must gain both coords, filled from the tracked
+   position), rotate arc centers as vectors ((i, j) → (−j, i) for 90°
+   CCW; `cw` is preserved — quarter turns keep handedness). The verify
+   gate independently proves every placed cut either way. Loom composes,
+   verifies, and posts exactly as for native ops.
 4. **Optionally, `assembly` data** — the assembled view. A guest whose
    ops cut FLAT PARTS OF A 3D OBJECT (furniture panels) may return
    `assembly` alongside `ops`: `{ box: [W, H, D], panels: [{ id, rings,
-   thickness, sheet: {x, y}, world: { origin: [x,y,z], u: [3], v: [3] } }] }`.
+   thickness, sheet: {x, y, rot?}, world: { origin: [x,y,z], u: [3], v: [3] } }] }`.
    `rings` are the panel's outline + holes in the op frame (y-up, the
-   same frame its moves cut in); `sheet` is its working-frame spot on
-   the board; `world` is its pose in the piece's own Y-up frame — ring
+   same frame its moves cut in); `sheet` is its working-frame placement
+   on the board (`rot` in degrees, applied about the op origin BEFORE
+   the translation — match your placement math exactly or the preview
+   panel lies about where the cut is); `world` is its pose in the
+   piece's own Y-up frame — ring
    point (a, b) lands at `origin + a·u + b·v`, extruded along `w = u×v`
    by the thickness. Emit PROPER rotations only (det +1 with that w) so
    poses tween as rigid motions. Loom renders an "assemble" scrub on the

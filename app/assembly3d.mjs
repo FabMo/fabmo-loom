@@ -60,11 +60,14 @@ export function buildAssemblyLayer(assemblies, placement, stock) {
       mesh.receiveShadow = true;
       mesh.matrixAutoUpdate = false;
 
-      // pose 0: flat in the board, exactly where it is cut (top at z=0)
-      const m0 = new THREE.Matrix4().makeTranslation(
-        (panel.sheet?.x ?? 0) + (placement?.x ?? 0),
-        (panel.sheet?.y ?? 0) + (placement?.y ?? 0),
-        -panel.thickness);
+      // pose 0: flat in the board, exactly where it is cut (top at z=0).
+      // sheet.rot (degrees, about the op origin BEFORE translation) mirrors
+      // the guest's own placement math — a nested panel lies turned.
+      const m0 = new THREE.Matrix4().makeRotationZ(((panel.sheet?.rot ?? 0) * Math.PI) / 180)
+        .premultiply(new THREE.Matrix4().makeTranslation(
+          (panel.sheet?.x ?? 0) + (placement?.x ?? 0),
+          (panel.sheet?.y ?? 0) + (placement?.y ?? 0),
+          -panel.thickness));
       // pose 1: assembled
       const m1 = poseToMatrix(panel.world).premultiply(up);
 

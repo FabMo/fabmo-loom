@@ -78,8 +78,13 @@ export function verifyJob(job, composedMoves, opts = {}) {
   // ---- v0: global motion rules over the composed program ----
   const bbox = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
   let minZ = Infinity, maxZ = -Infinity;
-  let cutLength = 0, rapidLength = 0, cutTimeMin = 0;
+  let cutLength = 0, rapidLength = 0, cutTimeMin = 0, rapidTimeMin = 0;
   let moveCount = 0, toolchangeCount = 0;
+  // wall-clock assumptions (stats only, never gate anything): jog speed is
+  // a machine setting the program can't know — 300 ipm (5 ips) is a stock
+  // ShopBot default; a manual C9 toolchange costs real minutes at the bed
+  const jogRate = opts.jogRate ?? 300;
+  const toolchangeMin = opts.toolchangeMin ?? 1;
   let atSafeZ = false;
   let feedInEffect = null;
   let index = 0;
@@ -102,9 +107,11 @@ export function verifyJob(job, composedMoves, opts = {}) {
     bbox.minY = Math.min(bbox.minY, s.y); bbox.maxY = Math.max(bbox.maxY, s.y);
     minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z);
 
-    const dist = Math.hypot(s.x - s.prev.x, s.y - s.prev.y, s.z - s.prev.z);
+    const dxy = Math.hypot(s.x - s.prev.x, s.y - s.prev.y);
+    const dist = Math.hypot(dxy, s.z - s.prev.z);
     if (m.type === 'rapid') {
       rapidLength += dist;
+      rapidTimeMin += dist / jogRate;
       if (s.z < -EPS) {
         errors.push(`rapid ends below stock top at move #${index}: Z=${fmt3(s.z)}`);
       }
@@ -113,7 +120,10 @@ export function verifyJob(job, composedMoves, opts = {}) {
       if (feedInEffect == null || feedInEffect <= 0) {
         errors.push(`cutting move #${index} with no positive feed in effect`);
       } else {
-        cutTimeMin += dist / feedInEffect;
+        // Z-only feed moves (plunges) post at the plunge rate, which is
+        // typically a third of the XY feed — time them honestly
+        const zOnly = dxy < 1e-9 && Math.abs(s.z - s.prev.z) > 1e-9;
+        cutTimeMin += dist / (zOnly && s.feedZ > 0 ? s.feedZ : feedInEffect);
       }
     }
 
@@ -259,6 +269,8 @@ export function verifyJob(job, composedMoves, opts = {}) {
     cutLength: round3(cutLength),
     rapidLength: round3(rapidLength),
     estCutTimeMin: round3(cutTimeMin),
+    // wall-clock estimate: cutting (plunge-aware) + jogs + toolchanges
+    estRunTimeMin: round3(cutTimeMin + rapidTimeMin + toolchangeCount * toolchangeMin),
     footprints: footprints.map(f => ({
       name: f.name,
       cuts: f.cuts,

@@ -209,5 +209,31 @@ console.log('--- hybrid job: pocket + surface, both with declared targets ---');
   }
 }
 
+// ---------------- time stats: plunge-aware cutting + wall-clock estimate ----------------
+
+console.log('--- time stats: plunges at plunge rate, run time includes jogs + toolchanges ---');
+{
+  // one op, known arithmetic: plunge 0.75" (safeZ 0.25 → −0.5) at 30 ipm
+  // = 0.025 min, then 10" of cut at 100 ipm = 0.1 min
+  const op = {
+    name: 'timed cut', tool: 1, feedRate: 100, plungeRate: 30,
+    moves: [
+      { type: 'rapid', x: 1, y: 1 },
+      { type: 'linear', z: -0.5 },
+      { type: 'linear', x: 11, y: 1, z: -0.5 },
+      { type: 'rapid', z: 0.25 },
+    ],
+  };
+  const report = run(baseJob([op]));
+  const s = report.stats;
+  if (Math.abs(s.estCutTimeMin - 0.125) < 0.01) {
+    pass(`plunge-aware cut time: ${s.estCutTimeMin} min (flat-feed math would claim ${(10.75 / 100).toFixed(3)})`);
+  } else fail(`cut time wrong: ${s.estCutTimeMin} (expected ≈0.125)`);
+  const expected = s.estCutTimeMin + s.rapidLength / 300 + s.toolchangeCount * 1;
+  if (Math.abs(s.estRunTimeMin - expected) < 2e-3 && s.estRunTimeMin > s.estCutTimeMin) {
+    pass(`run time = cutting + ${s.rapidLength}" jog @300 + ${s.toolchangeCount} toolchange(s): ${s.estRunTimeMin} min`);
+  } else fail(`run time inconsistent: ${s.estRunTimeMin} vs ${expected.toFixed(3)}`);
+}
+
 console.log(failures === 0 ? '\nALL VERIFIER V1 CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
