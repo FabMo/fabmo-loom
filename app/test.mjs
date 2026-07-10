@@ -1942,7 +1942,20 @@ console.log('--- guest mount: register, weave, verify ---');
             moves: g.moves, target: g.target,
           });
         }
-        return { ops, bbox: { minX: 0, minY: 0, maxX: 2 * sz + 0.5, maxY: sz } };
+        return {
+          ops,
+          bbox: { minX: 0, minY: 0, maxX: 2 * sz + 0.5, maxY: sz },
+          // assembled-view contract: op-level assembly data (flat panels
+          // with sheet spots + Y-up world poses) must reach the preview
+          assembly: {
+            box: [2 * sz + 0.5, sz, sz],
+            panels: [{
+              id: 'padA', thickness: 0.2, rings: [square(0).outer],
+              sheet: { x: 0, y: 0 },
+              world: { origin: [0, 0, sz], u: [1, 0, 0], v: [0, 0, -1] },
+            }],
+          },
+        };
       },
     },
   };
@@ -1965,6 +1978,11 @@ console.log('--- guest mount: register, weave, verify ---');
   if (r.ok && r.sbp) pass('guest-woven recipe VERIFIED → SBP through the unchanged gate');
   else fail(`guest recipe rejected: ${r.errors?.join(' | ')}`);
   if (r.ok) {
+    const asm = r.preview.assemblies?.[0];
+    if (asm?.opId === 'pads' && asm.panels?.length === 1 &&
+        asm.panels[0].world?.u && Number.isFinite(asm.panels[0].sheet?.x)) {
+      pass('op-level assembly data flows to the preview (assembled-view contract)');
+    } else fail(`assembly passthrough wrong: ${JSON.stringify(asm)?.slice(0, 120)}`);
     // baked layout survives: two distinct pads at the guest's offsets
     const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
     const p2 = r.preview.placement;

@@ -99,7 +99,7 @@
   <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
   <div>
     <h1>FabMo - Loom</h1>
-    <div class="sub">A ShopBot Project · <span id="app-version">v0.56</span></div>
+    <div class="sub">A ShopBot Project · <span id="app-version">v0.57</span></div>
   </div>
   <div class="spacer"></div>
   <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
@@ -141,6 +141,10 @@
       <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
         <button id="btn3d" class="small">3D</button>
         <button id="btn2d" class="small ghost">2D</button>
+      </div>
+      <div id="assembleWrap" style="display:none; position:absolute; left:50%; transform:translateX(-50%); bottom:10px; z-index:5; align-items:center; gap:8px; padding:5px 12px; border-radius:999px; background:var(--panel); border:1px solid var(--border); box-shadow:0 1px 6px rgba(0,0,0,.12)">
+        <label for="assembleSlider" style="margin:0; white-space:nowrap">assemble</label>
+        <input id="assembleSlider" type="range" min="0" max="1" step="0.005" value="0" style="width:180px">
       </div>
       <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
       <div id="preview3d"></div>

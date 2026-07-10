@@ -450,6 +450,11 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
   // ---- run each strategy in local coords, growing the content bbox ----
   const built = [];
   const strategyWarnings = [];
+  // assembled-view data: an entry (guest furniture) may return `assembly`
+  // alongside its ops — flat panels with sheet placements and world poses.
+  // Collected op-level and handed to the preview; app/assembly3d.mjs
+  // renders it as the parts rising out of the machined board.
+  const assemblies = [];
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
@@ -465,6 +470,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
     if (errors.length) break;
     const r = entry.run(p, ctx);
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
+    if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
     // pocket + a smaller-bit rest pass = two tools); each sub-op carries
     // its own tool, moves, and declared target
@@ -605,7 +611,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
     errors: report.errors,
     warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
     report, job, composed,
-    preview: { built, placement, stock: autoStock, shapeOutlines },
+    preview: { built, placement, stock: autoStock, shapeOutlines, assemblies },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });

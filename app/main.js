@@ -12,6 +12,7 @@ import { startWeave } from './weave.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
+import { buildAssemblyLayer } from './assembly3d.mjs';
 import { FONTS } from './fonts.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -340,10 +341,44 @@ function refreshPreview() {
     }
     window.loomZx = { zx: 1, featureDepth, minZ: sim?.minZ };   // debug handle
     view3d.update(sim, stock, 1, featureDepth ? -featureDepth : null);
+    syncAssembly(pre, stock);
   } else {
+    $('assembleWrap').style.display = 'none';
     draw();
   }
 }
+
+// ---- assembled view: ops that returned assembly data (guest furniture)
+// blend between flat-in-the-board and standing assembled. The layer is
+// rebuilt every weave (geometry rides the sliders); the blend position
+// persists so dragging a size slider doesn't collapse the piece.
+let assemblyLayer = null;
+let assemblyBlend = 0;
+
+function syncAssembly(pre, stock) {
+  if (assemblyLayer) {
+    view3d.scene.remove(assemblyLayer.group);
+    assemblyLayer.dispose();
+    assemblyLayer = null;
+  }
+  const asms = pre?.assemblies ?? [];
+  $('assembleWrap').style.display = asms.length ? 'flex' : 'none';
+  if (!asms.length) { assemblyBlend = 0; $('assembleSlider').value = '0'; return; }
+  assemblyLayer = buildAssemblyLayer(asms, pre.placement ?? { x: 0, y: 0 }, stock);
+  view3d.scene.add(assemblyLayer.group);
+  $('assembleSlider').value = String(assemblyBlend);
+  assemblyLayer.setBlend(assemblyBlend);
+  window.loomAssembly = { layer: assemblyLayer, blend: () => assemblyBlend };   // test handle
+  view3d.render();
+}
+
+$('assembleSlider').addEventListener('input', () => {
+  assemblyBlend = parseFloat($('assembleSlider').value);
+  if (assemblyLayer && view3d) {
+    assemblyLayer.setBlend(assemblyBlend);
+    view3d.render();
+  }
+});
 
 function draw() {
   const { width: W, height: H } = canvas;

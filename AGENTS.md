@@ -153,7 +153,20 @@ possible macro-strategy. The contract a guest must satisfy:
    moves/targets (translate rings and move endpoints; rotation is not
    yet supported for baking). Loom composes, verifies, and posts exactly
    as for native ops — the export gate is unchanged.
-4. **Optionally, a `handoff` hook** — round-tripping out of Loom:
+4. **Optionally, `assembly` data** — the assembled view. A guest whose
+   ops cut FLAT PARTS OF A 3D OBJECT (furniture panels) may return
+   `assembly` alongside `ops`: `{ box: [W, H, D], panels: [{ id, rings,
+   thickness, sheet: {x, y}, world: { origin: [x,y,z], u: [3], v: [3] } }] }`.
+   `rings` are the panel's outline + holes in the op frame (y-up, the
+   same frame its moves cut in); `sheet` is its working-frame spot on
+   the board; `world` is its pose in the piece's own Y-up frame — ring
+   point (a, b) lands at `origin + a·u + b·v`, extruded along `w = u×v`
+   by the thickness. Emit PROPER rotations only (det +1 with that w) so
+   poses tween as rigid motions. Loom renders an "assemble" scrub on the
+   3D view blending every panel between its spot in the machined board
+   and its assembled pose (app/assembly3d.mjs). Purely visual — the
+   verifier neither sees nor trusts it.
+5. **Optionally, a `handoff` hook** — round-tripping out of Loom:
    `handoff: { label, carry(params, { evalNumber, vars, recipeName }) }`
    on the entry. `carry` receives RAW params (control bindings arrive as
    `{ ctrl: id }` — resolve via `vars`; expression strings via
