@@ -14,7 +14,7 @@ import fs from 'fs';
 import { execFileSync } from 'child_process';
 import { REGISTRY_FILE, loadRegistry, saveRegistry, newToken, newInvite, inviteStatus } from './invites.js';
 
-const DEFAULT_BASE = 'https://labs.shopbottools.com/c/brian.o/fabmo-loom/app/';
+const DEFAULT_BASE = 'https://labs.shopbottools.com/loom/';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const positional = [];
