@@ -99,7 +99,7 @@
   <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
   <div>
     <h1>FabMo - Loom</h1>
-    <div class="sub">A ShopBot Project · <span id="app-version">v0.60</span></div>
+    <div class="sub">A ShopBot Project · <span id="app-version">v0.61</span></div>
   </div>
   <div class="spacer"></div>
   <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
@@ -119,13 +119,15 @@
     <div class="chips" id="chips"></div>
     <div id="history"></div>
 
+    <div id="inviteBar" class="keynote" style="display:none"></div>
+
     <details id="keyBox">
       <summary>AI account (bring your own key)</summary>
       <div class="keyrow">
         <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
         <button id="saveKey" class="small">Save</button>
       </div>
-      <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the key never touches our server. Without a key, the controls on the right still work; prompting is disabled.</div>
+      <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the key never touches our server. Without a key (or a guest-pass link), the controls on the right still work; prompting is disabled.</div>
     </details>
   </section>
 

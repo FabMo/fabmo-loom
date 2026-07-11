@@ -1,7 +1,8 @@
 // Loom — the mother app. Prompts and sliders edit the same recipe
 // document; every state runs the full pipeline through the verifier.
-// The LLM (user's own key, browser-direct) emits recipe actions only —
-// no code, no motion. See intent.mjs for the trust boundary.
+// The LLM (user's own key browser-direct, or a metered guest pass
+// relayed by the server) emits recipe actions only — no code, no
+// motion. See intent.mjs for the trust boundary.
 
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars } from './runtime.mjs';
 import { registerCatalogEntries, CATALOG } from './catalog.mjs';
@@ -550,6 +551,49 @@ function addTurn(html, isErr = false) {
   $('history').prepend(div);
 }
 
+// BYO-key path: straight to Anthropic from the page — the key never
+// touches our server.
+async function parseDirect(req, key) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(res.status === 401 ? 'that API key was rejected (401)' : `API error ${res.status}: ${body.slice(0, 120)}`);
+  }
+  return res.json();
+}
+
+// Guest-pass path: the server relays the same request on the shop key,
+// metered Claude-style — N prompts per 5-hour window, refills, never
+// accumulates. Running out is the moment the key box earns its keep.
+async function parseViaGuestPass(req, invite) {
+  const res = await fetch('/api/intent/loom', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
+    body: JSON.stringify({ req }),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    $('keyBox').open = true;
+    if (res.status === 429 && payload.reason === 'window') {
+      renderInviteBar({ valid: true, remaining: 0, resetsAt: payload.resetsAt });
+      throw new Error(`your guest pass is out of prompts — it refills at ${fmtTime(payload.resetsAt)}. Add your own API key below for uninterrupted use.`);
+    }
+    if (res.status === 403) renderInviteBar({ valid: false, reason: payload.reason });
+    throw new Error(payload.error ?? `guest-pass request failed (${res.status})`);
+  }
+  renderInviteBar({ valid: true, ...payload.invite });
+  return payload.data;
+}
+
 async function generate() {
   const utterance = $('prompt').value.trim();
   if (!utterance || busy) return;
@@ -559,9 +603,10 @@ async function generate() {
     return;
   }
   const key = localStorage.getItem('loom:apiKey');
-  if (!key) {
+  const invite = localStorage.getItem('loom:invite');
+  if (!key && !invite) {
     $('keyBox').open = true;
-    addTurn('Add your Anthropic API key first — it stays in this browser.', true);
+    addTurn('Add your Anthropic API key first — it stays in this browser. (Opening Loom from a guest-pass link works too.)', true);
     return;
   }
   busy = true;
@@ -570,21 +615,8 @@ async function generate() {
   const stopWeave = startWeave($('appPanel'));
   try {
     const req = buildParseRequest(recipe, utterance);
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify(req),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(res.status === 401 ? 'that API key was rejected (401)' : `API error ${res.status}: ${body.slice(0, 120)}`);
-    }
-    const data = await res.json();
+    // own key wins when both exist: unlimited beats metered
+    const data = key ? await parseDirect(req, key) : await parseViaGuestPass(req, invite);
     const toolUse = data.content?.find(b => b.type === 'tool_use');
     if (!toolUse) throw new Error('the model returned no actions');
 
@@ -600,7 +632,7 @@ async function generate() {
     // on logging, and a checkout without the endpoint just no-ops.
     fetch('/api/intent/log', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(invite ? { 'x-loom-invite': invite } : {}) },
       body: JSON.stringify({
         app: 'loom',
         utterance,
@@ -763,6 +795,48 @@ $('openFile').addEventListener('change', async () => {
 });
 
 if (localStorage.getItem('loom:apiKey')) $('apiKey').value = '••••••••••••';
+
+// ---------------------------------------------------------- guest pass
+// A shared invite link lands with ?invite=lk_… — move the token out of
+// the URL (history and screenshots shouldn't leak it) into localStorage,
+// then keep the chip honest: prompts left, when the window refills.
+const urlInvite = new URLSearchParams(location.search).get('invite');
+if (urlInvite) {
+  localStorage.setItem('loom:invite', urlInvite);
+  const clean = new URL(location.href);
+  clean.searchParams.delete('invite');
+  history.replaceState(null, '', clean);
+}
+
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function renderInviteBar(s) {
+  const bar = $('inviteBar');
+  if (!s?.valid) {
+    if (s?.reason === 'expired' || s?.reason === 'revoked') {
+      bar.style.display = '';
+      bar.textContent = `Your guest pass ${s.reason === 'expired' ? 'has expired' : 'was turned off'} — add your own API key below to keep prompting.`;
+    } else {
+      bar.style.display = 'none';
+    }
+    return;
+  }
+  bar.style.display = '';
+  const refill = s.resetsAt ? ` · refills ${fmtTime(s.resetsAt)}` : '';
+  bar.textContent = `Guest pass${s.name ? ` — ${s.name}` : ''}: ${s.remaining} prompt${s.remaining === 1 ? '' : 's'} left this window${refill}`
+    + (s.remaining === 0 ? ' — or add your own key below for uninterrupted use' : '');
+}
+
+(async function refreshInviteBar() {
+  const invite = localStorage.getItem('loom:invite');
+  if (!invite) return;
+  try {
+    const res = await fetch('/api/intent/invite', { headers: { 'x-loom-invite': invite } });
+    renderInviteBar(await res.json());
+  } catch { /* no server (offline copy) — the chip just stays hidden */ }
+})();
 
 $('thickness').addEventListener('input', () => {
   const v = parseFloat($('thickness').value);
