@@ -23,6 +23,7 @@
 // data. One JSONL line per parse at /var/opt/apps/.intent-funnel.jsonl.
 
 import fs from 'fs';
+import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { buildParseRequest } from './step-schema.js';
 import { loadRegistry, saveRegistry, inviteStatus, consumeInvite, refundInvite, recordUsage } from './invites.js';
@@ -60,10 +61,19 @@ const clip = (s, n) => typeof s === 'string' ? s.slice(0, n) : undefined;
 // fall back to step_toolpath (the original sole tenant of this log).
 const KNOWN_APPS = new Set(['step_toolpath', 'furniture', 'loom']);
 
-// One JSONL line per parse. Never throws — logging must not break parsing.
+// One JSONL line per parse, stamped with a QUERY ID the user can quote in
+// a bug report — `node intent/replay.mjs q_xxxxxxxx` reconstructs exactly
+// what the model saw and decided. `context` is the recipe/document view
+// the parse ran against (already asset-elided by the client); without it,
+// mid-session parses ("make the legs thicker") are not reproducible.
+// Never throws — logging must not break parsing. Returns the id (or null).
 function appendFunnel(entry) {
   try {
+    let context = entry.context && typeof entry.context === 'object' ? entry.context : undefined;
+    if (context && JSON.stringify(context).length > MAX_CONTEXT_BYTES) context = undefined;
+    const id = 'q_' + crypto.randomBytes(4).toString('hex');
     const line = JSON.stringify({
+      id,
       ts: new Date().toISOString(),
       source: entry.source,                       // 'server' | 'browser'
       app: KNOWN_APPS.has(entry.app) ? entry.app : 'step_toolpath',
@@ -73,10 +83,13 @@ function appendFunnel(entry) {
       declined: (entry.intent?.declined ?? []).slice(0, 20),
       usage: entry.usage ?? null,
       invite: clip(entry.invite, 100),            // guest-pass holder, if any
+      context,
     }) + '\n';
     fs.appendFileSync(FUNNEL_FILE, line);
+    return id;
   } catch (err) {
     console.error('[intent] funnel append failed:', err?.message ?? err);
+    return null;
   }
 }
 
@@ -117,8 +130,8 @@ export function mountIntent(app) {
       }
       const intent = JSON.parse(text);
       const usage = { input: response.usage.input_tokens, output: response.usage.output_tokens };
-      appendFunnel({ source: 'server', utterance, intent, usage });
-      return res.json({ ok: true, intent, usage });
+      const queryId = appendFunnel({ source: 'server', utterance, intent, usage, context });
+      return res.json({ ok: true, intent, usage, queryId });
     } catch (err) {
       const status = err?.status >= 400 && err?.status < 600 ? 502 : 500;
       console.error('[intent] parse failed:', err?.message ?? err);
@@ -209,14 +222,14 @@ export function mountIntent(app) {
   app.post('/api/intent/log', (req, res) => {
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
     if (rateLimited(ip)) return res.status(429).json({ ok: false });
-    const { app: clientApp, utterance, intent, usage } = req.body ?? {};
+    const { app: clientApp, utterance, intent, usage, context } = req.body ?? {};
     if (typeof utterance !== 'string' || !intent || typeof intent !== 'object') {
       return res.status(400).json({ ok: false });
     }
     const token = req.get('x-loom-invite');
     const invite = token ? loadRegistry()[token]?.name : undefined;
-    appendFunnel({ source: 'browser', app: clientApp, invite, utterance, intent, usage });
-    return res.json({ ok: true });
+    const queryId = appendFunnel({ source: 'browser', app: clientApp, invite, utterance, intent, usage, context });
+    return res.json({ ok: true, queryId });
   });
 
   console.log('[intent] /api/intent/step + /api/intent/loom + /api/intent/invite + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));

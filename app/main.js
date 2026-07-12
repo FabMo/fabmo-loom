@@ -549,6 +549,7 @@ function addTurn(html, isErr = false) {
   div.className = 'turn' + (isErr ? ' err' : '');
   div.innerHTML = html;
   $('history').prepend(div);
+  return div;
 }
 
 // BYO-key path: straight to Anthropic from the page — the key never
@@ -615,6 +616,10 @@ async function generate() {
   const stopWeave = startWeave($('appPanel'));
   try {
     const req = buildParseRequest(recipe, utterance);
+    // what the model SAW — captured before applyActions mutates the recipe
+    // (cloned: with no assets promptRecipeView returns the live object).
+    // Rides along to the funnel so intent/replay.mjs can reproduce the parse.
+    const parseContext = structuredClone(promptRecipeView(recipe));
     // own key wins when both exist: unlimited beats metered
     const data = key ? await parseDirect(req, key) : await parseViaGuestPass(req, invite);
     const toolUse = data.content?.find(b => b.type === 'tool_use');
@@ -630,7 +635,7 @@ async function generate() {
     // the funnel / gap report — declines are the catalog's backlog and
     // parses its pricing data. Fire-and-forget: the weave never depends
     // on logging, and a checkout without the endpoint just no-ops.
-    fetch('/api/intent/log', {
+    const logPromise = fetch('/api/intent/log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(invite ? { 'x-loom-invite': invite } : {}) },
       body: JSON.stringify({
@@ -638,13 +643,30 @@ async function generate() {
         utterance,
         intent: { summary: out.summary, actions: toolUse.input.actions ?? [], declined: out.declined },
         usage: { input: data.usage?.input_tokens, output: data.usage?.output_tokens },
+        context: parseContext,
       }),
-    }).catch(() => {});
+    });
 
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
     const skipped = out.skipped.length ? `<div class="declined">skipped: ${out.skipped.map(escapeHtml).join('; ')}</div>` : '';
-    addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}`);
+    const turnEl = addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}`);
+
+    // the funnel's query id, pinned to the turn: "quote this when something
+    // came out wrong" — replayable server-side with intent/replay.mjs
+    logPromise.then(r => r.json()).then(d => {
+      if (!d?.queryId) return;
+      const chip = document.createElement('div');
+      chip.className = 'qid';
+      chip.textContent = d.queryId;
+      chip.title = 'click to copy — quote this id when reporting a problem with this result';
+      chip.addEventListener('click', () => {
+        navigator.clipboard?.writeText(d.queryId);
+        chip.textContent = `${d.queryId} ✓ copied`;
+        setTimeout(() => { chip.textContent = d.queryId; }, 1200);
+      });
+      turnEl.append(chip);
+    }).catch(() => {});
     $('prompt').value = '';
   } catch (e) {
     addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
