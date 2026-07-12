@@ -28,42 +28,45 @@ body[class*="theme-"] {
   padding-top: var(--sb-topbar-h, 0px);
 }
 
-/* type + shape follow the theme */
-body[class*="theme-"] button {
+/* type + shape follow the theme — scoped to MAIN so the injected fleet
+   chrome (picker topbar, feedback modal) keeps its own styling; a bare
+   `button` rule here out-specified .sb-tp-btn and made the SB1 picker
+   black-on-black */
+body[class*="theme-"] main button {
   color: var(--t-btn-action-text);
   border-radius: var(--t-radius);
   font-size: var(--t-fs-btn);
   font-family: var(--t-font-main);
   box-shadow: var(--t-shadow-btn);
 }
-body[class*="theme-"] button:hover:not(:disabled) { box-shadow: var(--t-shadow-btn-hover); }
-body[class*="theme-"] button.ghost {
+body[class*="theme-"] main button:hover:not(:disabled) { box-shadow: var(--t-shadow-btn-hover); }
+body[class*="theme-"] main button.ghost {
   background: transparent;
   color: var(--t-accent);
   border: var(--t-border-width) solid var(--t-accent);
 }
-body[class*="theme-"] .chips button,
-body[class*="theme-"] .asset-chip {
+body[class*="theme-"] main .chips button,
+body[class*="theme-"] main .asset-chip {
   background: var(--t-btn-setting-bg);
   color: var(--t-btn-setting-text);
   border-radius: var(--t-radius);
 }
-body[class*="theme-"] input,
-body[class*="theme-"] textarea,
-body[class*="theme-"] select {
+body[class*="theme-"] main input,
+body[class*="theme-"] main textarea,
+body[class*="theme-"] main select {
   border-radius: var(--t-radius);
   font-size: var(--t-fs-input);
   font-family: var(--t-font-main);
 }
 /* field text may differ from panel chrome (fleet-wide contract) */
-body[class*="theme-"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
-body[class*="theme-"] textarea,
-body[class*="theme-"] select,
-body[class*="theme-"] select option {
+body[class*="theme-"] main input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+body[class*="theme-"] main textarea,
+body[class*="theme-"] main select,
+body[class*="theme-"] main select option {
   color: var(--t-input-text, var(--t-text));
   font-weight: var(--t-input-weight, normal);
 }
-body[class*="theme-"] label {
+body[class*="theme-"] main label {
   font-size: var(--t-fs-label);
   font-weight: var(--t-label-weight, 400);
   text-shadow: var(--t-text-glow, none);
