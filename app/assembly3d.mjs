@@ -17,6 +17,7 @@
 // centered on the stock, feet on the stock top (z = 0).
 
 import * as THREE from 'three';
+import { meshTheme, themedSurfaceMaterial, themedSideMaterial } from './view3d.mjs';
 
 const FACE = 0xf3ead8;   // matches the board top
 const SIDE = 0xe2d6ba;   // matches the stock shell walls
@@ -35,8 +36,13 @@ function poseToMatrix(pose) {
 export function buildAssemblyLayer(assemblies, placement, stock) {
   const group = new THREE.Group();
   const parts = [];
-  const faceMat = new THREE.MeshStandardMaterial({ color: FACE, roughness: 0.85, metalness: 0 });
-  const sideMat = new THREE.MeshStandardMaterial({ color: SIDE, roughness: 0.9, metalness: 0 });
+  // panels follow the fleet mesh theme (SB1 glow, SB Light greyscale);
+  // wood otherwise — same rule as the board in view3d.mjs
+  const mt = meshTheme();
+  const faceMat = mt ? themedSurfaceMaterial(mt)
+    : new THREE.MeshStandardMaterial({ color: FACE, roughness: 0.85, metalness: 0 });
+  const sideMat = mt ? themedSideMaterial(mt)
+    : new THREE.MeshStandardMaterial({ color: SIDE, roughness: 0.9, metalness: 0 });
 
   for (const asm of assemblies) {
     // assembled placement in the view frame: piece Y-up → view Z-up

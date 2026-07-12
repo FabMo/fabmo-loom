@@ -41,6 +41,52 @@ function boxBlurGrid(grid, cols, rows, r) {
   return out;
 }
 
+// Fleet mesh theming: themes that declare --t-mesh-style: themed (ShopBot
+// 1.0's orange glow, ShopBot Light's greyscale, toolpath.net's green)
+// restyle 3D models across every labs app. Returns null on every other
+// theme — and always in public clones, where no tokens are served — so
+// the wood stays what it is: the material, not a theme surface.
+export function meshTheme() {
+  const css = getComputedStyle(document.body);
+  const read = (p, f) => css.getPropertyValue(p).trim() || f;
+  if (read('--t-mesh-style', '') !== 'themed') return null;
+  return {
+    color: read('--t-mesh-default', '#cccccc'),
+    board: read('--t-mesh-board', ''),
+    opacity: parseFloat(read('--t-mesh-opacity', '1')),
+    emissive: read('--t-mesh-emissive', '#000000'),
+    emissiveIntensity: parseFloat(read('--t-mesh-emissive-intensity', '0')),
+    roughness: parseFloat(read('--t-mesh-roughness', '0.85')),
+  };
+}
+
+// Heightfield material under a mesh theme: a flat themed color (vertex
+// colors are wood tones — SB Light's greyscale must not inherit them);
+// the raking sun and shadows keep the relief legible.
+export function themedSurfaceMaterial(mt) {
+  return new THREE.MeshStandardMaterial({
+    color: mt.color,
+    roughness: mt.roughness,
+    metalness: 0,
+    emissive: mt.emissive,
+    emissiveIntensity: mt.emissiveIntensity,
+    transparent: mt.opacity < 1,
+    opacity: mt.opacity,
+  });
+}
+
+export function themedSideMaterial(mt) {
+  return new THREE.MeshStandardMaterial({
+    color: (mt.board && mt.board !== 'transparent') ? mt.board : SIDE,
+    roughness: mt.roughness,
+    metalness: 0,
+    emissive: mt.emissive,
+    emissiveIntensity: mt.emissiveIntensity * 0.3,
+    transparent: mt.opacity < 1,
+    opacity: mt.opacity,
+  });
+}
+
 export function createView3D(container, { width = 1160, height = 600 } = {}) {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(width, height, false);
@@ -133,7 +179,11 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
    *   full cut tint — pass the job's FEATURE depth so an engraving next to
    *   a through cut still uses the whole color scale
    */
+  let lastArgs = null;   // retheme() rebuilds the board under a new theme
+
   function update(sim, stock, zScale = 1, tintRange = null) {
+    lastArgs = [sim, stock, zScale, tintRange];
+    const mt = meshTheme();
     disposeGroup();
     group = new THREE.Group();
     group.scale.z = zScale;
@@ -143,7 +193,8 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
     // carving (the preview then shows a flat lid with 0.002" of relief).
     // The heightfield owns the top; BoxGeometry group 4 is +Z, hidden.
     const t = stock.thickness;
-    const sideMat = new THREE.MeshStandardMaterial({ color: SIDE, roughness: 0.9 });
+    const sideMat = mt ? themedSideMaterial(mt)
+      : new THREE.MeshStandardMaterial({ color: SIDE, roughness: 0.9 });
     const hiddenTop = new THREE.MeshStandardMaterial({ visible: false });
     const box = new THREE.Mesh(
       new THREE.BoxGeometry(stock.w, stock.h, t),
@@ -220,8 +271,8 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
       geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
       geo.setIndex(new THREE.BufferAttribute(idx, 1));
       geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-      const mesh = new THREE.Mesh(geo,
-        new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 }));
+      const mesh = new THREE.Mesh(geo, mt ? themedSurfaceMaterial(mt)
+        : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0 }));
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       group.add(mesh);
@@ -233,7 +284,13 @@ export function createView3D(container, { width = 1160, height = 600 } = {}) {
     renderer.render(scene, camera);
   }
 
+  // theme switches rebuild the board under the new theme's mesh tokens
+  function retheme() {
+    if (lastArgs) update(...lastArgs);
+    else renderer.render(scene, camera);
+  }
+
   // camera/controls/scene exposed for deterministic poses and geometry
   // probes in headless checks
-  return { update, domElement: renderer.domElement, camera, controls, scene, render: () => renderer.render(scene, camera) };
+  return { update, retheme, domElement: renderer.domElement, camera, controls, scene, render: () => renderer.render(scene, camera) };
 }

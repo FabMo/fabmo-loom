@@ -889,6 +889,14 @@ function syncView3dTheme() {
   view3d.scene.background.set(surroundColor());
   view3d.domElement.style.borderColor =
     getComputedStyle(document.body).getPropertyValue('--border').trim();
+  // rebuild the board under the new theme's mesh tokens (SB1 glow, SB
+  // Light greyscale) — and the assembled panels, which live in their own
+  // layer that update() doesn't touch
+  view3d.retheme?.();
+  const pre = result?.preview;
+  if (pre?.assemblies?.length) {
+    syncAssembly(pre, pre.stock ?? { w: 8, h: 2.5, thickness: recipe.stock.thickness ?? 0.5 });
+  }
   view3d.render();
 }
 function updateThemeToggle() {
