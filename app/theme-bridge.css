@@ -1,0 +1,81 @@
+/* Loom — theme bridge to the ShopBot Labs shared theme system.
+   Loaded LAST so it wins without !important. The theme system itself
+   (tokens.css / components.css / theme-picker.js) is a per-deployment
+   mount, like guest apps: on labs the relative ../../ui_testbed links
+   resolve and the fleet picker appears; in a public clone they 404 and
+   Loom's built-in light/dark styling stands alone — this file is inert
+   without a body theme- class.
+   The "AI-YA!" theme reproduces Loom's original look via its tokens. */
+
+body[class*="theme-"] {
+  --bg: var(--t-bg-secondary);
+  --panel: var(--t-bg-primary);
+  --ink: var(--t-text);
+  --mut: var(--t-text-dim);
+  --header-bg: var(--t-bg-header);
+  --accent: var(--t-accent);
+  --btn-bg: var(--t-btn-action-bg);
+  --border: var(--t-border);
+  --input-border: var(--t-input-border);
+  --input-bg: var(--t-input-bg);
+  --chip-bg: var(--t-bg-tertiary);
+  --code-bg: var(--t-bg-tertiary);
+  --disabled-bg: var(--t-text-dim);
+  --surround: var(--t-canvas-bg);
+  --sky: var(--t-accent);
+  font-family: var(--t-font-main);
+  /* room for the injected fleet topbar */
+  padding-top: var(--sb-topbar-h, 0px);
+}
+
+/* type + shape follow the theme */
+body[class*="theme-"] button {
+  color: var(--t-btn-action-text);
+  border-radius: var(--t-radius);
+  font-size: var(--t-fs-btn);
+  font-family: var(--t-font-main);
+  box-shadow: var(--t-shadow-btn);
+}
+body[class*="theme-"] button:hover:not(:disabled) { box-shadow: var(--t-shadow-btn-hover); }
+body[class*="theme-"] button.ghost {
+  background: transparent;
+  color: var(--t-accent);
+  border: var(--t-border-width) solid var(--t-accent);
+}
+body[class*="theme-"] .chips button,
+body[class*="theme-"] .asset-chip {
+  background: var(--t-btn-setting-bg);
+  color: var(--t-btn-setting-text);
+  border-radius: var(--t-radius);
+}
+body[class*="theme-"] input,
+body[class*="theme-"] textarea,
+body[class*="theme-"] select {
+  border-radius: var(--t-radius);
+  font-size: var(--t-fs-input);
+  font-family: var(--t-font-main);
+}
+/* field text may differ from panel chrome (fleet-wide contract) */
+body[class*="theme-"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+body[class*="theme-"] textarea,
+body[class*="theme-"] select,
+body[class*="theme-"] select option {
+  color: var(--t-input-text, var(--t-text));
+  font-weight: var(--t-input-weight, normal);
+}
+body[class*="theme-"] label {
+  font-size: var(--t-fs-label);
+  font-weight: var(--t-label-weight, 400);
+  text-shadow: var(--t-text-glow, none);
+}
+body[class*="theme-"] .panel { border-radius: var(--t-radius); }
+body[class*="theme-"] #recipeJson { font-family: var(--t-font-mono); }
+body[class*="theme-"] .numbers b { font-family: var(--t-font-mono); }
+/* the built-in light/dark toggle yields to the fleet picker */
+body[class*="theme-"] #themeToggle { display: none; }
+
+/* ── AI-YA!: restore the original's exact geometry (pills and 12px cards) ── */
+.theme-ai-ya .chips button,
+.theme-ai-ya .asset-chip { border-radius: 999px; }
+.theme-ai-ya .panel { border-radius: 12px; }
+.theme-ai-ya .badge { border-radius: 999px; }

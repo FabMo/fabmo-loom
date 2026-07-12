@@ -878,15 +878,17 @@ function currentTheme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 }
 function surroundColor() {
-  // read the resolved --surround token so the 3D backdrop matches the 2D canvas
-  return getComputedStyle(document.documentElement).getPropertyValue('--surround').trim();
+  // read the resolved --surround token so the 3D backdrop matches the 2D
+  // canvas — from BODY, where the fleet theme bridge sets its overrides
+  // (body inherits :root, so the native light/dark values still resolve)
+  return getComputedStyle(document.body).getPropertyValue('--surround').trim();
 }
 function syncView3dTheme() {
   if (!view3d) return;
   // scene.background is a THREE.Color created in view3d.mjs — mutate it in place
   view3d.scene.background.set(surroundColor());
   view3d.domElement.style.borderColor =
-    getComputedStyle(document.documentElement).getPropertyValue('--border').trim();
+    getComputedStyle(document.body).getPropertyValue('--border').trim();
   view3d.render();
 }
 function updateThemeToggle() {
@@ -903,6 +905,18 @@ updateThemeToggle();
 $('themeToggle').addEventListener('click', () => {
   applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
 });
+
+// ShopBot Labs fleet themes — a per-deployment mount, exactly like guest
+// apps: when the shared theme system is served alongside (../..), mount
+// the fleet picker; "AI-YA!" preserves Loom's original styling. In public
+// clones the import 404s and the built-in light/dark toggle above stays
+// the only theming (theme-bridge.css is inert without a theme class).
+(async () => {
+  try {
+    const { initThemePicker } = await import('../../ui_testbed/themes/theme-picker.js');
+    initThemePicker(() => syncView3dTheme());
+  } catch { /* themes not deployed here — native toggle stands alone */ }
+})();
 
 // Guest apps: an optional, uncommitted guests.local.mjs lists module
 // URLs; each module exports catalog `entries` (see AGENTS.md "Mounting a

@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FabMo - Loom</title>
 <link rel="icon" type="image/jpeg" href="../assets/loom-logo.jpg">
+<!-- ShopBot Labs shared themes — a per-deployment mount (404s harmlessly
+     in public clones; theme-bridge.css is inert without a theme class) -->
+<link rel="stylesheet" href="../../ui_testbed/themes/tokens.css">
+<link rel="stylesheet" href="../../ui_testbed/themes/components.css">
+<link rel="stylesheet" href="../../ui_testbed/themes/theme-picker.css">
 
 <style>
   :root {
@@ -84,6 +89,8 @@
   footer { text-align: center; font-size: .75rem; color: var(--mut); padding: 12px; }
   footer a { color: var(--accent); }
 </style>
+<!-- bridge loads AFTER the app's own styles so it wins without !important -->
+<link rel="stylesheet" href="theme-bridge.css">
 <script>
   // set the theme before first paint so there's no light flash on dark loads.
   // stored choice wins; otherwise follow the OS. main.js wires the toggle.
@@ -101,7 +108,7 @@
   <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
   <div>
     <h1>FabMo - Loom</h1>
-    <div class="sub">A ShopBot Project · <span id="app-version">v0.62</span></div>
+    <div class="sub">A ShopBot Project · <span id="app-version">v0.63</span></div>
   </div>
   <div class="spacer"></div>
   <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
@@ -119,7 +126,7 @@
          Clicking never submits — it drops the sentence in the box with the
          first blank selected, so the last step of every chip is typing. -->
     <div class="chips" id="chips"></div>
-    <div id="history"></div>
+    <div id="history" class="sb-panel"></div>
 
     <div id="inviteBar" class="keynote" style="display:none"></div>
 
