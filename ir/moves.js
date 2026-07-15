@@ -12,7 +12,9 @@
 //   {type:'arc',        x, y, z?, i?, j?, cw} arc in XY plane, center-offset
 //   {type:'feed',       xy?, z?}             set feed rates in units/min;
 //                                            omitted rate is left unchanged
-//   {type:'toolchange', tool, name?}         switch active tool (number)
+//   {type:'toolchange', tool, name?, rpm?}   switch active tool (number);
+//                                            rpm = spindle speed for the new
+//                                            tool (posts emit TR/S with it)
 //   {type:'comment',    text}
 //
 // Coordinates are job-space, absolute. Units are whatever the surrounding
@@ -21,6 +23,11 @@
 export function movesToSbp(moves) {
   let sbp = '';
   let lastPos = { x: 0, y: 0, z: 0 };
+  // The spindle must be stopped across a tool change, and speed/start belong
+  // AFTER the change (&Tool, C9) so they apply to the new tool. The first
+  // toolchange in a stream is therefore where the spindle starts — posts
+  // must not C6 in their header when the stream contains a toolchange.
+  let spindleOn = false;
 
   moves.forEach(move => {
     if (move.type === 'comment') {
@@ -37,9 +44,14 @@ export function movesToSbp(moves) {
     }
 
     if (move.type === 'toolchange') {
+      if (spindleOn) sbp += `C7\n`;
       sbp += `'Tool change: T${move.tool}${move.name ? ' (' + move.name + ')' : ''}\n`;
       sbp += `&Tool = ${move.tool}\n`;
       sbp += `C9\n`;
+      if (move.rpm !== undefined) sbp += `TR,${move.rpm}\n`;
+      sbp += `C6\n`;
+      sbp += `PAUSE 2\n`;
+      spindleOn = true;
       return;
     }
 
@@ -83,6 +95,7 @@ export function movesToGcode(moves, { feedRate } = {}) {
   let currentFeed = null;          // feed rate currently active on the machine
   let pendingFeed = feedRate ?? null; // feed rate the next cut should run at
   let lastPos = { x: 0, y: 0, z: 0 };
+  let spindleOn = false;           // same contract as movesToSbp
 
   const feedWord = () => {
     if (pendingFeed != null && pendingFeed !== currentFeed) {
@@ -104,8 +117,12 @@ export function movesToGcode(moves, { feedRate } = {}) {
     }
 
     if (move.type === 'toolchange') {
+      if (spindleOn) gcode += 'M5\n';
       gcode += `(Tool change: T${move.tool}${move.name ? ' ' + move.name : ''})\n`;
       gcode += `T${move.tool} M6\n`;
+      gcode += move.rpm !== undefined ? `M3 S${move.rpm}\n` : 'M3\n';
+      gcode += 'G4 P2\n';
+      spindleOn = true;
       return;
     }
 

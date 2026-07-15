@@ -7,8 +7,8 @@
 //     units: 'in' | 'mm',            // canonical: 'in' (SBP-native)
 //     stock: { w, h, thickness },    // origin bottom-left, Z=0 = stock top
 //     safeZ,                         // retract height, > 0
-//     spindleSpeed,
-//     tools: { [n]: { name } },      // tool table, keyed by tool number
+//     spindleSpeed,                  // default rpm; tools may override
+//     tools: { [n]: { name, rpm? } },// tool table, keyed by tool number
 //     operations: [ Operation ]
 //   }
 //   Operation {
@@ -50,6 +50,7 @@ export function composeJob(job) {
         type: 'toolchange',
         tool: op.tool,
         name: job.tools?.[op.tool]?.name,
+        rpm: job.tools?.[op.tool]?.rpm ?? job.spindleSpeed,
       });
       currentTool = op.tool;
       // After a tool change Z position is not trustworthy — re-assert safe Z.
@@ -93,9 +94,14 @@ export function postJobToSbp(job, moves, { title = 'Seams composer' } = {}) {
   }
   lines.push('');
   lines.push('SA');
-  lines.push(`TR,${job.spindleSpeed}`);
-  lines.push('C6');
-  lines.push('PAUSE 2');
+  // Spindle start belongs to the first toolchange (C7-if-running, &Tool, C9,
+  // TR, C6 — see movesToSbp); starting it here would run the wrong speed
+  // through the change. Only spin up in the header for tool-less streams.
+  if (!moves.some(m => m.type === 'toolchange')) {
+    lines.push(`TR,${job.spindleSpeed}`);
+    lines.push('C6');
+    lines.push('PAUSE 2');
+  }
   lines.push(`JZ,${job.safeZ.toFixed(4)}`);
   lines.push('');
   lines.push(movesToSbp(moves));
@@ -115,8 +121,10 @@ export function postJobToGcode(job, moves, { title = 'Seams composer' } = {}) {
   lines.push(job.units === 'mm' ? 'G21' : 'G20');
   lines.push('G17');
   lines.push(`G0 Z${job.safeZ.toFixed(4)}`);
-  lines.push(`M3 S${job.spindleSpeed}`);
-  lines.push('G4 P2');
+  if (!moves.some(m => m.type === 'toolchange')) {
+    lines.push(`M3 S${job.spindleSpeed}`);
+    lines.push('G4 P2');
+  }
   lines.push('');
   lines.push(movesToGcode(moves));
   lines.push('M5');
