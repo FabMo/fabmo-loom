@@ -177,27 +177,79 @@ export function verifyJob(job, composedMoves, opts = {}) {
     // cannot catch planning errors; the part surface (top-down raycast
     // heightmap, attached by the app) is independent ground truth. A cut
     // below it means the tool is inside material the plan never owned —
-    // e.g. a pocket reaching under a tunnel roof. Tool-CENTER samples
-    // only (v1): periphery and holder are not modeled.
-    if (job.partSurface?.heightmap && fp.cuts) {
-      const ps = job.partSurface;
-      const hm = ps.heightmap;
+    // e.g. a pocket reaching under a tunnel roof. v2: the whole tool
+    // CUTTING FACE is checked, not just the center — a 1/16"-wide ledge
+    // under the kerf edge is invisible to a center sample (the hood
+    // window seat a rim profile machined away, 2026-07-05). The face is
+    // modeled per tool kind: flat disc at z, ball rising toward the rim,
+    // vee cone. Cells within edgeMargin of the swept rim are skipped:
+    // detection contours are grid-quantized (traces dilated half a cell),
+    // so the kerf edge legitimately grazes wall cells by ~a half-cell.
+    // A single-part job attaches job.partSurface; a multi-part sheet
+    // attaches job.partSurfaces — one patch per placed instance, each an
+    // independent {heightmap, x, y}. A sample is judged against every
+    // patch its tool footprint reaches (parts dragged close together must
+    // not let one part's kerf chew a neighbor); ground outside all
+    // patches is open sheet.
+    const patches = (job.partSurfaces ?? (job.partSurface ? [job.partSurface] : []))
+      .filter(p => p?.heightmap);
+    if (patches.length && fp.cuts) {
+      const kind = tool.kind ?? 'flat';
+      const veeTan = kind === 'vee' ? Math.tan(((tool.angleDeg ?? 90) / 2) * Math.PI / 180) : null;
+      const pinfo = patches.map(ps => {
+        const hm = ps.heightmap;
+        const cell = Math.max(hm.dx, hm.dy);
+        return {
+          hm,
+          ox: (ps.x ?? 0) + hm.originX, oy: (ps.y ?? 0) + hm.originY,
+          // a vee tip rides ON sloped bands where the cell-center height is
+          // off by (cell/2)·slope — same tolerance floor as the heightmap
+          // target check
+          tol: kind === 'vee' ? Math.max(partSurfaceTol, 0.6 * cell) : partSurfaceTol,
+          rEff: radius != null ? Math.max(0, radius - Math.max(kerfGrazeTol, 0.75 * cell)) : 0,
+        };
+      });
+      const step = Math.min(...pinfo.map(p => Math.max(p.hm.dx, p.hm.dy)));
       let worst = 0, worstAt = null, violations = 0;
-      samplePolylines(polylines, Math.max(hm.dx, hm.dy), (x, y, z) => {
+      samplePolylines(polylines, step, (x, y, z) => {
         if (z >= -EPS) return; // at/above stock top: positioning
-        // heights[i] sits at originX + i*dx (the producer put the origin on
-        // cell (0,0)'s CENTER), so round() is the nearest actual sample
-        const c = Math.round((x - (ps.x ?? 0) - hm.originX) / hm.dx);
-        const r = Math.round((y - (ps.y ?? 0) - hm.originY) / hm.dy);
-        if (c < 0 || c >= hm.cols || r < 0 || r >= hm.rows) return; // off the map: no material
-        const s = hm.heights[r * hm.cols + c];
-        if (z < s - partSurfaceTol) {
-          violations++;
-          if (s - z > worst) { worst = s - z; worstAt = { x, y }; }
+        for (const P of pinfo) {
+          const { hm, ox, oy, tol, rEff } = P;
+          // skip patches the tool footprint can't reach
+          if (x + rEff < ox - hm.dx || x - rEff > ox + hm.cols * hm.dx ||
+              y + rEff < oy - hm.dy || y - rEff > oy + hm.rows * hm.dy) continue;
+          const checkCell = (c, r, dsq) => {
+            if (c < 0 || c >= hm.cols || r < 0 || r >= hm.rows) return; // off the map: no material
+            const s = hm.heights[r * hm.cols + c];
+            // cutting-face height at this horizontal offset from the axis
+            const zc = kind === 'ball' ? z + radius - Math.sqrt(Math.max(0, radius * radius - dsq))
+              : kind === 'vee' ? z + Math.sqrt(dsq) / veeTan
+              : z;
+            if (zc < s - tol) {
+              violations++;
+              if (s - zc > worst) { worst = s - zc; worstAt = { x, y }; }
+            }
+          };
+          // heights[i] sits at originX + i*dx (the producer put the origin
+          // on cell (0,0)'s CENTER), so round() is the nearest actual
+          // sample. The center cell is always checked, even when rEff
+          // degenerates (a tiny bit on a coarse grid).
+          checkCell(Math.round((x - ox) / hm.dx), Math.round((y - oy) / hm.dy), 0);
+          if (rEff > 0) {
+            const c0 = Math.ceil((x - rEff - ox) / hm.dx), c1 = Math.floor((x + rEff - ox) / hm.dx);
+            const r0 = Math.ceil((y - rEff - oy) / hm.dy), r1 = Math.floor((y + rEff - oy) / hm.dy);
+            for (let r = r0; r <= r1; r++) {
+              for (let c = c0; c <= c1; c++) {
+                const dsq = (ox + c * hm.dx - x) ** 2 + (oy + r * hm.dy - y) ** 2;
+                if (dsq === 0 || dsq > rEff * rEff) continue;
+                checkCell(c, r, dsq);
+              }
+            }
+          }
         }
       });
       if (violations) {
-        errors.push(`"${name}" cuts ${worst.toFixed(3)} below the part surface at (${worstAt.x.toFixed(2)}, ${worstAt.y.toFixed(2)}) — ${violations} sample(s); tool driven into material above the floor (tunnel/overhang?)`);
+        errors.push(`"${name}" cuts ${worst.toFixed(3)} below the part surface at (${worstAt.x.toFixed(2)}, ${worstAt.y.toFixed(2)}) — ${violations} sample(s); tool cutting face inside material above the floor (tunnel/overhang/ledge?)`);
       }
     }
 
@@ -406,10 +458,10 @@ function checkRegionTarget(name, target, polylines, fp, radius, gougeTol, covera
   co.AddPaths(subject, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
   const legal = new ClipperLib.Paths();
   co.Execute(legal, -(radius - gougeTol) * SCALE);
+  const legalIdx = buildPointInPathsIndex(legal);
 
   let samples = 0, gouges = 0, deepest = 0, depthViolations = 0;
   let firstGouge = null;
-  const legalIdx = buildPointInPathsIndex(legal);
   samplePolylines(polylines, radius / 2, (x, y, z) => {
     samples++;
     if (z >= -EPS) return; // above stock top: positioned, not cutting
@@ -547,7 +599,7 @@ function checkHeightmapTarget(name, target, polylines, radius, tool, gougeTol, e
   };
 
   let samples = 0, gouges = 0, worst = 0, maskViolations = 0;
-  let firstGouge = null;
+  let firstGouge = null, firstMaskOut = null;
   samplePolylines(polylines, Math.min(dx, dy), (x, y, z) => {
     samples++;
     const pen = constraint(x, y) - z;
@@ -556,13 +608,22 @@ function checkHeightmapTarget(name, target, polylines, radius, tool, gougeTol, e
       if (pen > worst) worst = pen;
       if (!firstGouge) firstGouge = { x, y, z };
     }
-    if (z < -EPS && !inMask(x, y) && !inMask(x - 1e-7, y) && !inMask(x + 1e-7, y)) maskViolations++;
+    // clipped run endpoints lie ON the mask boundary to within the
+    // clipper's 1e-6 integer quantum, on either side — probe a cross at
+    // that scale (both axes: an endpoint on a horizontal edge is invisible
+    // to x-jitter) before calling a sample outside
+    if (z < -EPS && !inMask(x, y)
+        && !inMask(x - 2e-6, y) && !inMask(x + 2e-6, y)
+        && !inMask(x, y - 2e-6) && !inMask(x, y + 2e-6)) {
+      maskViolations++;
+      if (!firstMaskOut) firstMaskOut = { x, y, z };
+    }
   });
   if (gouges > 0) {
     errors.push(`"${name}" gouges its declared surface: ${gouges}/${samples} samples, worst ${worst.toFixed(4)} deep, first at (${fmt3(firstGouge.x)}, ${fmt3(firstGouge.y)})`);
   }
   if (maskViolations > 0) {
-    errors.push(`"${name}" cuts outside its declared mask: ${maskViolations}/${samples} samples`);
+    errors.push(`"${name}" cuts outside its declared mask: ${maskViolations}/${samples} samples, first at (${fmt3(firstMaskOut.x)}, ${fmt3(firstMaskOut.y)}, z=${fmt3(firstMaskOut.z)})`);
   }
 
   return { name, type: 'heightmap', samples, gouges, worstPenetration: Math.round(worst * 1e5) / 1e5, maskViolations };
