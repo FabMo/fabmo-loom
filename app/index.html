@@ -1,191 +1,545 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FabMo - Loom</title>
-<link rel="icon" type="image/jpeg" href="../assets/loom-logo.jpg">
-<!-- ShopBot Labs shared themes — a per-deployment mount (404s harmlessly
-     in public clones; theme-bridge.css is inert without a theme class) -->
-<link rel="stylesheet" href="../../ui_testbed/themes/tokens.css">
-<link rel="stylesheet" href="../../ui_testbed/themes/components.css">
-<link rel="stylesheet" href="../../ui_testbed/themes/theme-picker.css">
 
-<style>
-  :root {
-    --navy: #1b2a6b; --sky: #7ba3d4; --red: #cc2229;
-    --bg: #f7f6f2; --panel: #ffffff; --ink: #22263a; --mut: #6a7086;
-    --ok: #1a7f4b; --bad: #b3261e; --amber: #8a6d1a;
-    /* chrome tokens (the wood-board colors are NOT themed — they are the material) */
-    --header-bg: var(--navy);
-    --accent: var(--navy);          /* ghost buttons, chip text, links, big-input border */
-    --btn-bg: var(--navy);
-    --border: #e3e1d8; --input-border: #c9c6ba; --input-bg: #ffffff;
-    --chip-bg: #eef1fa; --code-bg: #f4f4f0; --disabled-bg: #b9bcc9;
-    --surround: #fdfdfb;            /* the 2D canvas / 3D scene backdrop around the board */
-  }
-  :root[data-theme="dark"] {
-    --sky: #8fb4de;
-    --bg: #12141c; --panel: #1b1e2a; --ink: #e6e8f0; --mut: #9aa0b4;
-    --ok: #35c07a; --bad: #ff6b62; --amber: #d8a83a;
-    --header-bg: #161d3d;
-    --accent: #8fb4de;
-    --btn-bg: #33509e;
-    --border: #2c3040; --input-border: #3a3f52; --input-bg: #232736;
-    --chip-bg: #262b3d; --code-bg: #171a24; --disabled-bg: #363b4d;
-    --surround: #0f1119;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 14px; padding: 12px 22px; background: var(--header-bg); color: #fff; }
-  header img { height: 42px; border-radius: 6px; }
-  header h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
-  header .sub { font-size: .78rem; opacity: .75; }
-  header .spacer { flex: 1; }
-  #themeToggle { background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 6px 12px; font-size: .95rem; font-weight: 500; }
-  #themeToggle:hover { background: rgba(255,255,255,.2); }
-  main { max-width: 1360px; margin: 0 auto; padding: 16px 22px 40px; display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 18px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
-  label { display: block; font-size: .76rem; color: var(--mut); margin: 8px 0 3px; }
-  input, textarea, select { width: 100%; padding: 7px 9px; font-size: .95rem; border: 1px solid var(--input-border); border-radius: 8px; background: var(--input-bg); color: var(--ink); font-family: inherit; }
-  textarea { resize: vertical; min-height: 64px; }
-  button { font-size: .95rem; padding: 9px 16px; border-radius: 9px; border: none; background: var(--btn-bg); color: #fff; cursor: pointer; font-weight: 600; }
-  button:disabled { background: var(--disabled-bg); cursor: not-allowed; }
-  button.ghost { background: transparent; color: var(--accent); border: 1.5px solid var(--accent); }
-  button.small { font-size: .78rem; padding: 5px 10px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chips button { background: var(--chip-bg); color: var(--accent); font-weight: 500; font-size: .78rem; padding: 5px 10px; border-radius: 999px; }
-  .asset-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--chip-bg); color: var(--accent); font-size: .78rem; padding: 4px 10px; border-radius: 999px; }
-  .asset-chip img { height: 20px; width: 20px; object-fit: cover; border-radius: 4px; }
-  .asset-chip .x { background: none; border: none; color: var(--accent); font-weight: 700; padding: 0 2px; font-size: .85rem; cursor: pointer; }
-  #history { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow-y: auto; }
-  .turn { border-left: 3px solid var(--sky); padding: 4px 10px; font-size: .82rem; }
-  .turn .you { color: var(--mut); }
-  .turn .did { margin-top: 2px; }
-  .turn .declined { color: var(--amber); margin-top: 2px; }
-  .turn.err { border-left-color: var(--bad); color: var(--bad); }
-  .turn .qid { font-size: .66rem; color: var(--mut); margin-top: 3px; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .turn .qid:hover { text-decoration: underline; }
-  details { margin-top: 10px; }
-  summary { cursor: pointer; font-size: .82rem; color: var(--mut); }
-  .keyrow { display: flex; gap: 8px; align-items: center; }
-  .keynote { font-size: .72rem; color: var(--mut); margin-top: 4px; }
-  canvas { width: 100%; height: auto; display: block; background: var(--surround); border-radius: 10px; border: 1px solid var(--border); }
-  .verdict { display: flex; align-items: baseline; gap: 10px; margin: 10px 0 4px; }
-  .badge { font-size: 1.1rem; font-weight: 700; padding: 3px 12px; border-radius: 999px; color: #fff; }
-  .badge.ok { background: var(--ok); } .badge.bad { background: var(--bad); } .badge.wait { background: var(--mut); }
-  .numbers { font-size: .84rem; line-height: 1.55; }
-  .numbers b { font-variant-numeric: tabular-nums; }
-  .errors { color: var(--bad); font-size: .82rem; white-space: pre-wrap; }
-  .warnings { color: var(--amber); font-size: .82rem; white-space: pre-wrap; }
-  .btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-  #appName { font-size: 1.05rem; font-weight: 700; margin: 0 0 2px; }
-  #controls { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
-  #controls .ctl-text { grid-column: 1 / -1; }
-  #controls .ctl-text input { font-size: 1.35rem; border: 2px solid var(--accent); border-radius: 10px; }
-  #recipeJson { font-size: .72rem; background: var(--code-bg); border-radius: 8px; padding: 8px; overflow-x: auto; max-height: 260px; }
-  .foot-note { font-size: .72rem; color: var(--mut); margin-top: 8px; }
-  footer { text-align: center; font-size: .75rem; color: var(--mut); padding: 12px; }
-  footer a { color: var(--accent); }
-</style>
-<!-- bridge loads AFTER the app's own styles so it wins without !important -->
-<link rel="stylesheet" href="theme-bridge.css">
-<script>
-  // set the theme before first paint so there's no light flash on dark loads.
-  // stored choice wins; otherwise follow the OS. main.js wires the toggle.
-  (function () {
-    var stored = null;
-    try { stored = localStorage.getItem('loom:theme'); } catch (e) {}
-    var dark = stored ? stored === 'dark'
-      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  })();
-</script>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FabMo Loom</title>
+  <link rel="icon" type="image/jpeg" href="../assets/loom-logo.jpg">
+  <!-- ShopBot Labs shared themes — a per-deployment mount (404s harmlessly
+     in public clones; theme-bridge.css is inert without a theme class) -->
+  <link rel="stylesheet" href="../../ui_testbed/themes/tokens.css">
+  <link rel="stylesheet" href="../../ui_testbed/themes/components.css">
+  <link rel="stylesheet" href="../../ui_testbed/themes/theme-picker.css">
+
+  <style>
+    :root {
+      --navy: #1b2a6b;
+      --sky: #7ba3d4;
+      --red: #cc2229;
+      --bg: #f7f6f2;
+      --panel: #ffffff;
+      --ink: #22263a;
+      --mut: #6a7086;
+      --ok: #1a7f4b;
+      --bad: #b3261e;
+      --amber: #8a6d1a;
+      /* chrome tokens (the wood-board colors are NOT themed — they are the material) */
+      --header-bg: var(--navy);
+      --accent: var(--navy);
+      /* ghost buttons, chip text, links, big-input border */
+      --btn-bg: var(--navy);
+      --border: #e3e1d8;
+      --input-border: #c9c6ba;
+      --input-bg: #ffffff;
+      --chip-bg: #eef1fa;
+      --code-bg: #f4f4f0;
+      --disabled-bg: #b9bcc9;
+      --surround: #fdfdfb;
+      /* the 2D canvas / 3D scene backdrop around the board */
+    }
+
+    :root[data-theme="dark"] {
+      --sky: #8fb4de;
+      --bg: #12141c;
+      --panel: #1b1e2a;
+      --ink: #e6e8f0;
+      --mut: #9aa0b4;
+      --ok: #35c07a;
+      --bad: #ff6b62;
+      --amber: #d8a83a;
+      --header-bg: #161d3d;
+      --accent: #8fb4de;
+      --btn-bg: #33509e;
+      --border: #2c3040;
+      --input-border: #3a3f52;
+      --input-bg: #232736;
+      --chip-bg: #262b3d;
+      --code-bg: #171a24;
+      --disabled-bg: #363b4d;
+      --surround: #0f1119;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 22px;
+      background: var(--header-bg);
+      color: #fff;
+    }
+
+    header img {
+      height: 42px;
+      border-radius: 6px;
+    }
+
+    header h1 {
+      font-size: 1.15rem;
+      margin: 0;
+      font-weight: 600;
+    }
+
+    header .sub {
+      font-size: .78rem;
+      opacity: .75;
+    }
+
+    header .spacer {
+      flex: 1;
+    }
+
+    #themeToggle {
+      background: rgba(255, 255, 255, .12);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, .25);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: .95rem;
+      font-weight: 500;
+    }
+
+    #themeToggle:hover {
+      background: rgba(255, 255, 255, .2);
+    }
+
+    main {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 16px 22px 40px;
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) 1fr;
+      gap: 18px;
+    }
+
+    @media (max-width: 900px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+
+    label {
+      display: block;
+      font-size: .76rem;
+      color: var(--mut);
+      margin: 8px 0 3px;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      padding: 7px 9px;
+      font-size: .95rem;
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      background: var(--input-bg);
+      color: var(--ink);
+      font-family: inherit;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 64px;
+    }
+
+    button {
+      font-size: .95rem;
+      padding: 9px 16px;
+      border-radius: 9px;
+      border: none;
+      background: var(--btn-bg);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button:disabled {
+      background: var(--disabled-bg);
+      cursor: not-allowed;
+    }
+
+    button.ghost {
+      background: transparent;
+      color: var(--accent);
+      border: 1.5px solid var(--accent);
+    }
+
+    button.small {
+      font-size: .78rem;
+      padding: 5px 10px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .chips button {
+      background: var(--chip-bg);
+      color: var(--accent);
+      font-weight: 500;
+      font-size: .78rem;
+      padding: 5px 10px;
+      border-radius: 999px;
+    }
+
+    .asset-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--chip-bg);
+      color: var(--accent);
+      font-size: .78rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+
+    .asset-chip img {
+      height: 20px;
+      width: 20px;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+
+    .asset-chip .x {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-weight: 700;
+      padding: 0 2px;
+      font-size: .85rem;
+      cursor: pointer;
+    }
+
+    #history {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 46vh;
+      overflow-y: auto;
+    }
+
+    .turn {
+      border-left: 3px solid var(--sky);
+      padding: 4px 10px;
+      font-size: .82rem;
+    }
+
+    .turn .you {
+      color: var(--mut);
+    }
+
+    .turn .did {
+      margin-top: 2px;
+    }
+
+    .turn .declined {
+      color: var(--amber);
+      margin-top: 2px;
+    }
+
+    .turn.err {
+      border-left-color: var(--bad);
+      color: var(--bad);
+    }
+
+    .turn .qid {
+      font-size: .66rem;
+      color: var(--mut);
+      margin-top: 3px;
+      cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .turn .qid:hover {
+      text-decoration: underline;
+    }
+
+    details {
+      margin-top: 10px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-size: .82rem;
+      color: var(--mut);
+    }
+
+    .keyrow {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .keynote {
+      font-size: .72rem;
+      color: var(--mut);
+      margin-top: 4px;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: var(--surround);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+
+    .verdict {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin: 10px 0 4px;
+    }
+
+    .badge {
+      font-size: 1.1rem;
+      font-weight: 700;
+      padding: 3px 12px;
+      border-radius: 999px;
+      color: #fff;
+    }
+
+    .badge.ok {
+      background: var(--ok);
+    }
+
+    .badge.bad {
+      background: var(--bad);
+    }
+
+    .badge.wait {
+      background: var(--mut);
+    }
+
+    .numbers {
+      font-size: .84rem;
+      line-height: 1.55;
+    }
+
+    .numbers b {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .errors {
+      color: var(--bad);
+      font-size: .82rem;
+      white-space: pre-wrap;
+    }
+
+    .warnings {
+      color: var(--amber);
+      font-size: .82rem;
+      white-space: pre-wrap;
+    }
+
+    .btns {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+
+    #appName {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin: 0 0 2px;
+    }
+
+    #controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 12px;
+    }
+
+    #controls .ctl-text {
+      grid-column: 1 / -1;
+    }
+
+    #controls .ctl-text input {
+      font-size: 1.35rem;
+      border: 2px solid var(--accent);
+      border-radius: 10px;
+    }
+
+    #recipeJson {
+      font-size: .72rem;
+      background: var(--code-bg);
+      border-radius: 8px;
+      padding: 8px;
+      overflow-x: auto;
+      max-height: 260px;
+    }
+
+    .foot-note {
+      font-size: .72rem;
+      color: var(--mut);
+      margin-top: 8px;
+    }
+
+    footer {
+      text-align: center;
+      font-size: .75rem;
+      color: var(--mut);
+      padding: 12px;
+    }
+
+    footer a {
+      color: var(--accent);
+    }
+  </style>
+  <!-- bridge loads AFTER the app's own styles so it wins without !important -->
+  <link rel="stylesheet" href="theme-bridge.css">
+  <script>
+    // set the theme before first paint so there's no light flash on dark loads.
+    // stored choice wins; otherwise follow the OS. main.js wires the toggle.
+    (function () {
+      var stored = null;
+      try { stored = localStorage.getItem('loom:theme'); } catch (e) { }
+      var dark = stored ? stored === 'dark'
+        : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    })();
+  </script>
 </head>
+
 <body>
-<header>
-  <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
-  <div>
-    <h1>FabMo - Loom</h1>
-    <div class="sub">A ShopBot Project · <span id="app-version">v0.64</span></div>
-  </div>
-  <div class="spacer"></div>
-  <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
-</header>
-<main>
-  <section class="panel">
-    <label for="prompt">What should the app do?</label>
-    <textarea id="prompt" placeholder='e.g. "an app to engrave names"'></textarea>
-    <div class="btns">
-      <button id="generate">Generate</button>
-      <button id="reset" class="ghost small">Start over</button>
+  <header>
+    <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
+    <div>
+      <h1>FabMo Loom</h1>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.65</span></div>
     </div>
-    <!-- Suggested prompts are teaching aids, not shortcuts: full sentences
+    <div class="spacer"></div>
+    <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
+  </header>
+  <main>
+    <section class="panel">
+      <label for="prompt">What should the app do?</label>
+      <textarea id="prompt" placeholder='e.g. "an app to engrave names"'></textarea>
+      <div class="btns">
+        <button id="generate">Generate</button>
+        <button id="reset" class="ghost small">Start over</button>
+      </div>
+      <!-- Suggested prompts are teaching aids, not shortcuts: full sentences
          with ___ blanks, filled by renderChips() from the recipe state.
          Clicking never submits — it drops the sentence in the box with the
          first blank selected, so the last step of every chip is typing. -->
-    <div class="chips" id="chips"></div>
-    <div id="history" class="sb-panel"></div>
+      <div class="chips" id="chips"></div>
+      <div id="history" class="sb-panel"></div>
 
-    <div id="inviteBar" class="keynote" style="display:none"></div>
+      <div id="inviteBar" class="keynote" style="display:none"></div>
 
-    <details id="keyBox">
-      <summary>AI account (bring your own key)</summary>
-      <div class="keyrow">
-        <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
-        <button id="saveKey" class="small">Save</button>
-      </div>
-      <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the key never touches our server. Without a key (or a guest-pass link), the controls on the right still work; prompting is disabled.</div>
-    </details>
-  </section>
+      <details id="keyBox">
+        <summary>AI account (bring your own key)</summary>
+        <div class="keyrow">
+          <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
+          <button id="saveKey" class="small">Save</button>
+        </div>
+        <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the
+          key never touches our server. Without a key (or a guest-pass link), the controls on the right still work;
+          prompting is disabled.</div>
+      </details>
+    </section>
 
-  <section class="panel" id="appPanel" style="position:relative">
-    <p id="appName">Untitled</p>
-    <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-      <div style="width:130px"><label>Stock thickness (in)</label><input id="thickness" type="number" step="0.125" min="0.125" value="0.5"></div>
-      <div id="minStock" class="numbers" style="color:var(--mut)"></div>
-    </div>
-    <div id="controls"></div>
-    <div id="assets" class="chips"></div>
-    <div id="previewWrap" style="position:relative">
-      <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
-        <button id="btn3d" class="small">3D</button>
-        <button id="btn2d" class="small ghost">2D</button>
+    <section class="panel" id="appPanel" style="position:relative">
+      <p id="appName">Untitled</p>
+      <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
+        <div style="width:130px"><label>Stock thickness (in)</label><input id="thickness" type="number" step="0.125"
+            min="0.125" value="0.5"></div>
+        <div id="minStock" class="numbers" style="color:var(--mut)"></div>
       </div>
-      <div id="assembleWrap" style="display:none; position:absolute; left:50%; transform:translateX(-50%); bottom:10px; z-index:5; align-items:center; gap:8px; padding:5px 12px; border-radius:999px; background:var(--panel); border:1px solid var(--border); box-shadow:0 1px 6px rgba(0,0,0,.12)">
-        <label for="assembleSlider" style="margin:0; white-space:nowrap">assemble</label>
-        <input id="assembleSlider" type="range" min="0" max="1" step="0.005" value="0" style="width:180px">
+      <!-- Shop settings: physical facts (machine reach, sheets on hand),
+         stored app-level — they outlive every recipe. Optional: blank =
+         no limit. Editing re-weaves, so a layout re-nests to the machine
+         the moment its size is typed. -->
+      <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap">
+        <div><label>Machine cut area W × H (in)</label>
+          <div style="display:flex; gap:6px; align-items:center">
+            <input id="shopMachineW" type="number" min="1" step="1" placeholder="any" style="width:72px">
+            <span style="color:var(--mut)">×</span>
+            <input id="shopMachineH" type="number" min="1" step="1" placeholder="any" style="width:72px">
+          </div>
+        </div>
+        <div><label>Material sheet W × H (in)</label>
+          <div style="display:flex; gap:6px; align-items:center">
+            <input id="shopMaterialW" type="number" min="1" step="1" placeholder="any" style="width:72px">
+            <span style="color:var(--mut)">×</span>
+            <input id="shopMaterialH" type="number" min="1" step="1" placeholder="any" style="width:72px">
+          </div>
+        </div>
+        <div class="keynote" style="max-width:280px">Optional — set once for your shop. Layouts nest to fit; a cut that
+          can't fit any layout warns instead of exporting a fiction.</div>
       </div>
-      <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
-      <div id="preview3d"></div>
-    </div>
-    <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span></div>
-    <div id="numbers" class="numbers"></div>
-    <div id="errors" class="errors"></div>
-    <div id="warnings" class="warnings"></div>
-    <div class="btns">
-      <button id="dlSbp" disabled>Download .sbp</button>
-      <button id="dlNc" class="ghost" disabled>Download .nc</button>
-      <button id="saveRecipe" class="ghost small">Save recipe</button>
-      <button id="openRecipe" class="ghost small">Open recipe…</button>
-      <button id="addAsset" class="ghost small">Add image/graphic…</button>
-      <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
-      <input id="assetFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg" style="display:none">
-    </div>
-    <div id="handoffs" class="btns"></div>
-    <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must fixture. The 3D view is the simulated cut surface (drag to rotate); 2D shows the toolpath. Exports unlock only on VERIFIED. First run cuts air.</div>
-    <details>
-      <summary>the recipe (what the prompts are editing)</summary>
-      <pre id="recipeJson"></pre>
-    </details>
-  </section>
-</main>
-<footer>
-  FabMo Loom — from the makers of <a href="https://www.shopbottools.com">ShopBot</a> ·
-  <a href="https://github.com/FabMo/fabmo-loom">github.com/FabMo/fabmo-loom</a>
-</footer>
-<script type="importmap">
+      <div id="controls"></div>
+      <div id="assets" class="chips"></div>
+      <div id="previewWrap" style="position:relative">
+        <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
+          <button id="btn3d" class="small">3D</button>
+          <button id="btn2d" class="small ghost">2D</button>
+        </div>
+        <div id="assembleWrap"
+          style="display:none; position:absolute; left:50%; transform:translateX(-50%); bottom:10px; z-index:5; align-items:center; gap:8px; padding:5px 12px; border-radius:999px; background:var(--panel); border:1px solid var(--border); box-shadow:0 1px 6px rgba(0,0,0,.12)">
+          <label for="assembleSlider" style="margin:0; white-space:nowrap">assemble</label>
+          <input id="assembleSlider" type="range" min="0" max="1" step="0.005" value="0" style="width:180px">
+        </div>
+        <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
+        <div id="preview3d"></div>
+      </div>
+      <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span>
+      </div>
+      <div id="numbers" class="numbers"></div>
+      <div id="errors" class="errors"></div>
+      <div id="warnings" class="warnings"></div>
+      <div class="btns">
+        <button id="dlSbp" disabled>Download .sbp</button>
+        <button id="dlNc" class="ghost" disabled>Download .nc</button>
+        <button id="saveRecipe" class="ghost small">Save recipe</button>
+        <button id="openRecipe" class="ghost small">Open recipe…</button>
+        <button id="addAsset" class="ghost small">Add image/graphic…</button>
+        <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
+        <input id="assetFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg"
+          style="display:none">
+      </div>
+      <div id="handoffs" class="btns"></div>
+      <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the
+        full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must
+        fixture. The 3D view is the simulated cut surface (drag to rotate); 2D shows the toolpath. Exports unlock only
+        on VERIFIED. First run cuts air.</div>
+      <details>
+        <summary>the recipe (what the prompts are editing)</summary>
+        <pre id="recipeJson"></pre>
+      </details>
+    </section>
+  </main>
+  <footer>
+    FabMo Loom — from the makers of <a href="https://www.shopbottools.com">ShopBot</a> ·
+    <a href="https://github.com/FabMo/fabmo-loom">github.com/FabMo/fabmo-loom</a>
+  </footer>
+  <script type="importmap">
 {
   "imports": {
     "three": "../node_modules/three/build/three.module.js",
@@ -196,6 +550,7 @@
   }
 }
 </script>
-<script type="module" src="main.js"></script>
+  <script type="module" src="main.js"></script>
 </body>
+
 </html>

@@ -25,6 +25,7 @@ let viewMode = localStorage.getItem('loom:view') ?? '3d';
 let view3d = null;
 let recipe = loadRecipe();
 let controlValues = controlDefaults(recipe);
+let shop = loadShop();
 let result = null;
 let busy = false;
 
@@ -41,6 +42,20 @@ function loadRecipe() {
   } catch { /* fresh start */ }
   return structuredClone(EMPTY_RECIPE);
 }
+// Shop settings — the machine's cutting area and the material sheets on
+// hand. Physical facts about the shop, so they live at APP level (like
+// the theme and the key), never in the recipe: changing designs doesn't
+// change the machine. 0 / blank = no limit, which keeps the feature
+// purely additive for anyone who never opens the fields.
+function loadShop() {
+  const base = { machineW: 0, machineH: 0, materialW: 0, materialH: 0 };
+  try { return { ...base, ...JSON.parse(localStorage.getItem('loom:shop') ?? '{}') }; }
+  catch { return base; }
+}
+function persistShop() {
+  try { localStorage.setItem('loom:shop', JSON.stringify(shop)); } catch {}
+}
+
 function persist() {
   try {
     localStorage.setItem('loom:recipe', JSON.stringify(recipe));
@@ -226,7 +241,7 @@ function runAndRender() {
       }
     }
     if (seq !== weaveSeq) return;
-    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains));
+    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains, shop));
     render();
   }, 0));
 }
@@ -253,11 +268,16 @@ function render() {
     $('numbers').innerHTML = targetLines + `<br><b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
       (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '');
     const st = r.preview?.stock;
-    // sheet-fit tag: only meaningful once the board outgrows scrap size —
-    // 4×8 (96×48) is the standard full-size ShopBot bed, either way around
-    const fits48 = st && ((st.w <= 96.01 && st.h <= 48.01) || (st.w <= 48.01 && st.h <= 96.01));
-    const sheetTag = st && Math.max(st.w, st.h) > 24
-      ? (fits48 ? ' — fits one 4×8 sheet ✓' : ' — does NOT fit a 4×8 sheet')
+    // sheet-fit tag: the user's declared material wins; 4×8 (96×48, the
+    // standard full-size sheet) is the fallback once the board outgrows
+    // scrap size. Machine-area fit rides the weave's own warnings.
+    const declared = shop.materialW > 0 && shop.materialH > 0;
+    const mat = declared
+      ? { w: shop.materialW, h: shop.materialH, name: `your ${shop.materialW}×${shop.materialH} sheet` }
+      : { w: 96, h: 48, name: 'one 4×8 sheet' };
+    const fitsMat = st && ((st.w <= mat.w + 0.01 && st.h <= mat.h + 0.01) || (st.w <= mat.h + 0.01 && st.h <= mat.w + 0.01));
+    const sheetTag = st && (declared || Math.max(st.w, st.h) > 24)
+      ? (fitsMat ? ` — fits ${mat.name} ✓` : ` — does NOT fit ${mat.name}`)
       : '';
     $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"${sheetTag}` : '';
   } else {
@@ -615,7 +635,7 @@ async function generate() {
   $('generate').textContent = 'weaving…';
   const stopWeave = startWeave($('appPanel'));
   try {
-    const req = buildParseRequest(recipe, utterance);
+    const req = buildParseRequest(recipe, utterance, { shop });
     // what the model SAW — captured before applyActions mutates the recipe
     // (cloned: with no assets promptRecipeView returns the live object).
     // Rides along to the funnel so intent/replay.mjs can reproduce the parse.
@@ -868,6 +888,23 @@ $('thickness').addEventListener('input', () => {
     debounceRun();
   }
 });
+
+// shop settings inputs: typing a size IS the "re-nest to fit" action —
+// every edit re-weaves, so a layout reflows to the machine the moment
+// the machine is declared, with no separate button to remember
+for (const [id, key] of [
+  ['shopMachineW', 'machineW'], ['shopMachineH', 'machineH'],
+  ['shopMaterialW', 'materialW'], ['shopMaterialH', 'materialH'],
+]) {
+  const el = $(id);
+  el.value = shop[key] > 0 ? shop[key] : '';
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    shop[key] = isNaN(v) || v <= 0 ? 0 : v;
+    persistShop();
+    debounceRun();
+  });
+}
 
 // ------------------------------------------------------------- theme
 // The document theme is set before first paint by an inline script in

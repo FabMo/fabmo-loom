@@ -1903,6 +1903,57 @@ console.log('--- fit failure modes stay honest ---');
   else fail(`remove_shape fit guard failed: ${JSON.stringify(rm.skipped)}`);
 }
 
+// ---------------- shape scalar accepts a {ctrl} binding (the "bull tag" bug) ----------------
+// A fit margin (like every shape scalar) bound to a control the op-param way —
+// {ctrl:"m"} — used to stringify to "[object Object]" and hit the arithmetic
+// parser ("expected a number, name, or ("). The prompt tells the model to
+// "bind margin to a control", so that form MUST resolve. A non-binding object
+// still fails, but with a readable reason instead of the parser vomit.
+console.log('--- shape scalar accepts a {ctrl} control binding ---');
+{
+  const res = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'name in a fitted shape', actions: [
+    { kind: 'add_control', control: { id: 'name', type: 'text', label: 'Name', default: 'DURHAM' } },
+    { kind: 'add_control', control: { id: 'm', type: 'number', label: 'Margin', default: 0.3, min: 0.1, max: 1, step: 0.05 } },
+    { kind: 'set_shape', shape: { id: 'body', path: 'M 0 2 L -2 -2 L 2 -2 Z' } },
+    { kind: 'set_shape', shape: { id: 'tag', fit: { of: 'body', margin: { ctrl: 'm' } } } },  // THE bug: object binding
+    { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 0.6 } } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag', tabs: true } } },
+  ], declined: [] });
+  if (res.applied.length === 6 && !res.skipped.length) pass('fit margin bound to a control {ctrl:"m"} applies (no more [object Object])');
+  else fail(`ctrl-bound margin skipped: ${JSON.stringify(res.skipped)}`);
+
+  const r = run(res.recipe, { name: 'DURHAM', m: 0.3 });
+  if (r.ok && r.sbp) pass('the ctrl-bound fit builds and verifies → SBP');
+  else fail(`ctrl-bound fit failed to build: ${r.errors?.join(' | ')}`);
+
+  // a NON-binding object is still rejected — but readably, not "[object Object]"
+  const bad = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'bad', actions: [
+    { kind: 'set_shape', shape: { id: 'body', path: 'M 0 2 L -2 -2 L 2 -2 Z' } },
+    { kind: 'set_shape', shape: { id: 'tag', fit: { of: 'body', margin: { nope: 1 } } } },
+  ], declined: [] });
+  if (bad.skipped.some(s => s.includes('margin') && s.includes('expected a number') && !s.includes('[object Object]'))) {
+    pass('a non-binding object margin skips with a readable reason (not [object Object])');
+  } else fail(`bad object margin message wrong: ${JSON.stringify(bad.skipped)}`);
+}
+
+// ---------------- prompt: decline representational likenesses, still draw geometry ----------------
+// A bull/eagle/face/logo hand-drawn from a few béziers is a blob that passes
+// every toolpath check yet looks nothing like the subject — worse than a clean
+// decline (the naive user just sees a bad drawing). The grounding prompt must
+// tell the model to refuse the likeness and offer the asset-upload path WITHOUT
+// chilling the geometric shapes it draws well. (Calibration — that it declines a
+// bull but still draws a star — is a live-key check; this guards the guidance.)
+console.log('--- prompt: decline likenesses, offer upload, still author geometry ---');
+{
+  const sys = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
+  const declinesLikeness = /REPRESENTATIONAL/.test(sys) && /blob/.test(sys) && /clean decline beats a bad drawing/.test(sys);
+  const offersAsset = /set_shape asset/.test(sys) && /UPLOAD the artwork/.test(sys) && /MORE DESCRIPTION WILL NOT HELP/.test(sys);
+  const stillAuthorsGeometry = /AUTHOR it yourself as an SVG path/.test(sys) && /star, heart/.test(sys);
+  if (declinesLikeness && offersAsset && stillAuthorsGeometry) {
+    pass('prompt declines likenesses + offers asset upload, and still authors geometric outlines');
+  } else fail(`likeness-decline guidance wrong: decline=${declinesLikeness} asset=${offersAsset} geom=${stillAuthorsGeometry}`);
+}
+
 // ---------------- 29. guest strategies: a sibling app as a catalog verb ----------------
 // The mount mechanism, proven with a mock guest (the real guests — e.g.
 // the furniture designer — live in the private workspace and test
@@ -2525,6 +2576,106 @@ console.log('--- terrain_relief: canyon relief with an embedded plaque ---');
   ], declined: [] });
   if (blocked.skipped.length === 1 && /still referenced/.test(blocked.skipped[0])) pass('remove_terrain refused while an op references it');
   else fail(`remove_terrain not blocked: ${JSON.stringify(blocked.skipped)}`);
+}
+
+// ---------------- shop limits ----------------
+// The user's declared machine cutting area / material sheets (app-level
+// settings, runRecipe's 5th argument) must surface as honest warnings
+// when the finished board cannot fit them — and must change NOTHING
+// when unset.
+
+console.log('--- shop limits: declared machine & material ground the weave ---');
+{
+  const rec = structuredClone(EMPTY_RECIPE);
+  rec.stock.thickness = 0.5;
+  rec.pipeline.push({ id: 'name', strategy: 'vcarve_text', params: { text: 'WORKSHOP', letterHeight: 2 } });
+  rec.pipeline.push({ id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.5 } });
+
+  const free = quiet(() => runRecipe(rec, {}, FONT_SHELF, {}, {}));
+  if (free.ok && !free.warnings.some((w) => /cutting area|material sheets/.test(w))) {
+    pass(`no shop declared: no shop warnings (board ${free.preview.stock.w}" × ${free.preview.stock.h}")`);
+  } else fail(`unset shop changed the weave: ok=${free.ok} warnings=${JSON.stringify(free.warnings)}`);
+
+  const small = quiet(() => runRecipe(rec, {}, FONT_SHELF, {}, { machineW: 4, machineH: 4, materialW: 5, materialH: 5 }));
+  if (small.ok === free.ok && small.warnings.some((w) => w.includes(`machine's cutting area is 4" × 4"`))) {
+    pass('board bigger than the machine: warned, not blocked (the declaration is a fact, not a gate)');
+  } else fail(`machine warning wrong: ok=${small.ok} warnings=${JSON.stringify(small.warnings)}`);
+  if (small.warnings.some((w) => w.includes('5" × 5" material sheets'))) pass('board bigger than the declared sheets: warned');
+  else fail(`material warning missing: ${JSON.stringify(small.warnings)}`);
+
+  const fits = quiet(() => runRecipe(rec, {}, FONT_SHELF, {}, { machineW: 96, machineH: 48 }));
+  if (fits.ok && !fits.warnings.some((w) => /cutting area/.test(w))) pass('board inside the machine: silent (either board orientation counts)');
+  else fail(`fitting board still warned: ${JSON.stringify(fits.warnings)}`);
+
+  // the grounding prompt carries the shop facts only when declared
+  const sysWith = buildParseRequest(rec, 'x', { shop: { machineW: 18, machineH: 24 } }).system;
+  const sysWithout = buildParseRequest(rec, 'x').system;
+  if (sysWith.includes(`cutting area is 18" × 24"`) && !sysWithout.includes('cutting area')) {
+    pass('shop limits in the grounding prompt only when declared');
+  } else fail('shop grounding wrong');
+}
+
+// ---------------- blank text & unknown params: the photo-frame story ----------------
+// Field report (funnel q_41883969 → q_b185f68f): a photo-frame app's
+// caption, bound to a text control, took the WHOLE build down when the
+// field was cleared — and the model invented an "enabled" param trying
+// to make it optional. Blank text on any text op is now a skip-with-
+// warning (the rest of the pipeline still builds); params a strategy
+// doesn't declare warn instead of vanishing.
+
+console.log('--- blank text skips, the rest still builds; unknown params warn ---');
+{
+  const rec = structuredClone(EMPTY_RECIPE);
+  rec.stock.thickness = 0.75;
+  rec.controls.push({ id: 'caption', type: 'text', label: 'Caption', default: 'Our Memory' });
+  rec.pipeline.push({ id: 'caption_engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'caption' }, letterHeight: 0.4, maxDepth: 0.06, place: 'below' } });
+  rec.pipeline.push({ id: 'opening', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 4, height: 6, depth: 0.5, toolDiameter: 0.25 } });
+  rec.pipeline.push({ id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.75 } });
+
+  const typed = run(rec);
+  if (typed.ok && typed.preview.built.some((b) => b.op.id === 'caption_engrave')) {
+    pass('caption typed: full frame builds, caption included');
+  } else fail(`typed caption broke: ok=${typed.ok} errors=${JSON.stringify(typed.errors)}`);
+
+  const blank = run(rec, { caption: '   ' });
+  if (blank.ok
+    && !blank.preview.built.some((b) => b.op.id === 'caption_engrave')
+    && blank.preview.built.some((b) => b.op.id === 'opening')
+    && blank.preview.built.some((b) => b.op.id === 'cutout')
+    && blank.warnings.some((w) => w.includes('caption_engrave') && w.includes('blank'))) {
+    pass('caption cleared: engraving skipped with a warning, opening + cutout still cut');
+  } else fail(`blank caption: ok=${blank.ok} errors=${JSON.stringify(blank.errors)} warnings=${JSON.stringify(blank.warnings)}`);
+
+  // every text entry skips the same way — and an all-skipped recipe still
+  // explains itself instead of a bare "nothing to machine"
+  for (const strategy of ['vcarve_text', 'outline_text', 'pocket_text', 'texture_text']) {
+    const solo = structuredClone(EMPTY_RECIPE);
+    solo.stock.thickness = 0.5;
+    solo.pipeline.push({ id: 'words', strategy, params: { text: '' } });
+    const r = run(solo);
+    if (!r.ok && r.warnings.some((w) => w.includes('blank'))) pass(`${strategy}: blank text skips (warning survives the empty build)`);
+    else fail(`${strategy} blank text: ok=${r.ok} warnings=${JSON.stringify(r.warnings)} errors=${JSON.stringify(r.errors)}`);
+  }
+
+  // the phantom param: reaches the runtime (a hand-edited or version-
+  // drifted recipe), gets NAMED in a warning, changes nothing
+  const phantom = structuredClone(rec);
+  phantom.pipeline[0].params.enabled = 'yes';
+  const ph = run(phantom);
+  if (ph.ok && ph.warnings.some((w) => w.includes('caption_engrave') && w.includes('"enabled"') && w.includes('ignored'))) {
+    pass('undeclared param: named in a warning, build unchanged');
+  } else fail(`phantom param: ok=${ph.ok} warnings=${JSON.stringify(ph.warnings)}`);
+
+  // the intent layer still refuses it outright at authoring time (the
+  // validator test covers the mechanism; this pins the exact session)
+  const res = applyActions(rec, {
+    summary: 'make the caption optional',
+    actions: [{ kind: 'set_operation', operation: { id: 'caption_engrave', params: { enabled: { ctrl: 'showCaption' } } } }],
+    declined: [],
+  });
+  if (res.skipped.length === 1 && res.skipped[0].includes('unknown param "enabled"')) {
+    pass('set_operation with an invented param: skipped with the reason');
+  } else fail(`set_operation leak: applied=${JSON.stringify(res.applied)} skipped=${JSON.stringify(res.skipped)}`);
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

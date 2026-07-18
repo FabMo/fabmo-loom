@@ -133,6 +133,22 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
   const warnings = [];
   const num = (v, what, id) => {
     if (typeof v === 'number') return { value: v };
+    // a control binding {ctrl:"id"} — the SAME form op params and glyph.of
+    // accept, and the one the prompt asks for ("bind margin to a control").
+    // Resolve it against the live control values; without this the object
+    // stringified to "[object Object]" and hit the arithmetic parser.
+    if (v && typeof v === 'object' && 'ctrl' in v) {
+      const raw = vars[v.ctrl];
+      if (raw === undefined) return { error: `shape "${id}" ${what}: bound to missing control "${v.ctrl}"` };
+      const n = typeof raw === 'number' ? raw : parseFloat(raw);
+      if (!Number.isFinite(n)) return { error: `shape "${id}" ${what}: control "${v.ctrl}" is not a number` };
+      return { value: n };
+    }
+    // any other object can't be a scalar — say so plainly instead of feeding
+    // "[object Object]" to the expression parser
+    if (v && typeof v === 'object') {
+      return { error: `shape "${id}" ${what}: expected a number, a control binding {ctrl:"…"}, or an {arithmetic} string` };
+    }
     // "0.2", "rw", "r - t/2", and "{rw}" all work — the model writes
     // braces out of path habit, so strip an outer pair if present
     const src = String(v).trim().replace(/^\{([^{}]*)\}$/, '$1');
@@ -422,8 +438,17 @@ export function controlDefaults(recipe) {
   return values;
 }
 
-function resolveParams(entry, params, controlValues, vars, errors, opId) {
+function resolveParams(entry, op, controlValues, vars, errors, warnings) {
+  const { params, id: opId } = op;
   const out = {};
+  // params not in the entry's spec never reach run() — say so instead of
+  // silently dropping them (an authored "enabled", a param renamed since
+  // the recipe was saved)
+  for (const key of Object.keys(params ?? {})) {
+    if (!(key in entry.params)) {
+      warnings.push(`op "${opId}": "${op.strategy}" has no param "${key}" — it was ignored`);
+    }
+  }
   for (const [key, spec] of Object.entries(entry.params)) {
     let v = params?.[key];
     if (v && typeof v === 'object' && 'ctrl' in v) {
@@ -458,9 +483,16 @@ function resolveParams(entry, params, controlValues, vars, errors, opId) {
 /**
  * @param {Object} fonts  font id → ArrayBuffer (the loaded font shelf,
  *                        see fonts.mjs); strategies look up by param
+ * @param {Object} shop   the user's declared physical limits (app-level
+ *                        settings, NOT part of the recipe document):
+ *                        { machineW, machineH, materialW, materialH } in
+ *                        inches, 0/absent = no limit. Strategies that lay
+ *                        parts out consult ctx.shop to nest within them;
+ *                        the runtime warns when the finished board can't
+ *                        fit regardless.
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
-export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
+export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}) {
   const errors = [];
   const stock = recipe.stock;
   if (!recipe.pipeline.length) {
@@ -517,6 +549,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
     terrainSpecs: recipe.terrains ?? [],
     shapes: bs.shapes,
     stock: { thickness: stock.thickness },   // W×H not known until content runs
+    shop: shop ?? {},
     safeZ: 0.5,
     rpm: 14000,
     contentBBox: null,
@@ -536,7 +569,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
-    const p = resolveParams(entry, op.params, controlValues, vars, errors, op.id);
+    const p = resolveParams(entry, op, controlValues, vars, errors, strategyWarnings);
     if (errors.length) break;
     // fit-derived shapes lower HERE, at first reference: the content
     // machined so far is exactly what they must wrap
@@ -563,6 +596,9 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
       frame.ctx ??= { ...ctx, contentBBox: null, contentRings: [] };
     }
     const r = entry.run(p, frame ? frame.ctx : ctx);
+    // a strategy may SKIP itself (blank text on an optional caption):
+    // the op contributes nothing, the rest of the pipeline still builds
+    if (r.skip) { strategyWarnings.push(`op "${op.id}": ${r.skip}`); continue; }
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
     if (frame) {
       // panel-local extent accumulates BEFORE the transform (that is what
@@ -618,7 +654,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
       }
     }
     if (!bb) {
-      return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [...shapesWarnings], preview: { empty: true } };
+      return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [...shapesWarnings, ...strategyWarnings], preview: { empty: true } };
     }
     const margin = recipe.margin ?? 0.375;
     const failStock = {
@@ -712,6 +748,21 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}) {
       ? ' — shapes are authored in INCHES; a path pasted from an SVG viewbox unscaled comes out viewbox-units wide'
       : '';
     shapesWarnings.push(`this part needs a ${autoStock.w}" × ${autoStock.h}" board${hint}`);
+  }
+
+  // declared shop limits: the board can be turned to mount it, so either
+  // orientation counts. Nesting strategies already pack within ctx.shop;
+  // a board that STILL overruns means a single part is bigger than the
+  // limit, which no layout can fix — say so instead of exporting a file
+  // the user physically cannot run.
+  const fitsIn = (W, H) =>
+    (autoStock.w <= W + 0.01 && autoStock.h <= H + 0.01) ||
+    (autoStock.w <= H + 0.01 && autoStock.h <= W + 0.01);
+  if (shop?.machineW > 0 && shop?.machineH > 0 && !fitsIn(shop.machineW, shop.machineH)) {
+    shapesWarnings.push(`this cut needs a ${autoStock.w}" × ${autoStock.h}" board but the machine's cutting area is ${shop.machineW}" × ${shop.machineH}" — re-nesting cannot fix a part bigger than the machine; scale the design down or split it into smaller parts`);
+  }
+  if (shop?.materialW > 0 && shop?.materialH > 0 && !fitsIn(shop.materialW, shop.materialH)) {
+    shapesWarnings.push(`this cut needs a ${autoStock.w}" × ${autoStock.h}" board — bigger than the declared ${shop.materialW}" × ${shop.materialH}" material sheets`);
   }
 
   const composed = composeJob(job);

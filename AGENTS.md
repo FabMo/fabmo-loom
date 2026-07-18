@@ -143,7 +143,15 @@ possible macro-strategy. The contract a guest must satisfy:
 1. **A declarative document** the model can author (the guest entry's
    big param), with numeric fields optionally given as expression
    strings over the recipe's controls (`"h - t/2"`) resolved via
-   `ctx.evalNumber(str, extras)`.
+   `ctx.evalNumber(str, extras)`. A guest that lays parts out should
+   also consult `ctx.shop` — the user's declared physical limits
+   (`{ machineW, machineH, materialW, materialH }` in inches, 0/absent
+   = no limit; app-level settings, never part of the recipe) — and nest
+   within the tightest of them, splitting into multiple setups when the
+   parts cannot share one; a SINGLE part bigger than the limit is an
+   honest error naming the part, never a file the machine can't run.
+   The machine's cutting area is absolute — it does not scale with a
+   guest's model/prototype mode.
 2. **A deterministic, DOM-free interpreter** from that document to
    moves + declared verifier targets on the canonical rail. The LLM
    authors the document; the guest's own tested kernels make motion.

@@ -163,7 +163,16 @@ export function promptRecipeView(recipe) {
   };
 }
 
-export function buildSystemPrompt(recipe) {
+export function buildSystemPrompt(recipe, shop = {}) {
+  // the user's declared physical limits (app settings, not the recipe) —
+  // grounding the model in what the shop can actually cut turns "make it
+  // fit my machine" from a guess into arithmetic
+  const shopBits = [];
+  if (shop?.machineW > 0 && shop?.machineH > 0) shopBits.push(`the machine's cutting area is ${shop.machineW}" × ${shop.machineH}"`);
+  if (shop?.materialW > 0 && shop?.materialH > 0) shopBits.push(`material comes as ${shop.materialW}" × ${shop.materialH}" sheets`);
+  const shopRule = shopBits.length
+    ? `\n- THE USER'S SHOP (from their settings — physical facts, not preferences): ${shopBits.join('; ')}. Strategies that lay parts out honor these limits automatically on every weave, splitting a layout into several setups when it needs them. A SINGLE part bigger than the machine or the sheet cannot be cut by any layout — offer a smaller design or a scale model (a strategy with a model/scale param) instead of pretending it fits.`
+    : '';
   const assetSection = recipe.assets?.length
     ? `\n\nUPLOADED ASSETS (embedded in the recipe document; reference by NAME, never by content — the bytes are not shown to you):\n${recipe.assets.map(a => `- "${a.name}" (${a.kind}${a.width ? `, ${a.width}×${a.height}px` : ''})`).join('\n')}
 An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <inches or {arithmetic}>} lowers the file's FILLED artwork to a closed outline in the shared frame (strokes, text, and embedded images inside the file are skipped with warnings). Reference that shape id from shape_cutout (cut the logo out), pocket_shape (recess it), or bore_hole's along (holes around its outline). Bind width to a size control when the user might rescale it. A raster IMAGE (png/jpeg photo) is NOT usable: if the user asks to carve/engrave/trace one, DECLINE that part — what: the image use, why: "raster image carving is not in the catalog yet; the upload is stored for when it arrives" — and still apply the rest of the request.`
@@ -182,7 +191,8 @@ RULES:
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
-- An outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc.
+- A GEOMETRIC or SYMBOLIC outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield, arrow, cloud, chevron, crescent, gear, cross, simple leaf…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc. (But NOT a recognizable likeness — see the next rule.)
+- A RECOGNIZABLE, REPRESENTATIONAL subject is the ONE kind of outline you must NEVER freehand: a specific animal (a bull, an eagle), a person or face, a vehicle, a building, a brand/team LOGO, the map of a real place. You author outlines from a handful of geometric primitives, and a likeness needs visual detail you cannot see — so a hand-drawn one is a blob that passes every toolpath check yet looks nothing like the subject, which is WORSE than nothing (a naive user just sees a bad drawing and gets frustrated). DECLINE that part — what: the drawing (e.g. "a bull outline"); why: "I build shapes from geometry (circles, stars, hearts, arches), so I can't reliably freehand a recognizable bull — it would come out as a blob." Then in the SUMMARY, give the real path forward AND head off the wrong one: the user should UPLOAD the artwork as an SVG or image — it becomes a shape via set_shape asset, and a name inside it or a cutout of it then composes normally — and MORE DESCRIPTION WILL NOT HELP, because you don't turn words into pictures; you need the actual outline as a file. Never author a substitute blob to seem helpful: if the likeness is the whole point (a cutout OF the bull), decline the shape and apply only the parts that genuinely stand alone. The line: if recognizing it would take more than a few arcs/béziers, or leans on detail you can't see, decline and ask for the file — a clean decline beats a bad drawing.
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame and re-lower on every slider move. CRITICAL: shape coordinates are INCHES, CENTERED ON THE ORIGIN (where prior content like engraved text centers). NEVER paste an SVG-viewbox path unscaled — a heart in a 0..100 box becomes a 100-INCH part 50 inches off-center. A 3" heart spans roughly -1.5..1.5 around the origin; rescale and re-center the coordinates yourself (or use {arithmetic} of a size control) before authoring the path. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
@@ -193,18 +203,19 @@ RULES:
 - Content ON A PART of a larger build ("carve EMMA in the bench seat") is NOT a decline when an operation publishes FRAMES (furniture_design publishes each panel id): put the content op AFTER the publisher with "frame": "<panel id>" on the OPERATION (not in params). Framed content authors panel-local — it centers on the panel face; place:"below"/posX/posY compose within the panel — and follows the panel wherever it nests. Surface textures can't ride a frame yet; text engraving and outlines can.
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
+- Operations have NO enable/disable param — never invent one. Text ops skip themselves when their bound text is BLANK, so bound text is already optional: "make the caption optional" needs no actions — answer (in summary) that clearing the text field omits it. An optional NON-text feature is a decline (what: an on/off toggle for that op); remove_operation when the user says to drop it.
 - If the recipe is empty and the user asks for an app, also set_name it.
-- Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.
+- Stock WIDTH and HEIGHT are AUTO-SIZED from the content (plus margins) and shown to the user as the minimum board they need — you cannot and need not set them. Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — set_thickness when the user names a material thickness; through-cuts cut exactly through it.${shopRule}
 
 CURRENT RECIPE:
 ${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 }
 
-export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8' } = {}) {
+export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8', shop = {} } = {}) {
   return {
     model,
     max_tokens: 2000,
-    system: buildSystemPrompt(recipe),
+    system: buildSystemPrompt(recipe, shop),
     messages: [{ role: 'user', content: utterance }],
     tools: [ACTION_TOOL],
     tool_choice: { type: 'tool', name: 'apply_recipe_actions' },

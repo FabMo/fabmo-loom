@@ -447,6 +447,17 @@ const TEXT_PLACE_PARAMS = {
   posY: { type: 'number', default: 0, doc: 'ABSOLUTE Y of the block\'s center, inches (overrides place); 0/absent = leave to place' },
 };
 
+// One text param spec shared by the text entries. Blank text SKIPS the
+// op (a warning, not an error) — an emptied bound control is the natural
+// way to say "no caption", and it must not take the rest of the build
+// down with it.
+const textParam = (verb) => ({
+  type: 'string', default: '', bindable: true,
+  doc: `the text to ${verb} — bind to a text control so users can retype it. BLANK text skips this operation with a warning instead of failing, so bound text is optional by nature`,
+});
+const blankTextSkip = (p) => String(p.text ?? '').trim() ? null
+  : { skip: 'text is blank — skipped (type something to cut it)' };
+
 // One font param spec shared by the text entries; the doc is the model's
 // entire knowledge of the shelf, so each id carries its blurb.
 const FONT_PARAM = {
@@ -458,7 +469,7 @@ export const CATALOG = {
   vcarve_text: {
     doc: 'V-carve text with a vee bit along the medial axis of real font outlines (classic engraved-sign look, variable-width strokes). Counters (the holes of e/o/p) are preserved. Adds flat-bottom clearing automatically where strokes are wider than the bit reaches.',
     params: {
-      text: { type: 'string', doc: 'the text to engrave — bind to a text control so users can retype it', bindable: true },
+      text: textParam('engrave'),
       font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1, min: 0.2, max: 4, doc: 'total text height in inches, descenders included', bindable: true },
       includedAngle: { type: 'number', default: 60, doc: 'vee bit included angle, degrees (30/60/90/120)' },
@@ -467,6 +478,8 @@ export const CATALOG = {
       ...TEXT_PLACE_PARAMS,
     },
     run(p, ctx) {
+      const blank = blankTextSkip(p);
+      if (blank) return blank;
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
       const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
@@ -500,7 +513,7 @@ export const CATALOG = {
   outline_text: {
     doc: 'Trace the OUTLINES of text at a single shallow depth (stencil/outline look, constant-width line) instead of V-carving the body. Uses the same vee bit tip.',
     params: {
-      text: { type: 'string', doc: 'the text to outline — bind to a text control', bindable: true },
+      text: textParam('outline'),
       font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1, min: 0.2, max: 4, doc: 'total text height in inches', bindable: true },
       depth: { type: 'number', default: 0.04, doc: 'single-pass outline depth in inches' },
@@ -508,6 +521,8 @@ export const CATALOG = {
       ...TEXT_PLACE_PARAMS,
     },
     run(p, ctx) {
+      const blank = blankTextSkip(p);
+      if (blank) return blank;
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
       const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
@@ -540,7 +555,7 @@ export const CATALOG = {
   pocket_text: {
     doc: 'Pocket the text INTO the surface with a small endmill — flat-bottomed letterforms at constant depth, the look for paint-fill signs and inlays (vcarve_text is the variable-depth carved look instead). Counters preserved. Strokes narrower than the bit get a grazing slot-fit; genuinely too-narrow text fails with advice (bigger letters or a smaller bit). Optional REST cleanup: a second, smaller bit pockets only the corners the bulk bit could not reach (adds a toolchange).',
     params: {
-      text: { type: 'string', doc: 'the text to pocket — bind to a text control', bindable: true },
+      text: textParam('pocket'),
       font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1.5, min: 0.3, max: 6, doc: 'total text height in inches; pocketing wants larger letters than V-carving', bindable: true },
       depth: { type: 'number', default: 0.25, doc: 'pocket floor depth, inches' },
@@ -550,6 +565,8 @@ export const CATALOG = {
       ...TEXT_PLACE_PARAMS,
     },
     run(p, ctx) {
+      const blank = blankTextSkip(p);
+      if (blank) return blank;
       const fe = fontBufferOf(ctx, p.font);
       if (fe.error) return fe;
       const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
@@ -915,7 +932,7 @@ export const CATALOG = {
   texture_text: {
     doc: 'Render TEXT AS TEXTURE — the letters\' interiors carry a shallow procedural relief while the face around them stays untouched stock, so the name reads as a textured inlay in a smooth surface (the INVERSE of texture_field; pair them for full-face contrast). Counters (the holes of e/o/a) stay smooth. Same families as texture_field: waves, ripples, interference, fluting, basketweave, woodgrain, crosshatch, hammered, flowing, slate. A ballnose rasters strictly inside the letter outlines; the cut feathers up to the surface over about the ball\'s contact radius, giving a soft fabric-like edge — follow with outline_text at the SAME text/font/letterHeight for a crisp engraved border around each letter. origin "edge" runs the pattern parallel to each letter\'s own outline (concentric contour bands inside the strokes — the neon-tube look); "center" radiates across the whole word from its middle. Letters need meat: strokes narrower than the ball leave nothing to cut (friendly error) — use a large letterHeight, a bold font, and a SMALL ballnose (1/16" default). featureSize 0 auto-tunes to the letter size. Requires a BALLNOSE bit.',
     params: {
-      text: { type: 'string', doc: 'the text to texture — bind to a text control so users can retype it', bindable: true },
+      text: textParam('texture'),
       font: FONT_PARAM,
       letterHeight: { type: 'number', default: 2.5, min: 0.5, max: 8, doc: 'total text height in inches — texture needs room; below ~1.5" most families stop reading', bindable: true },
       texture: { type: 'string', default: 'waves', doc: `which family: ${TEXTURE_IDS.join(', ')}. Bind to a choice control to let the user switch textures.`, bindable: true },
@@ -930,6 +947,8 @@ export const CATALOG = {
       ...TEXT_PLACE_PARAMS,
     },
     run(p, ctx) {
+      const blank = blankTextSkip(p);
+      if (blank) return blank;
       const fam = TEXTURES[p.texture];
       if (!fam) return { error: `unknown texture "${p.texture}" — try one of: ${TEXTURE_IDS.join(', ')}` };
       if (p.origin && !['center', 'edge'].includes(p.origin)) {
