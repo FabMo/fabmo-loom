@@ -135,8 +135,12 @@ function syncDrawName() {
  * shape" and pre-fills the name box, so a recipe authored around a drawing
  * the user has not made yet is finished by drawing it — no name to retype
  * and no way to misspell the link.
+ *
+ * `select` = an asset id from `targets` to preselect for replacement — the
+ * per-shape "Redraw" control opens the dialog aimed at exactly that shape
+ * (it wins over both the wanted-preselect and the most-recent default).
  */
-export function openDraw({ onAccept, targets = [], wanted = [] }) {
+export function openDraw({ onAccept, targets = [], wanted = [], select = '' }) {
   onAcceptCb = onAccept;
   strokes = []; current = null; smoothed = null;
   const sel = $('drawTarget');
@@ -147,11 +151,11 @@ export function openDraw({ onAccept, targets = [], wanted = [] }) {
       o.value = t.id; o.textContent = `Replace: ${t.name}`;
       sel.appendChild(o);
     }
-    // an outstanding request wins over "redraw the last one": the recipe is
-    // visibly incomplete until it is drawn
-    sel.value = wanted.length ? '' : (targets.length ? targets[targets.length - 1].id : '');
+    // an explicit select wins; otherwise an outstanding request wins over
+    // "redraw the last one": the recipe is visibly incomplete until drawn
+    sel.value = select || (wanted.length ? '' : (targets.length ? targets[targets.length - 1].id : ''));
     syncDrawName();
-    if (wanted.length) $('drawName').value = wanted[0];
+    if (!select && wanted.length) $('drawName').value = wanted[0];
   }
   $('drawOverlay').style.display = 'flex';
   sizeCanvas();

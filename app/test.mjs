@@ -12,12 +12,13 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe } from './runtime.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes } from './runtime.mjs';
 import { applyActions, buildParseRequest } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
 import { pathToRegions, expandTemplate } from './shape.mjs';
 import { svgToRegions, svgAssetToRegions } from './svg.mjs';
+import { recommendFeeds } from '../ir/tools.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FONT_SHELF = {};
@@ -2871,14 +2872,220 @@ console.log('--- drawn shape: authored before it is drawn, completed by drawing 
     pass('a derivation over an undrawn shape waits instead of failing the weave');
   } else fail(`derived-undrawn wrong: ok=${dr.ok} errors=${JSON.stringify(dr.errors)} warnings=${JSON.stringify(dr.warnings)}`);
 
+  // a FIT over an undrawn shape — the draw-a-nametag recipe (tag self-sizes
+  // around the drawing): fit shapes defer to first op reference, so the
+  // undrawn state only surfaces at resolve time. Field report 2026-07-26:
+  // this came back REJECTED ("open curve") instead of skipping, so the app
+  // never showed the draw-me state.
+  const fitRec = structuredClone(EMPTY_RECIPE);
+  fitRec.controls = [{ id: 'name', type: 'text', label: 'Name', default: 'Alex' }];
+  fitRec.shapes = [
+    { id: 'profile', draw: { of: 'profile', width: '3.5' } },
+    { id: 'tagfit', fit: { of: 'profile', margin: 0.3 } },
+  ];
+  fitRec.pipeline = [
+    { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' } } },
+    { id: 'cutout', strategy: 'shape_cutout', params: { shape: 'tagfit' } },
+  ];
+  const fr = run(fitRec);
+  if (fr.ok && fr.warnings.some((w) => w.includes('cutout') && w.includes('waiting on the drawing "profile"'))) {
+    pass('fit over an undrawn shape: engraving verifies, the cutout waits for the drawing');
+  } else fail(`fit-undrawn wrong: ok=${fr.ok} errors=${JSON.stringify(fr.errors)} warnings=${JSON.stringify(fr.warnings)}`);
+
   // and the prompt teaches it rather than declining it
   const sys = buildParseRequest(rec, 'nametag outlines drawn by hand on a tablet').system;
   if (sys.includes('DRAWN SHAPES') && sys.includes('draw {of:') && sys.includes('is NOT a decline')) {
     pass('prompt teaches set_shape draw for hand-drawn outlines');
   } else fail('prompt still lacks the drawn-shape rule');
-  if (sys.includes('Sheet ledger') && sys.includes('Record on sheet')) {
-    pass('prompt answers sheet nesting/run-tracking with the ledger instead of declining');
-  } else fail('prompt still lacks the sheet-ledger rule');
+  if (sys.includes('Current board') && sys.includes('Record on board')) {
+    pass('prompt answers sheet nesting/run-tracking with the board tracker instead of declining');
+  } else fail('prompt still lacks the current-board rule');
+}
+
+// ---------------- the tool rack: real &Tool numbers + chipload feeds ----------------
+// shop.toolLibrary is the shared shopbot:tools drawer. Matched specs must
+// post the user's REAL tool numbers; a declared material must derive feeds
+// by chipload; anything the rack lacks must fall back honestly — a spare
+// number that collides with NO rack slot, plus a warning naming the bit.
+console.log('--- tool rack: real numbers, chipload feeds, honest fallbacks ---');
+{
+  const rec = structuredClone(EMPTY_RECIPE);
+  rec.name = 'Rack test';
+  // chamfered disc = a two-tool job: 90° V-bit rim pass, then the 1/4" cut
+  rec.pipeline = [{ id: 'disc', strategy: 'disc_cutout', params: { diameter: 3, chamfer: 0.1 } }];
+  const runShop = (shop) => quiet(() => runRecipe(rec, controlDefaults(rec), FONT_SHELF, {}, shop));
+
+  // no rack: first-use numbering, exactly as before
+  const bare = runShop({});
+  const bareNums = bare.job.operations.map((o) => o.tool);
+  if (bare.ok && bareNums.join(',') === '1,2') pass('no rack: first-use numbering 1,2 unchanged');
+  else fail(`no-rack numbering wrong: ok=${bare.ok} tools=${bareNums}`);
+
+  const LIB = {
+    version: 1,
+    machine: { minRPM: 6000, maxRPM: 24000, maxFeed: 360 },
+    tools: [
+      { number: 5, kind: 'flat', diameter: 0.25, flutes: 2 },
+      { number: 9, kind: 'vee', diameter: 0.5, angleDeg: 90, flutes: 2 },
+    ],
+  };
+
+  // full rack: both specs post their REAL numbers, feeds untouched
+  const racked = runShop({ toolLibrary: LIB });
+  const nums = racked.job.operations.map((o) => o.tool);
+  if (racked.ok && nums.join(',') === '9,5') pass(`rack match posts real &Tool numbers: ${nums.join(', ')}`);
+  else fail(`rack numbering wrong: ok=${racked.ok} tools=${nums} warnings=${JSON.stringify(racked.warnings)}`);
+  if (racked.job.operations[1].feedRate === 80 && racked.job.tools[5].rpm === undefined) {
+    pass('without a material, strategy feeds and job rpm stay untouched');
+  } else fail(`feeds changed without a material: feed=${racked.job.operations[1].feedRate} rpm=${racked.job.tools[5].rpm}`);
+
+  // material declared: chipload feeds + per-tool rpm, measured against the engine
+  const fed = runShop({ toolLibrary: LIB, material: 'plywood' });
+  const want = recommendFeeds(LIB.tools[0], 'plywood', LIB.machine);
+  const cut = fed.job.operations[1];
+  if (fed.ok && cut.feedRate === want.feedRate && cut.plungeRate === want.plungeRate && fed.job.tools[5].rpm === want.rpm) {
+    pass(`plywood chipload feeds applied: ${want.feedRate} in/min @ ${want.rpm} rpm (plunge ${want.plungeRate})`);
+  } else fail(`chipload feeds wrong: feed=${cut.feedRate}/${want.feedRate} plunge=${cut.plungeRate}/${want.plungeRate} rpm=${fed.job.tools[5].rpm}/${want.rpm}`);
+
+  // a bit the rack lacks: spare number dodging every rack slot + a warning
+  const veeOnly = { ...LIB, tools: [LIB.tools[1]] };
+  const missing = runShop({ toolLibrary: veeOnly });
+  const cutOp = missing.job.operations[1];
+  if (missing.ok && cutOp.tool === 1 && missing.warnings.some((w) => w.includes('endmill') && w.includes('tool rack'))) {
+    pass('missing bit posts a spare number and warns by name');
+  } else fail(`missing-bit fallback wrong: tool=${cutOp.tool} warnings=${JSON.stringify(missing.warnings)}`);
+
+  // available:false = in the drawer, not on the machine — must not be assigned,
+  // and its NUMBER stays reserved (that slot still means that bit)
+  const benched = { ...LIB, tools: [LIB.tools[0], { ...LIB.tools[1], available: false }] };
+  const bench = runShop({ toolLibrary: benched });
+  const veeNum = bench.job.operations[0].tool;
+  if (bench.ok && veeNum !== 9 && veeNum !== 5 && bench.warnings.some((w) => w.includes('V-bit'))) {
+    pass(`benched bit is not assigned and keeps its slot number (vee posted as ${veeNum})`);
+  } else fail(`benched-bit handling wrong: vee=${veeNum} warnings=${JSON.stringify(bench.warnings)}`);
+}
+
+// ---------------- pattern shapes: one cell → grid / ring ----------------
+// The synthetic-decline probe's biggest find: repeated layouts (chess
+// boards, honeycombs, hour marks) died three different ways because the
+// model hand-authored every cell. pattern is the primitive that ends that.
+
+console.log('--- pattern shapes: checkerboard from one authored cell ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, { summary: 'chess', actions: [
+    { kind: 'add_control', control: { id: 'sq', type: 'number', label: 'Square (in)', default: 1, min: 0.5, max: 3, step: 0.25 } },
+    { kind: 'set_shape', shape: { id: 'cell', path: 'M {-sq/2} {-sq/2} L {sq/2} {-sq/2} L {sq/2} {sq/2} L {-sq/2} {sq/2} Z' } },
+    { kind: 'set_shape', shape: { id: 'darks', pattern: { of: 'cell', cols: '4', rows: '8', dx: '2*sq', dy: 'sq', staggerX: 'sq' } } },
+    { kind: 'add_operation', operation: { id: 'squares', strategy: 'pocket_shape', params: { shape: 'darks', depth: 0.0625 } } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'tag_cutout', params: { buffer: 0.5 } } },
+  ], declined: [] });
+  const bv = buildVars(res.recipe, controlDefaults(res.recipe));
+  const bs = buildShapes(res.recipe, bv.vars);
+  const n = bs.shapes?.darks?.regions?.length ?? 0;
+  if (res.skipped.length === 0 && n === 32) pass(`one 1" cell → 32 disjoint dark squares (4×8 grid, staggered)`);
+  else fail(`checkerboard wrong: skipped=${JSON.stringify(res.skipped)} regions=${n}`);
+  const r = run(res.recipe);
+  if (r.ok && r.sbp) pass('checkerboard pockets weave and verify → SBP');
+  else fail(`checkerboard weave: ok=${r.ok} errors=${JSON.stringify(r.errors)}`);
+  // the slider still drives the whole board: bigger squares, same 32 cells
+  const big = quiet(() => runRecipe(res.recipe, { ...controlDefaults(res.recipe), sq: 1.5 }, FONT_SHELF, TERRAIN_FIXTURE));
+  if (big.ok) pass('square-size control re-lowers the whole pattern');
+  else fail(`pattern under slider move: ${JSON.stringify(big.errors)}`);
+}
+
+console.log('--- pattern shapes: ring with spin, curves, and honest failures ---');
+{
+  // 12 hour ticks: authored ONE tick standing at the origin, patterned
+  // around a 4" circle; spin turns each to face outward
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec.shapes = [
+    { id: 'tick', path: 'M -0.1 -0.3 L 0.1 -0.3 L 0.1 0.3 L -0.1 0.3 Z' },
+    { id: 'ring12', pattern: { of: 'tick', count: '12', radius: '4', spin: true } },
+  ];
+  const bs = buildShapes(rec, {});
+  const regions = bs.shapes?.ring12?.regions ?? [];
+  const centroid = (rg) => {
+    const pts = rg.outer;
+    const s = pts.reduce((acc, q) => ({ x: acc.x + q.x, y: acc.y + q.y }), { x: 0, y: 0 });
+    return { x: s.x / pts.length, y: s.y / pts.length };
+  };
+  const radii = regions.map(rg => Math.hypot(centroid(rg).x, centroid(rg).y));
+  const allAtRadius = radii.length === 12 && radii.every(rr => Math.abs(rr - 4) < 0.02);
+  const top = regions.find(rg => { const c = centroid(rg); return Math.abs(c.x) < 0.02 && c.y > 3.9; });
+  const left = regions.find(rg => { const c = centroid(rg); return c.x < -3.9 && Math.abs(c.y) < 0.02; });
+  const spanOf = (rg) => {
+    const xs = rg.outer.map(q => q.x), ys = rg.outer.map(q => q.y);
+    return { w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
+  const topSpan = top && spanOf(top), leftSpan = left && spanOf(left);
+  if (allAtRadius && topSpan && Math.abs(topSpan.h - 0.6) < 0.01 && leftSpan && Math.abs(leftSpan.w - 0.6) < 0.01) {
+    pass('ring of 12: all at radius 4, first copy at the top upright, the 180° copy spun to face outward');
+  } else fail(`ring wrong: n=${regions.length} radii=${radii.map(r => r.toFixed(2)).join(',')} top=${JSON.stringify(topSpan)} left=${JSON.stringify(leftSpan)}`);
+
+  // an OPEN curve patterns too: three rows of the same hole-line for bore_hole along
+  rec.shapes = [
+    { id: 'row', path: 'M -2 0 L 2 0', open: true },
+    { id: 'rows3', pattern: { of: 'row', rows: '3', dy: '0.75' } },
+  ];
+  const bc = buildShapes(rec, {});
+  if (bc.shapes?.rows3?.kind === 'curve' && bc.shapes.rows3.polylines.length === 3) {
+    pass('patterning an open curve concatenates copies (hole rows for bore_hole along)');
+  } else fail(`curve pattern wrong: ${JSON.stringify(bc.shapes?.rows3?.kind)} n=${bc.shapes?.rows3?.polylines?.length}`);
+
+  // honest failures, caught at APPLY time with reasons
+  let r2 = structuredClone(EMPTY_RECIPE);
+  const bad = applyActions(r2, { summary: 'bad patterns', actions: [
+    { kind: 'set_shape', shape: { id: 'a', pattern: { of: 'ghost', cols: '2', dx: '1' } } },
+    { kind: 'set_shape', shape: { id: 'c1', path: 'M -0.5 -0.5 L 0.5 -0.5 L 0.5 0.5 L -0.5 0.5 Z' } },
+    { kind: 'set_shape', shape: { id: 'b', pattern: { of: 'c1', cols: '40', rows: '40', dx: '1', dy: '1' } } },
+    { kind: 'set_shape', shape: { id: 'c', pattern: { of: 'c1', cols: '3' } } },
+  ], declined: [] });
+  if (bad.skipped.length === 3
+      && bad.skipped[0].includes('not defined ABOVE') && bad.skipped[1].includes('too many')
+      && bad.skipped[2].includes('needs dx')) {
+    pass('pattern sabotage: missing base, 1600 copies, and missing spacing all skip with reasons');
+  } else fail(`pattern sabotage wrong: ${JSON.stringify(bad.skipped)}`);
+}
+
+// ---------------- applyActions robustness: rescue the nearly-right ----------------
+// Field forms from the probe: the control emitted AFTER the shape that
+// binds it, a derived chain listed backwards, set_derived flattened to
+// {kind, id, expr}. All salvageable without guessing intent.
+
+console.log('--- applyActions: ordering rescue and flattened set_derived ---');
+{
+  let rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, { summary: 'scrambled', actions: [
+    // references control "d" — emitted BEFORE the control (probe: record-clock-svg)
+    { kind: 'set_shape', shape: { id: 'disc', path: 'M {-d/2} 0 A {d/2} {d/2} 0 1 1 {d/2} 0 A {d/2} {d/2} 0 1 1 {-d/2} 0 Z' } },
+    // flattened set_derived (probe: speaker-baffle, 3× in one response)
+    { kind: 'set_derived', id: 'quarter', expr: 'd/4' },
+    // chain listed backwards: mid needs r8, which comes next
+    { kind: 'set_derived', derived: { id: 'mid', expr: 'r8 + 1' } },
+    { kind: 'set_derived', derived: { id: 'r8', expr: 'd/8' } },
+    { kind: 'add_control', control: { id: 'd', type: 'number', label: 'Diameter', default: 4, min: 1, max: 12, step: 0.5 } },
+    // a GENUINE mistake must still be reported, once, after the retries
+    { kind: 'set_shape', shape: { id: 'bad', path: 'M {nope} 0 L 1 1 Z' } },
+  ], declined: [] });
+  const ids = (res.recipe.derived ?? []).map(x => x.id);
+  if (res.applied.length === 5 && res.skipped.length === 1 && res.skipped[0].includes('unknown name "nope"')
+      && (res.recipe.shapes ?? []).some(s => s.id === 'disc') && ids.includes('quarter') && ids.includes('mid') && ids.includes('r8')) {
+    pass('control hoisted, backwards chain retried, flattened set_derived accepted; the real mistake reported once');
+  } else fail(`rescue wrong: applied=${JSON.stringify(res.applied)} skipped=${JSON.stringify(res.skipped)} derived=${JSON.stringify(ids)}`);
+  const w = run(res.recipe);   // no ops yet — just confirm the recipe state is coherent
+  if (!w.ok && w.errors[0].includes('no operations')) pass('rescued recipe is coherent (weave reports only the empty pipeline)');
+  else fail(`rescued recipe weave: ${JSON.stringify(w.errors)}`);
+}
+
+console.log('--- truncation guard: the parse request budget and the prompt teach patterns ---');
+{
+  const req = buildParseRequest(EMPTY_RECIPE, 'a chess board');
+  if (req.max_tokens >= 8000) pass(`max_tokens ${req.max_tokens} — geometry-heavy builds no longer truncate at 2000`);
+  else fail(`max_tokens still ${req.max_tokens}`);
+  if (req.system.includes('REPEATED layout') && req.system.includes('pattern {of:"cell"') && req.system.includes('staggerX')) {
+    pass('prompt teaches one-cell-plus-pattern instead of cell-by-cell authoring');
+  } else fail('prompt lacks the pattern rule');
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

@@ -11,6 +11,7 @@ import { openDraw, initDraw } from './draw.mjs';
 import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
+import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
 import { simulateJob } from './sim.mjs';
@@ -28,6 +29,7 @@ let view3d = null;
 let recipe = loadRecipe();
 let controlValues = controlDefaults(recipe);
 let shop = loadShop();
+let toolLib = loadToolLibrary();   // the SHARED shopbot:tools drawer
 let sheet = loadSheet();
 let lastTerrains = {};   // last resolved terrains, reused for sheet-positioned re-runs
 let result = null;
@@ -52,13 +54,18 @@ function loadRecipe() {
 // change the machine. 0 / blank = no limit, which keeps the feature
 // purely additive for anyone who never opens the fields.
 function loadShop() {
-  const base = { machineW: 0, machineH: 0, materialW: 0, materialH: 0 };
+  // material: a MATERIALS key ('' = keep each strategy's own feeds) —
+  // with the shared tool rack it derives feeds/rpm by chipload at weave
+  const base = { machineW: 0, machineH: 0, materialW: 0, materialH: 0, material: '' };
   try { return { ...base, ...JSON.parse(localStorage.getItem('loom:shop') ?? '{}') }; }
   catch { return base; }
 }
 function persistShop() {
   try { localStorage.setItem('loom:shop', JSON.stringify(shop)); } catch {}
 }
+// what the runtime sees: the persisted shop facts plus the shared tool
+// rack (its own localStorage key — shopbot:tools — never inside loom:shop)
+const shopForRun = () => ({ ...shop, toolLibrary: toolLib });
 
 // The sheet ledger — a specific piece of stock the operator keeps cutting from,
 // with the footprints already taken from it. App-level and persistent (outlives
@@ -76,13 +83,13 @@ function persistSheet() {
   try { localStorage.setItem('loom:sheet', JSON.stringify(sheet)); } catch {}
 }
 
-// The status chip: "Sheet: 24×12 — 83% free · 2 parts cut · this design fits ✓".
+// The status chip: "Board: 24×12 — 83% free · 2 parts cut · this design fits ✓".
 // Record is enabled only when the sheet is on, the design verifies, and its
 // footprint actually fits the remaining space.
 function updateSheetChip(st) {
   const chip = $('sheetChip'), rec = $('sheetRecord');
   if (!sheetActive(sheet)) { chip.textContent = ''; rec.disabled = true; return; }
-  let text = `Sheet: ${sheet.w}" × ${sheet.h}" — ${sheetFreePct(sheet)}% free`;
+  let text = `Board: ${sheet.w}" × ${sheet.h}" — ${sheetFreePct(sheet)}% free`;
   const cuts = sheet.occupied.length;
   if (cuts) text += ` · ${cuts} part${cuts > 1 ? 's' : ''} cut`;
   let fits = false;
@@ -189,6 +196,39 @@ function renderAssets() {
     });
     chip.append(x);
     host.append(chip);
+  }
+  renderDrawControls();
+}
+
+// Drawing inputs, rendered at the TOP of the design flow: every set_shape
+// draw in the recipe gets its own control — a loud primary button while
+// the outline is missing (the weave is visibly incomplete without it), a
+// quiet redraw once it exists. Field report 2026-07-26: the generic
+// "Draw a shape…" button lives down in the export row, which is not where
+// a person designing "draw a tag, then type the name" ever looks — the
+// drawing belongs BEFORE the typing. Hooked off renderAssets so every
+// path that changes drawings (intent turn, draw, redraw, remove) refreshes it.
+function renderDrawControls() {
+  const host = $('drawControls');
+  host.innerHTML = '';
+  for (const s of recipe.shapes ?? []) {
+    const name = s.draw?.of;
+    if (!name) continue;
+    const drawn = (recipe.assets ?? []).some((a) => a.id === name || a.name === name);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap';
+    const btn = document.createElement('button');
+    if (drawn) { btn.className = 'ghost small'; btn.textContent = `Redraw “${name}”…`; }
+    else { btn.textContent = `✏ Draw “${name}”…`; }
+    btn.addEventListener('click', () => openDrawDialog(name));
+    const note = document.createElement('span');
+    note.className = 'keynote';
+    note.style.marginTop = '0';
+    note.textContent = drawn
+      ? 'redrawing re-weaves everything that uses it'
+      : 'the design is waiting on this outline — sketch it to complete the cut';
+    row.append(btn, note);
+    host.append(row);
   }
 }
 
@@ -309,7 +349,7 @@ function runAndRender() {
     }
     if (seq !== weaveSeq) return;
     lastTerrains = terrains;
-    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains, shop));
+    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains, shopForRun()));
     render();
   }, 0));
 }
@@ -713,6 +753,17 @@ async function generate() {
     const data = key ? await parseDirect(req, key) : await parseViaGuestPass(req, invite);
     const toolUse = data.content?.find(b => b.type === 'tool_use');
     if (!toolUse) throw new Error('the model returned no actions');
+    // a response cut off at the token ceiling arrives as a PARTIAL action
+    // list that would half-build silently — refuse the whole thing instead
+    if (data.stop_reason === 'max_tokens') {
+      throw new Error('that answer overran its budget mid-build, so nothing was applied — ask for it in smaller pieces (and describe repeated layouts as a pattern rather than listing every piece)');
+    }
+    // an empty payload (no actions, no declines, no summary) is a stall,
+    // not a result — surface it as retryable rather than a blank turn
+    const p0 = toolUse.input ?? {};
+    if (!p0.actions?.length && !p0.declined?.length && !p0.summary?.trim()) {
+      throw new Error('the model came back empty-handed — nothing was applied; hit Generate again');
+    }
 
     const out = applyActions(recipe, toolUse.input);
     recipe = out.recipe;
@@ -880,22 +931,35 @@ $('saveKey').addEventListener('click', () => {
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.sbp`, result.sbp));
 $('dlNc').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.nc`, result.gcode));
 $('addAsset').addEventListener('click', () => $('assetFile').click());
-$('drawShape').addEventListener('click', () => {
+// Open the draw dialog. `prefer` aims it at one recipe drawing: its name
+// pre-filled while undrawn, its asset preselected for replacement once
+// drawn. Without `prefer` (the generic button) the old behavior holds —
+// outstanding requests first, then "redraw the most recent".
+function openDrawDialog(prefer = null) {
+  const findAsset = (of) => (recipe.assets ?? []).find((a) => a.id === of || a.name === of);
   const targets = (recipe.assets ?? []).filter((a) => a.kind === 'svg').map((a) => ({ id: a.id, name: a.name }));
   // shapes the recipe asks the user to draw that have no artwork yet — the
   // ops referencing them are skipping until one of these gets sketched
-  const wanted = (recipe.shapes ?? [])
-    .filter((s) => s.draw?.of && !(recipe.assets ?? []).some((a) => a.id === s.draw.of || a.name === s.draw.of))
+  let wanted = (recipe.shapes ?? [])
+    .filter((s) => s.draw?.of && !findAsset(s.draw.of))
     .map((s) => s.draw.of);
+  let select = '';
+  if (prefer) {
+    const a = findAsset(prefer);
+    if (a) { select = a.id; wanted = []; }
+    else wanted = [prefer, ...wanted.filter((w) => w !== prefer)];
+  }
   openDraw({
     targets,
     wanted,
+    select,
     onAccept: (svg, name, targetId) => {
       try { targetId ? replaceSvgAsset(targetId, svg) : addSvgAsset(svg, name); }
       catch (e) { addTurn(escapeHtml(e.message), true); }
     },
   });
-});
+}
+$('drawShape').addEventListener('click', () => openDrawDialog());
 initDraw();
 $('assetFile').addEventListener('change', async () => {
   const f = $('assetFile').files[0];
@@ -1020,10 +1084,98 @@ for (const [id, key] of [['sheetW', 'w'], ['sheetH', 'h']]) {
 }
 $('sheetClear').addEventListener('click', () => {
   sheet = clearCuts(sheet);
+  // a fresh board defaults to the shop's material sheet size — but only
+  // when the ledger has no size yet: a typed size means THIS board is an
+  // offcut, and flipping it must not stomp that
+  if (!(sheet.w > 0 && sheet.h > 0) && shop.materialW > 0 && shop.materialH > 0) {
+    sheet.w = shop.materialW; sheet.h = shop.materialH;
+    $('sheetW').value = sheet.w; $('sheetH').value = sheet.h;
+  }
   persistSheet();
   updateSheetChip(result?.preview?.stock);
-  addTurn('New sheet — the cut history is cleared.');
+  addTurn('New board — the cut history is cleared.');
 });
+// ---- Machine & tools (⚙): the system-facts menu. Machine reach, sheet
+// size, spindle band, material, and the tool rack — set once, never part
+// of a recipe. The rack is the SHARED shopbot:tools drawer (ir/tools.js):
+// the same bits and real &Tool numbers every ShopBot Labs app reads.
+$('shopBtn').addEventListener('click', () => { renderRack(); $('shopOverlay').style.display = 'flex'; });
+$('shopClose').addEventListener('click', () => { $('shopOverlay').style.display = 'none'; });
+
+// material select: '' = keep each strategy's own feeds (the pre-rack behavior)
+{
+  const sel = $('shopMaterial');
+  sel.innerHTML = '<option value="">— keep app feeds —</option>' +
+    Object.entries(MATERIALS).map(([k, m]) => `<option value="${k}">${m.label}</option>`).join('');
+  sel.value = shop.material && MATERIALS[shop.material] ? shop.material : '';
+  sel.addEventListener('change', () => {
+    shop.material = sel.value;
+    persistShop();
+    debounceRun();
+  });
+}
+
+// spindle band + feed cap: clamp inputs for the chipload engine
+for (const [id, key] of [['rackMinRPM', 'minRPM'], ['rackMaxRPM', 'maxRPM'], ['rackMaxFeed', 'maxFeed']]) {
+  const el = $(id);
+  el.value = toolLib.machine[key];
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    if (!isNaN(v) && v > 0) { toolLib.machine[key] = v; saveToolLibrary(toolLib); debounceRun(); }
+  });
+}
+
+function renderRack() {
+  const tb = $('rackBody');
+  tb.innerHTML = '';
+  for (const t of [...toolLib.tools].sort((a, b) => a.number - b.number)) {
+    const tr = document.createElement('tr');
+    const kindLabel = { flat: 'endmill', ball: 'ballnose', vee: 'V-bit' }[t.kind] ?? t.kind;
+    tr.innerHTML = `
+      <td style="padding:4px 6px"><b>${t.number}</b></td>
+      <td style="padding:4px 6px">${kindLabel}</td>
+      <td style="padding:4px 6px">${formatInches(t.diameter)}</td>
+      <td style="padding:4px 6px">${t.flutes}</td>
+      <td style="padding:4px 6px">${t.kind === 'vee' ? (t.angleDeg ?? '') : ''}</td>
+      <td style="padding:4px 6px">${escapeHtml(describeTool(t))}</td>
+      <td style="padding:4px 6px"><input type="checkbox" ${t.available !== false ? 'checked' : ''} title="Unchecked = not on the machine today; jobs won't assign it"></td>
+      <td style="padding:4px 6px"><button class="ghost small">✕</button></td>`;
+    tr.querySelector('input[type=checkbox]').addEventListener('change', (e) => {
+      t.available = e.target.checked ? undefined : false;
+      saveToolLibrary(toolLib);
+      debounceRun();
+    });
+    tr.querySelector('button').addEventListener('click', () => {
+      toolLib.tools = toolLib.tools.filter(x => x !== t);
+      saveToolLibrary(toolLib);
+      renderRack();
+      debounceRun();
+    });
+    tb.appendChild(tr);
+  }
+}
+
+$('rackAdd').addEventListener('click', () => {
+  const number = parseInt($('rackNumber').value, 10);
+  const kind = $('rackKind').value;
+  const diameter = parseInches($('rackDia').value);
+  const flutes = parseInt($('rackFlutes').value, 10);
+  const angleDeg = parseFloat($('rackAngle').value);
+  const name = $('rackName').value.trim();
+  if (!(number > 0)) { addTurn('A bit needs its real &Tool number — the one your machine answers to.', true); return; }
+  if (!(diameter > 0)) { addTurn('A bit needs a diameter — fractions like 1/4 work.', true); return; }
+  if (kind === 'vee' && !(angleDeg > 0)) { addTurn('A V-bit needs its included angle (60, 90…).', true); return; }
+  const tool = { number, kind, diameter, flutes: flutes > 0 ? flutes : 2 };
+  if (kind === 'vee') tool.angleDeg = angleDeg;
+  if (name) tool.name = name;
+  // re-using a number replaces that slot — that is how a bit gets edited
+  toolLib.tools = toolLib.tools.filter(t => t.number !== number).concat(tool);
+  saveToolLibrary(toolLib);
+  renderRack();
+  for (const id of ['rackNumber', 'rackDia', 'rackAngle', 'rackName']) $(id).value = '';
+  debounceRun();
+});
+
 $('sheetRecord').addEventListener('click', () => {
   const st = result?.preview?.stock;
   if (!result?.ok || !st) return;
@@ -1033,15 +1185,15 @@ $('sheetRecord').addEventListener('click', () => {
   const rec = recordCut(sheet, st.w, st.h, recipe.name, { allowRotate: false });
   if (rec.error) { addTurn(escapeHtml(rec.error), true); return; }
   const p = rec.placement;
-  const placed = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, lastTerrains, shop,
+  const placed = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, lastTerrains, shopForRun(),
     { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }));
-  if (!placed.ok) { addTurn('Could not position this cut on the sheet — ' + escapeHtml(placed.errors[0] ?? 'the verifier refused it'), true); return; }
+  if (!placed.ok) { addTurn('Could not position this cut on the board — ' + escapeHtml(placed.errors[0] ?? 'the verifier refused it'), true); return; }
   download(`${slug(recipe.name)}-on-sheet.sbp`, placed.sbp);
   sheet = rec.sheet;
   persistSheet();
   updateSheetChip(st);
   const n = sheet.occupied.length;
-  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${p.x.toFixed(1)}", ${p.y.toFixed(1)}" on the sheet and downloaded the positioned cut (.sbp) — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
+  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${p.x.toFixed(1)}", ${p.y.toFixed(1)}" on the board and downloaded the positioned cut (.sbp) — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
 });
 
 // ------------------------------------------------------------- theme

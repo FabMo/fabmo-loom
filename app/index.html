@@ -100,7 +100,8 @@
       flex: 1;
     }
 
-    #themeToggle {
+    #themeToggle,
+    #shopBtn {
       background: rgba(255, 255, 255, .12);
       color: #fff;
       border: 1px solid rgba(255, 255, 255, .25);
@@ -110,7 +111,8 @@
       font-weight: 500;
     }
 
-    #themeToggle:hover {
+    #themeToggle:hover,
+    #shopBtn:hover {
       background: rgba(255, 255, 255, .2);
     }
 
@@ -431,9 +433,11 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.66</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.67</span></div>
     </div>
     <div class="spacer"></div>
+    <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
+      aria-label="Machine and tools settings">⚙ Machine &amp; tools</button>
     <button id="themeToggle" title="Toggle light / dark theme" aria-label="Toggle light / dark theme"></button>
   </header>
   <main>
@@ -479,43 +483,30 @@
         </div>
         <div id="minStock" class="numbers" style="color:var(--mut)"></div>
       </div>
-      <!-- Shop settings: physical facts (machine reach, sheets on hand),
-         stored app-level — they outlive every recipe. Optional: blank =
-         no limit. Editing re-weaves, so a layout re-nests to the machine
-         the moment its size is typed. -->
-      <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap">
-        <div><label>Machine cut area W × H (in)</label>
-          <div style="display:flex; gap:6px; align-items:center">
-            <input id="shopMachineW" type="number" min="1" step="1" placeholder="any" style="width:72px">
-            <span style="color:var(--mut)">×</span>
-            <input id="shopMachineH" type="number" min="1" step="1" placeholder="any" style="width:72px">
-          </div>
-        </div>
-        <div><label>Material sheet W × H (in)</label>
-          <div style="display:flex; gap:6px; align-items:center">
-            <input id="shopMaterialW" type="number" min="1" step="1" placeholder="any" style="width:72px">
-            <span style="color:var(--mut)">×</span>
-            <input id="shopMaterialH" type="number" min="1" step="1" placeholder="any" style="width:72px">
-          </div>
-        </div>
-        <div class="keynote" style="max-width:280px">Optional — set once for your shop. Layouts nest to fit; a cut that
-          can't fit any layout warns instead of exporting a fiction.</div>
-      </div>
-      <!-- Sheet ledger: a specific piece you keep cutting from across many
-         designs — records each committed footprint so the next nests into
-         what's left. Off until you enter a size. -->
+      <!-- Current board (the sheet ledger): the specific piece on the machine
+         right now, cut from across many designs — records each committed
+         footprint so the next nests into what's left. Off until a size is
+         entered; "New sheet" starts a fresh one at the shop's sheet size.
+         Machine cut area / material sheet size live in ⚙ Machine & tools —
+         system facts, not per-design ones. -->
       <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-        <div><label>Sheet ledger W × H (in)</label>
+        <div><label title="The actual piece of stock on the machine — record each cut and the next design nests into what's left">Current
+            board W × H (in)</label>
           <div style="display:flex; gap:6px; align-items:center">
             <input id="sheetW" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
             <span style="color:var(--mut)">×</span>
             <input id="sheetH" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
-            <button id="sheetRecord" class="ghost small" disabled title="Stamp this verified design's footprint onto the sheet">Record on sheet</button>
-            <button id="sheetClear" class="ghost small" title="Forget the cut history (a new or flipped board)">New sheet</button>
+            <button id="sheetRecord" class="ghost small" disabled title="Stamp this verified design's footprint onto the board">Record on board</button>
+            <button id="sheetClear" class="ghost small" title="Start a fresh board (forgets the cut history; sized from your material sheets when set)">New board</button>
           </div>
         </div>
         <div id="sheetChip" class="numbers" style="color:var(--mut)"></div>
       </div>
+      <!-- Drawing inputs: every set_shape draw the recipe asks for renders a
+         control HERE, at the TOP of the design flow — the outline is drawn
+         first, the typed controls refine it. The generic "Draw a shape…"
+         button in the export row below stays as the freehand entry point. -->
+      <div id="drawControls"></div>
       <div id="controls"></div>
       <div id="assets" class="chips"></div>
       <div id="previewWrap" style="position:relative">
@@ -592,6 +583,90 @@
       <div style="padding:6px 14px; border-top:1px solid var(--border); color:var(--mut); font-size:.82rem">
         Draw a closed outline — the ends snap together. It becomes an SVG shape you can cut out, pocket, or ring with holes:
         try “cut out <em>my drawing</em> 4 inches wide”.
+      </div>
+    </div>
+  </div>
+
+  <!-- Machine & tools: system facts behind one menu — the machine's reach and
+     spindle band, the sheets the shop buys, the bits in the rack. All
+     app-level (localStorage); the tool rack is the SHARED shopbot:tools
+     drawer, one rack for every ShopBot Labs app in this browser. Never part
+     of any recipe. -->
+  <div id="shopOverlay" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(10,12,20,.55); align-items:center; justify-content:center">
+    <div style="display:flex; flex-direction:column; width:min(92vw,700px); max-height:88vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 40px rgba(0,0,0,.35); overflow:hidden">
+      <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border)">
+        <strong style="margin-right:auto">Machine &amp; tools</strong>
+        <button id="shopClose" class="ghost small">Close</button>
+      </div>
+      <div style="padding:12px 14px; overflow-y:auto; display:flex; flex-direction:column; gap:16px">
+        <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap">
+          <div><label>Machine cut area W × H (in)</label>
+            <div style="display:flex; gap:6px; align-items:center">
+              <input id="shopMachineW" type="number" min="1" step="1" placeholder="any" style="width:72px">
+              <span style="color:var(--mut)">×</span>
+              <input id="shopMachineH" type="number" min="1" step="1" placeholder="any" style="width:72px">
+            </div>
+          </div>
+          <div><label>Material sheet W × H (in)</label>
+            <div style="display:flex; gap:6px; align-items:center">
+              <input id="shopMaterialW" type="number" min="1" step="1" placeholder="any" style="width:72px">
+              <span style="color:var(--mut)">×</span>
+              <input id="shopMaterialH" type="number" min="1" step="1" placeholder="any" style="width:72px">
+            </div>
+          </div>
+          <div class="keynote" style="max-width:260px">Set once. Layouts nest to fit both; a cut that can't fit any layout
+            warns instead of exporting a fiction. Blank = no limit.</div>
+        </div>
+        <div>
+          <label>Tool rack — the bits you own, by their real &amp;Tool numbers</label>
+          <table id="rackTable" style="width:100%; border-collapse:collapse; font-size:.9rem">
+            <thead>
+              <tr style="color:var(--mut); text-align:left">
+                <th style="padding:4px 6px">#</th>
+                <th style="padding:4px 6px">Kind</th>
+                <th style="padding:4px 6px">Dia (in)</th>
+                <th style="padding:4px 6px">Flutes</th>
+                <th style="padding:4px 6px">Angle°</th>
+                <th style="padding:4px 6px">Name</th>
+                <th style="padding:4px 6px" title="Unchecked = in the drawer but not on the machine today — jobs won't assign it">On&nbsp;hand</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="rackBody"></tbody>
+          </table>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:6px">
+            <input id="rackNumber" type="number" min="1" step="1" placeholder="#" style="width:52px" title="The REAL &Tool number this bit answers to on your machine">
+            <select id="rackKind" style="width:auto">
+              <option value="flat">endmill</option>
+              <option value="ball">ballnose</option>
+              <option value="vee">V-bit</option>
+            </select>
+            <input id="rackDia" placeholder='dia — 1/4 or 0.25' style="width:110px">
+            <input id="rackFlutes" type="number" min="1" step="1" value="2" style="width:56px" title="Flute count — feeds scale with it">
+            <input id="rackAngle" type="number" min="10" max="180" step="1" placeholder="angle°" style="width:72px" title="V-bits only: included angle">
+            <input id="rackName" placeholder="name (optional)" style="width:130px">
+            <button id="rackAdd" class="small">Add bit</button>
+          </div>
+          <div class="keynote" style="margin-top:6px">One rack for every ShopBot Labs app in this browser (the STEP
+            toolpath app reads the same one). Exports post these exact numbers, so they must match your machine's
+            toolchanger or collet workflow. Bits the rack lacks post a spare number and a warning naming them.</div>
+        </div>
+        <div style="display:flex; align-items:baseline; gap:18px; flex-wrap:wrap">
+          <div><label>Spindle RPM min / max</label>
+            <div style="display:flex; gap:6px; align-items:center">
+              <input id="rackMinRPM" type="number" min="1000" step="500" style="width:84px">
+              <span style="color:var(--mut)">–</span>
+              <input id="rackMaxRPM" type="number" min="1000" step="500" style="width:84px">
+            </div>
+          </div>
+          <div style="width:130px"><label>Max feed (in/min)</label><input id="rackMaxFeed" type="number" min="10" step="10"></div>
+          <div><label>Material — derives feeds &amp; speeds by chipload</label>
+            <select id="shopMaterial" style="width:auto"></select>
+          </div>
+        </div>
+        <div class="keynote">With a material chosen, every rack-matched bit runs chipload-derived feed, plunge, and RPM
+          (per-tool TR in the file) instead of each strategy's stock numbers — deterministic tables, no guessing. "Keep
+          app feeds" leaves everything exactly as before.</div>
       </div>
     </div>
   </div>

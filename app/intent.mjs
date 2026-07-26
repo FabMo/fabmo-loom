@@ -78,7 +78,7 @@ export const ACTION_TOOL = {
               required: ['id', 'expr'],
             },
             shape: {
-              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, an asset, a drawing (draw — the user sketches it in the app), a glyph, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect.',
+              type: 'object', description: 'set_shape: named geometry in the SHARED frame (inches, {arithmetic} allowed), referenced by ops via shape/along params. Give a path, an asset, a drawing (draw — the user sketches it in the app), a glyph, OR exactly one derivation over EARLIER shapes: inset/outset (offset), band (edge band: outset by overrun minus inset by width — whole-rim rabbets, frames), union/difference/intersect, fit (self-sizing around content), pattern (repeat one cell into a grid or a ring).',
               properties: {
                 id: { type: 'string', description: 'the name (letters/digits/_)' },
                 path: { type: 'string', description: 'SVG path "d" string; coordinates are INCHES centered on the origin (rescale viewbox paths yourself — a 0..100 box would be a 100-inch part); {arithmetic} of controls/derived allowed' },
@@ -95,7 +95,7 @@ export const ACTION_TOOL = {
                   required: ['of'],
                 },
                 draw: {
-                  type: 'object', description: 'the shape the USER SKETCHES in the app (the “Draw a shape…” button, mouse or tablet stylus): identical to asset once drawn, but it may be authored BEFORE any drawing exists. Use this whenever the outline is hand-drawn, traced, or has to differ per person/per part. Ops referencing it simply skip until the drawing is made, so author the whole recipe in one pass; redrawing it re-weaves everything that references it.',
+                  type: 'object', description: 'the shape the USER SKETCHES in the app (a Draw “<name>” button appears at the top of the panel for it; mouse or tablet stylus): identical to asset once drawn, but it may be authored BEFORE any drawing exists. Use this whenever the outline is hand-drawn, traced, or has to differ per person/per part. Ops referencing it simply skip until the drawing is made, so author the whole recipe in one pass; redrawing it re-weaves everything that references it.',
                   properties: {
                     of: { type: 'string', description: 'the name the drawing will be saved under — pick a short descriptive one ("outline", "tag"); the app pre-fills it in the draw dialog, so it does NOT need to already exist' },
                     width: { type: 'string', description: 'target width in INCHES — a number or {arithmetic} of controls; omit width AND height to keep the drawing at the size it was sketched' },
@@ -133,6 +133,22 @@ export const ACTION_TOOL = {
                   properties: {
                     of: { type: 'string', description: 'the base shape id — authored at any convenient size but CENTERED ON THE ORIGIN (only its center matters; fit supplies the size)' },
                     margin: { type: 'string', description: 'clearance between content and the shape edge, inches or {arithmetic} — bind it to a control, like tag_cutout\'s buffer' },
+                  },
+                  required: ['of'],
+                },
+                pattern: {
+                  type: 'object', description: 'REPEAT an earlier shape into a grid or a ring — ONE authored cell becomes a whole checkerboard, honeycomb, or ring of marks. NEVER author repeated cells one by one (dozens of hand-written copies overrun your response budget and the build dies half-written): author one cell centered on the origin, pattern it, and pocket/cut/bore-along the PATTERN shape. Grid mode: cols × rows copies spaced dx/dy center-to-center, staggerX shifts every other row (checkerboard = one square, 4 cols × 8 rows, dx twice the square, staggerX one square; honeycomb = staggered hexes). Ring mode: count copies on a circle of radius (hour marks, bolt-pattern decorations). Patterning an open curve concatenates the copies (rows of hole-lines for bore_hole along).',
+                  properties: {
+                    of: { type: 'string', description: 'the base shape id (one cell), authored CENTERED ON THE ORIGIN' },
+                    cols: { type: 'string', description: 'grid: columns, a number or {arithmetic} (default 1)' },
+                    rows: { type: 'string', description: 'grid: rows, a number or {arithmetic} (default 1)' },
+                    dx: { type: 'string', description: 'grid: column spacing center-to-center, inches or {arithmetic} (required when cols > 1)' },
+                    dy: { type: 'string', description: 'grid: row spacing center-to-center, inches or {arithmetic} (required when rows > 1)' },
+                    staggerX: { type: 'string', description: 'grid: shift EVERY OTHER row right by this much, inches or {arithmetic} — checkerboards and honeycombs (default 0)' },
+                    count: { type: 'string', description: 'ring: number of copies, evenly spaced around the circle (giving count/radius selects ring mode)' },
+                    radius: { type: 'string', description: 'ring: circle radius to the copy centers, inches or {arithmetic}' },
+                    startDeg: { type: 'string', description: 'ring: angle of the first copy in degrees (default 90 = top; counter-clockwise)' },
+                    spin: { type: 'boolean', description: 'ring: rotate each copy so its authored "up" faces outward from the center (default false = copies keep their orientation)' },
                   },
                   required: ['of'],
                 },
@@ -210,11 +226,12 @@ RULES:
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
 - A GEOMETRIC or SYMBOLIC outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield, arrow, cloud, chevron, crescent, gear, cross, simple leaf…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc. (But NOT a recognizable likeness — see the next rule.)
 - A RECOGNIZABLE, REPRESENTATIONAL subject is the ONE kind of outline you must NEVER freehand: a specific animal (a bull, an eagle), a person or face, a vehicle, a building, a brand/team LOGO, the map of a real place. You author outlines from a handful of geometric primitives, and a likeness needs visual detail you cannot see — so a hand-drawn one is a blob that passes every toolpath check yet looks nothing like the subject, which is WORSE than nothing (a naive user just sees a bad drawing and gets frustrated). DECLINE that part — what: the drawing (e.g. "a bull outline"); why: "I build shapes from geometry (circles, stars, hearts, arches), so I can't reliably freehand a recognizable bull — it would come out as a blob." Then in the SUMMARY, give the real paths forward AND head off the wrong one: the user can DRAW it themselves (set_shape draw — see the DRAWN SHAPES rule; best when they have the picture in their head, not in a file) or UPLOAD the artwork as an SVG or image (set_shape asset) — either becomes a shape, and a name inside it or a cutout of it then composes normally — while MORE DESCRIPTION WILL NOT HELP, because you don't turn words into pictures; the outline has to come from their hand or a file. Never author a substitute blob to seem helpful: if the likeness is the whole point (a cutout OF the bull), decline the AUTHORED shape and offer the drawn one. The line: if recognizing it would take more than a few arcs/béziers, or leans on detail you can't see, don't author it — a drawn or uploaded outline beats a bad one you invented.
-- DRAWN SHAPES — a HAND-DRAWN, sketched, traced, or tablet/stylus outline is NOT a decline: set_shape draw {of:"<name>", width:…} is an outline the USER sketches in the app ("Draw a shape…", mouse or tablet pen), and it is an ordinary shape from then on — shape_cutout of it, pocket_shape it, bore_hole along it, fit content inside it. Author it EVEN THOUGH NOTHING IS DRAWN YET: the ops referencing it skip with a "waiting on the drawing" note while the rest of the recipe (typed text, controls, other cutouts) previews normally, and the moment the user draws, everything referencing it weaves. So build the WHOLE app in one pass and say in the summary which name to draw. Redrawing under the same name re-weaves every op that uses it — that is the PER-PERSON / per-part shape input (each nametag its own drawn outline, same typed-name machinery). Prefer draw over declining whenever the outline lives in the user's hand rather than in a file; prefer an SVG asset when they already have the file; prefer a glyph or an authored path when it's a standard symbol or plain geometry.
+- DRAWN SHAPES — a HAND-DRAWN, sketched, traced, or tablet/stylus outline is NOT a decline: set_shape draw {of:"<name>", width:…} is an outline the USER sketches in the app (authoring it puts a Draw “<name>” button at the top of the panel; mouse or tablet pen), and it is an ordinary shape from then on — shape_cutout of it, pocket_shape it, bore_hole along it, fit content inside it. Author it EVEN THOUGH NOTHING IS DRAWN YET: the ops referencing it skip with a "waiting on the drawing" note while the rest of the recipe (typed text, controls, other cutouts) previews normally, and the moment the user draws, everything referencing it weaves. So build the WHOLE app in one pass and say in the summary which name to draw. Redrawing under the same name re-weaves every op that uses it — that is the PER-PERSON / per-part shape input (each nametag its own drawn outline, same typed-name machinery). Prefer draw over declining whenever the outline lives in the user's hand rather than in a file; prefer an SVG asset when they already have the file; prefer a glyph or an authored path when it's a standard symbol or plain geometry.
 - A shape whose OWN dimensions must be adjustable ("an arch with adjustable thickness and radius") is also NOT a decline: write {arithmetic} of number-control ids inside the path with width/height 0 — the arch example is in shape_cutout's doc. Such dimensions (band thickness, radius…) are recipe controls; set_thickness is ONLY for the stock material.
 - Name intermediate values ONCE with set_derived (e.g. m = "r - t/2", innerR = "r - t") and write {m}, {innerR} everywhere — do this whenever an expression would repeat across params or operations. Derived values may reference controls and earlier derived ids; they are recomputed on every slider move.
 - Define geometry ONCE with set_shape and reference it by id: closed outlines feed shape_cutout's shape param / pocket_shape's shape param; open curves (open: true) feed bore_hole's along param. Shapes live in the SHARED frame and re-lower on every slider move. CRITICAL: shape coordinates are INCHES, CENTERED ON THE ORIGIN (where prior content like engraved text centers). NEVER paste an SVG-viewbox path unscaled — a heart in a 0..100 box becomes a 100-INCH part 50 inches off-center. A 3" heart spans roughly -1.5..1.5 around the origin; rescale and re-center the coordinates yourself (or use {arithmetic} of a size control) before authoring the path. The parametric arch app in full: derived inner="r-t", mid="r-t/2"; shape arch = "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {inner} 0 A {inner} {inner} 0 0 0 {-inner} 0 Z"; shape centerline (open) = "M {-mid} 0 A {mid} {mid} 0 0 1 {mid} 0"; ops: bore_hole along "centerline" count 5, then shape_cutout shape "arch".
-- Shapes can also be DERIVED from earlier shapes instead of authored: inset/outset {of, by} (offset), band {of, width, overrun} (a band hugging the whole outline — frames, whole-rim rabbets and ledges: pocket the band with edgeTreatment true before the cutout of the same base shape), union/difference/intersect [ids], fit {of, margin} (self-sizing, below). Derivations are computed geometry — prefer them over re-authoring offset outlines by hand.
+- Shapes can also be DERIVED from earlier shapes instead of authored: inset/outset {of, by} (offset), band {of, width, overrun} (a band hugging the whole outline — frames, whole-rim rabbets and ledges: pocket the band with edgeTreatment true before the cutout of the same base shape), union/difference/intersect [ids], fit {of, margin} (self-sizing, below), pattern {of, …} (repeat one cell — below). Derivations are computed geometry — prefer them over re-authoring offset outlines by hand.
+- A REPEATED layout — a checkerboard, a honeycomb, rows of identical cells, a ring of marks — is NOT a decline, and must NEVER be authored cell-by-cell: author ONE cell as a shape centered on the origin, derive set_shape pattern from it, and pocket/cut the pattern shape. (Hand-writing dozens of copies overruns your response budget and the build dies half-written — one cell + one pattern is always the move.) Chess board in full: control "sq" (square size, default 2); shape "cell" = path "M {-sq/2} {-sq/2} L {sq/2} {-sq/2} L {sq/2} {sq/2} L {-sq/2} {sq/2} Z"; shape "darks" = pattern {of:"cell", cols:"4", rows:"8", dx:"2*sq", dy:"sq", staggerX:"sq"}; ops: pocket_shape shape "darks", then tag_cutout LAST (buffer 0 hugs the board). Clock hour marks: one tick shape, pattern {of:"tick", count:"12", radius:"4.5", spin:true}, pocket it before the disc_cutout — and size the radius so the patterned content FITS the disc. Overlapping copies weld into one outline, so patterns make grilles and lattices too. A pattern of plain HOLES still wants bore_hole (along a shape, or at centers) — pattern is for shaped cells.
 - Content INSIDE a shaped outline ("engrave a name and cut it out as a heart") is a FIT, not a guess: author the base outline at any convenient size CENTERED ON THE ORIGIN, then set_shape tag = fit {of: base, margin: m} and cut/pocket THAT. fit scales the base uniformly (about the origin) until everything machined before the referencing op clears its edge by margin — so a longer name simply makes a bigger heart, exactly like tag_cutout's buffer. Bind margin to a control; put the content operations FIRST in the pipeline. Never size such a shape with a fixed width — a width the user's text has outgrown is a fit conflict.
 - Give every authored shape the controls a user would naturally grab, and pick the shape's OWN parameters over generic stretch: an arch gets radius and band thickness, a rounded shape gets its corner radius, a star gets inner/outer radius. Organic outlines (hearts, shields, leaves) distort badly under independent width/height — give them ONE uniform size control, or better, fit + a margin control when content sits inside. Independent width/height stretch is right only for boxy shapes (plaques, frames, rectangles).
 - A RABBET / ledge / stepped edge along a cutout's edge is also NOT a decline: whole-rim = a band-derived shape pocketed with edgeTreatment true; a PARTIAL edge (one side only) = a pocket_shape "custom" band you author hugging that edge — the recipe is in pocket_shape's doc.
@@ -222,7 +239,7 @@ RULES:
 - A PATTERN of holes (a row of five, a bolt circle, holes along an arc) is NOT a decline: bore_hole's "along" spaces count holes evenly by arc length on any shape (open curve end-to-end, closed outline all the way around); "at" takes explicit centers for irregular layouts.
 - Keep ids short and meaningful (e.g. "engrave", "cutout"). Use set_operation with a partial params object to change an existing op's parameters. set_operation may also include a different "strategy" to CONVERT the op (e.g. a rectangular tag_cutout into a disc_cutout) — its params are then replaced by the ones you provide. Use remove_operation only when the user wants the operation gone.
 - Operations have NO enable/disable param — never invent one. Text ops skip themselves when their bound text is BLANK, so bound text is already optional: "make the caption optional" needs no actions — answer (in summary) that clearing the text field omits it. An optional NON-text feature is a decline (what: an on/off toggle for that op); remove_operation when the user says to drop it.
-- CUTTING MANY PARTS FROM ONE SHEET, and tracking what's already been cut, is NOT a decline — but it takes NO actions, because it is an app SETTING, not part of the recipe: the Sheet ledger (in Shop settings) holds one physical board's size plus every footprint already committed to it, nests each new design into the free space, and reports what's left. Answer it in the SUMMARY: enter the board's W × H under "Sheet ledger", then hit "Record on sheet" after each verified export — the next part nests into the remainder, and the chip shows the % free. It persists across designs and re-weaves, so a run of many one-at-a-time parts (nametags, tags, coasters) is exactly what it's for. Do NOT try to model the sheet, the nesting, or the run history as controls or ops — one recipe still describes ONE part, and that part is what the ledger places. (Only furniture_design nests many panels WITHIN a single design.)
+- CUTTING MANY PARTS FROM ONE SHEET, and tracking what's already been cut, is NOT a decline — but it takes NO actions, because it is an app SETTING, not part of the recipe: the Current board tracker (next to the blank size in the app panel) holds one physical board's size plus every footprint already committed to it, nests each new design into the free space, and reports what's left. Answer it in the SUMMARY: enter the board's W × H under "Current board", then hit "Record on board" after each verified export — the next part nests into the remainder, and the chip shows the % free. It persists across designs and re-weaves, so a run of many one-at-a-time parts (nametags, tags, coasters) is exactly what it's for. Do NOT try to model the sheet, the nesting, or the run history as controls or ops — one recipe still describes ONE part, and that part is what the ledger places. (Only furniture_design nests many panels WITHIN a single design.)
 - If the recipe is empty and the user asks for an app, also set_name it.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -233,7 +250,10 @@ ${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8', shop = {} } = {}) {
   return {
     model,
-    max_tokens: 2000,
+    // generous: geometry-heavy builds (multi-shape recipes, big edits)
+    // were hitting 2000 and truncating mid-action-list, which reads as a
+    // silent half-build — the app also surfaces stop_reason max_tokens
+    max_tokens: 8000,
     system: buildSystemPrompt(recipe, shop),
     messages: [{ role: 'user', content: utterance }],
     tools: [ACTION_TOOL],
@@ -266,7 +286,7 @@ export function applyActions(recipe, payload) {
     return { out };
   };
 
-  for (const a of payload.actions ?? []) {
+  const applyOne = (a) => {
     switch (a.kind) {
       case 'set_name':
         if (typeof a.name === 'string' && a.name.trim()) { next.name = a.name.trim(); applied.push(`named it "${next.name}"`); }
@@ -318,7 +338,9 @@ export function applyActions(recipe, payload) {
         break;
       }
       case 'set_derived': {
-        const d = a.derived;
+        // accept the flattened form {kind, id, expr} the model sometimes
+        // emits (seen 3× in one response) — the intent is unambiguous
+        const d = a.derived ?? (typeof a.expr === 'string' ? { id: a.id, expr: a.expr } : undefined);
         if (!d?.id || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(d.id) || typeof d.expr !== 'string' || !d.expr.trim()) {
           skipped.push('set_derived: needs an id (letters/digits/_) and an expr'); break;
         }
@@ -359,9 +381,9 @@ export function applyActions(recipe, payload) {
           skipped.push('set_shape: needs an id (letters/digits/_)'); break;
         }
         // the stored entry: a path, an asset, or exactly one derivation
-        const forms = ['path', 'asset', 'draw', 'glyph', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit'].filter(k => s[k] !== undefined);
+        const forms = ['path', 'asset', 'draw', 'glyph', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit', 'pattern'].filter(k => s[k] !== undefined);
         if (forms.length !== 1) {
-          skipped.push(`set_shape "${s.id}": give a path, an asset, a drawing, a glyph, OR one derivation (inset/outset/band/union/difference/intersect/fit)`); break;
+          skipped.push(`set_shape "${s.id}": give a path, an asset, a drawing, a glyph, OR one derivation (inset/outset/band/union/difference/intersect/fit/pattern)`); break;
         }
         const entry = { id: s.id, [forms[0]]: s[forms[0]], ...(forms[0] === 'path' && s.open ? { open: true } : {}) };
         // dry-lower the FINAL shapes list through the real buildShapes so
@@ -477,6 +499,45 @@ export function applyActions(recipe, payload) {
       default:
         skipped.push(`unknown action kind "${a.kind}"`);
     }
+  };
+
+  // The model's action list is data from a good-faith author who
+  // sometimes gets the ORDER wrong (a shape emitted one action before
+  // the control it binds; a derived chain listed backwards). Rescue
+  // instead of cascading skips:
+  //   1. controls first — pure additions nothing else can invalidate,
+  //      and the thing everything else binds to;
+  //   2. everything else in document order;
+  //   3. failed set_derived / set_shape entries retried until a full
+  //      sweep makes no progress (chains settle in ≤ n sweeps), then the
+  //      survivors' reasons are reported.
+  // Operations are NOT retried: pipeline position is machining order,
+  // and their shape/control references are checked here in full.
+  const actions = (payload.actions ?? []).filter(a => a && typeof a === 'object');
+  const ordered = [
+    ...actions.filter(a => a.kind === 'add_control'),
+    ...actions.filter(a => a.kind !== 'add_control'),
+  ];
+  const RETRYABLE = new Set(['set_derived', 'set_shape']);
+  const sweep = (list) => {
+    const failed = [];
+    for (const a of list) {
+      const before = skipped.length;
+      applyOne(a);
+      if (skipped.length > before && RETRYABLE.has(a.kind)) {
+        failed.push({ a, msgs: skipped.splice(before) });
+      }
+    }
+    return failed;
+  };
+  let failed = sweep(ordered);
+  while (failed.length) {
+    const again = sweep(failed.map(f => f.a));
+    if (again.length === failed.length) {
+      for (const f of again) skipped.push(...f.msgs);
+      break;
+    }
+    failed = again;
   }
   return { recipe: next, applied, skipped, declined: payload.declined ?? [], summary: payload.summary ?? '' };
 }

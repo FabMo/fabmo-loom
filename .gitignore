@@ -5,3 +5,9 @@ out/
 examples/out/
 # per-deployment guest-app registry (see AGENTS.md "Mounting a guest app")
 app/guests.local.mjs
+# synth-probe run artifacts + real-user data (the harness is public, the
+# users' prompt text and operational state are not)
+tools/synth-probe/corpus.local.jsonl
+tools/synth-probe/results*.jsonl
+tools/synth-probe/runs/
+tools/synth-probe/funnel-cursor.json

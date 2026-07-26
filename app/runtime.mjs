@@ -23,6 +23,7 @@ import { svgAssetToRegions } from './svg.mjs';
 import { GLYPHS, glyphById } from './glyphs.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
+import { recommendFeeds, DEFAULT_MACHINE } from '../ir/tools.js';
 
 export const EMPTY_RECIPE = {
   version: 2,                  // recipe grammar version (migrations key on this)
@@ -319,8 +320,81 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       const f = fitRegionsSnug(b.base.regions, m.value, pts);
       if (f.error) return { error: `shape "${s.id}": fit of "${s.fit.of}" ${f.error}` };
       shapes[s.id] = { kind: 'region', regions: f.regions, root: b.base.root, fitted: true, scale: f.scale };
+    } else if (s.pattern) {
+      // REPEAT one authored cell into a grid or a ring. This is the
+      // primitive that keeps checkerboards, honeycombs, and hour-mark
+      // rings from being authored copy-by-copy (dozens of hand-written
+      // cells is how a model response overruns its budget mid-build).
+      // Works over closed shapes (regions weld into one multi-piece
+      // shape) and open curves (polylines concatenate — hole rows for
+      // bore_hole's along).
+      const spec = s.pattern;
+      const b = shapes[spec.of];
+      if (!b) return { error: `shape "${s.id}": pattern references "${spec.of}", which is not defined ABOVE it` };
+      const nums = {};
+      for (const [k, dflt] of [['cols', 1], ['rows', 1], ['dx', 0], ['dy', 0], ['staggerX', 0], ['count', 0], ['radius', 0], ['startDeg', 90]]) {
+        const d = num(spec[k] ?? dflt, k, s.id);
+        if (d.error) return d;
+        nums[k] = d.value;
+      }
+      const radial = spec.count !== undefined || spec.radius !== undefined;
+      const placements = [];   // { x, y, rotDeg }
+      if (radial) {
+        const count = Math.round(nums.count);
+        if (!(count >= 1)) return { error: `shape "${s.id}": pattern needs count ≥ 1 (got ${nums.count})` };
+        if (count > 512) return { error: `shape "${s.id}": pattern of ${count} copies is too many (max 512)` };
+        if (!(nums.radius >= 0)) return { error: `shape "${s.id}": pattern radius must be ≥ 0` };
+        for (let i = 0; i < count; i++) {
+          const ang = nums.startDeg + (i * 360) / count;
+          const th = (ang * Math.PI) / 180;
+          placements.push({
+            x: nums.radius * Math.cos(th), y: nums.radius * Math.sin(th),
+            // spin: the copy's authored "up" turns to face outward — a copy
+            // sitting at the top (90°) keeps its authored orientation
+            rotDeg: spec.spin ? ang - 90 : 0,
+          });
+        }
+      } else {
+        const cols = Math.round(nums.cols), rows = Math.round(nums.rows);
+        if (!(cols >= 1 && rows >= 1)) return { error: `shape "${s.id}": pattern needs cols ≥ 1 and rows ≥ 1` };
+        if (cols * rows > 512) return { error: `shape "${s.id}": pattern of ${cols * rows} copies is too many (max 512)` };
+        if (cols * rows === 1) return { error: `shape "${s.id}": a 1×1 pattern is just "${spec.of}" — reference it directly, or give cols/rows (grid) or count/radius (ring)` };
+        if (cols > 1 && !(nums.dx > 0)) return { error: `shape "${s.id}": a ${cols}-column pattern needs dx > 0 (center-to-center spacing)` };
+        if (rows > 1 && !(nums.dy > 0)) return { error: `shape "${s.id}": a ${rows}-row pattern needs dy > 0 (center-to-center spacing)` };
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            placements.push({
+              x: (c - (cols - 1) / 2) * nums.dx + (r % 2 ? nums.staggerX : 0),
+              y: (r - (rows - 1) / 2) * nums.dy,
+              rotDeg: 0,
+            });
+          }
+        }
+      }
+      const xf = (pts, p) => {
+        const th = (p.rotDeg * Math.PI) / 180, c = Math.cos(th), si = Math.sin(th);
+        return pts.map(q => ({ x: q.x * c - q.y * si + p.x, y: q.x * si + q.y * c + p.y }));
+      };
+      if (b.kind === 'curve') {
+        const polylines = placements.flatMap(p =>
+          b.polylines.map(pl => ({ ...pl, points: xf(pl.points, p) })));
+        shapes[s.id] = { kind: 'curve', polylines, root: s.id };
+      } else if (b.kind === 'region') {
+        const sets = placements.map(p => b.regions.map(rg => ({
+          outer: xf(rg.outer, p),
+          holes: (rg.holes ?? []).map(h => xf(h, p)),
+        })));
+        const out = sets.length === 1 ? { regions: sets[0] } : booleanRegions('union', sets);
+        if (out.error) return { error: `shape "${s.id}": ${out.error}` };
+        if (!out.regions.length) return { error: `shape "${s.id}": pattern of "${spec.of}" is empty` };
+        // a pattern is a NEW body, not the cell's lineage — a rabbet on
+        // one square should never pair with the whole checkerboard
+        shapes[s.id] = { kind: 'region', regions: out.regions, root: s.id };
+      } else {
+        return { error: `shape "${s.id}": pattern needs a shape or curve, but "${spec.of}" has no geometry` };
+      }
     } else {
-      return { error: `shape "${s.id}" needs a path, an asset, a drawing, or a derivation (inset/outset/band/union/difference/intersect/fit)` };
+      return { error: `shape "${s.id}" needs a path, an asset, a drawing, or a derivation (inset/outset/band/union/difference/intersect/fit/pattern)` };
     }
   };
 
@@ -329,6 +403,7 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
     : s.outset ? [s.outset.of]
     : s.band ? [s.band.of]
     : s.fit ? [s.fit.of]
+    : s.pattern ? [s.pattern.of]
     : (s.union ?? s.difference ?? s.intersect ?? []);
 
   const pending = new Map();   // id → entry, waiting for content
@@ -512,7 +587,12 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
  *                        inches, 0/absent = no limit. Strategies that lay
  *                        parts out consult ctx.shop to nest within them;
  *                        the runtime warns when the finished board can't
- *                        fit regardless.
+ *                        fit regardless. Optionally also { toolLibrary,
+ *                        material }: toolLibrary is the shared shopbot:tools
+ *                        drawer (ir/tools.js shape) — matched specs post
+ *                        REAL &Tool numbers; material (a MATERIALS key,
+ *                        ''/absent = off) additionally derives feeds/rpm
+ *                        by chipload for the matched bits.
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
 export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}, placeAt = null) {
@@ -595,6 +675,17 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
     const p = resolveParams(entry, op, controlValues, vars, errors, strategyWarnings);
     if (errors.length) break;
+    // fit-derived shapes lower HERE, at first reference: the content
+    // machined so far is exactly what they must wrap. This must run BEFORE
+    // the undrawn gate below — a fit over a not-yet-drawn shape only
+    // reveals itself as undrawn once resolved (it sat in `pending`, not in
+    // `shapes`, so the gate cannot see it earlier).
+    for (const v of Object.values(p)) {
+      if (typeof v !== 'string' || !bs.pending.has(v)) continue;
+      const e = bs.resolve(v, ctx);
+      if (e) { errors.push(`op "${op.id}": ${e.error}`); break; }
+    }
+    if (errors.length) break;
     // an op whose shape is still waiting on the user's drawing SKIPS, the
     // way a blank optional caption does — the rest of the recipe previews
     // and this op joins in as soon as the outline is sketched
@@ -602,17 +693,9 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
       .map(v => (typeof v === 'string' ? bs.shapes[v] : null))
       .find(sh => sh?.kind === 'undrawn');
     if (undrawn) {
-      strategyWarnings.push(`op "${op.id}": waiting on the drawing "${undrawn.drawName}" — click “Draw a shape…” and name it "${undrawn.drawName}"`);
+      strategyWarnings.push(`op "${op.id}": waiting on the drawing "${undrawn.drawName}" — sketch it with the Draw “${undrawn.drawName}” button at the top of the panel`);
       continue;
     }
-    // fit-derived shapes lower HERE, at first reference: the content
-    // machined so far is exactly what they must wrap
-    for (const v of Object.values(p)) {
-      if (typeof v !== 'string' || !bs.pending.has(v)) continue;
-      const e = bs.resolve(v, ctx);
-      if (e) { errors.push(`op "${op.id}": ${e.error}`); break; }
-    }
-    if (errors.length) break;
     // framed ops run in the frame's own persistent context: content
     // centers on the panel face, and a second framed op on the SAME
     // panel sees the first as content-so-far (place:"below" stacks
@@ -740,20 +823,58 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   }
 
   // ---- tool table: one entry per distinct tool spec, in first-use order ----
+  // With a tool rack declared (shop.toolLibrary — the shared shopbot:tools
+  // drawer), a spec that matches a rack bit posts that bit's REAL &Tool
+  // number, and a declared shop material derives its feeds/rpm by chipload
+  // (ir/tools.js — the same engine the step app runs). Specs the rack lacks
+  // get synthetic numbers that dodge EVERY rack number — a rack number means
+  // a DIFFERENT bit answers that slot — plus a warning naming the missing
+  // bit. No rack at all = plain first-use numbering, exactly as before.
+  // A vee matches by included angle (catalog vee specs model the point tip,
+  // so their diameters are nominal); flat/ball match by diameter.
+  const rackAll = shop?.toolLibrary?.tools ?? [];
+  const rackFree = rackAll.filter(t => t.available !== false);
+  const matchRack = (spec) => rackFree.find(t =>
+    t.kind === (spec.kind ?? 'flat') &&
+    (t.kind === 'vee'
+      ? Math.abs((t.angleDeg ?? 0) - (spec.angleDeg ?? 0)) <= 1
+      : Math.abs(t.diameter - spec.diameter) <= 0.002));
+  const taken = new Set(rackAll.map(t => t.number));
   const tools = {};
-  const toolNumber = new Map();
+  const toolNumber = new Map();   // spec key → posted tool number
+  const toolFeeds = new Map();    // spec key → chipload-derived feeds
+  let synth = 0;
   for (const { r } of built) {
     const key = `${r.tool.name}|${r.tool.diameter}`;
-    if (!toolNumber.has(key)) {
-      const n = toolNumber.size + 1;
-      toolNumber.set(key, n);
-      // kind/angleDeg ride along: the verifier's heightmap check models
-      // the cutter (ball/vee/flat) from the tool table entry
-      const t = { name: r.tool.name, diameter: r.tool.diameter };
-      if (r.tool.kind) t.kind = r.tool.kind;
-      if (r.tool.angleDeg) t.angleDeg = r.tool.angleDeg;
-      tools[n] = t;
+    if (toolNumber.has(key)) continue;
+    // a rack bit already claimed by an earlier spec falls through to a
+    // synthetic number: two specs sharing one table entry would let one
+    // spec's geometry stand in for the other's in the verifier's model
+    const hit = matchRack(r.tool);
+    let n;
+    if (hit && !(hit.number in tools)) {
+      n = hit.number;
+      if (shop.material) {
+        const rec = recommendFeeds(hit, shop.material, shop.toolLibrary?.machine ?? DEFAULT_MACHINE);
+        if (rec) toolFeeds.set(key, rec);
+      }
+    } else {
+      do { synth++; } while (taken.has(synth));
+      n = synth;
+      if (rackAll.length) {
+        shapesWarnings.push(`no ${r.tool.name} in the tool rack — posted as tool ${n}; load that bit (and add it in Machine & tools) before running`);
+      }
     }
+    taken.add(n);
+    toolNumber.set(key, n);
+    // kind/angleDeg ride along: the verifier's heightmap check models
+    // the cutter (ball/vee/flat) from the tool table entry
+    const t = { name: r.tool.name, diameter: r.tool.diameter };
+    if (r.tool.kind) t.kind = r.tool.kind;
+    if (r.tool.angleDeg) t.angleDeg = r.tool.angleDeg;
+    const rec = toolFeeds.get(key);
+    if (rec) t.rpm = rec.rpm;   // per-tool TR/S at the toolchange
+    tools[n] = t;
   }
 
   const job = {
@@ -765,8 +886,11 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     operations: built.map(({ op, r }) => ({
       name: `${op.id}${r.subName ? ` ${r.subName}` : ''} (${op.strategy})`,
       tool: toolNumber.get(`${r.tool.name}|${r.tool.diameter}`),
-      feedRate: r.feedRate,
-      plungeRate: r.plungeRate,
+      // chipload feeds (shop material + rack match) override the strategy's
+      // stock numbers; depth-per-pass stays the strategy's own — it is
+      // already baked into the motion
+      feedRate: toolFeeds.get(`${r.tool.name}|${r.tool.diameter}`)?.feedRate ?? r.feedRate,
+      plungeRate: toolFeeds.get(`${r.tool.name}|${r.tool.diameter}`)?.plungeRate ?? r.plungeRate,
       placement,
       moves: r.moves,
       target: r.target,
