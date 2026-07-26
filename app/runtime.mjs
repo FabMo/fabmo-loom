@@ -159,12 +159,24 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
   const baseOf = (ref, id, what) => {
     const b = shapes[ref];
     if (!b) return { error: `shape "${id}": ${what} references "${ref}", which is not defined ABOVE it` };
+    // a shape waiting on the user's drawing has no geometry yet; anything
+    // derived from it waits too, so the derivation is authored normally
+    // and the whole chain lights up the moment the outline is drawn
+    if (b.kind === 'undrawn') return { undrawn: b };
     if (b.kind !== 'region') return { error: `shape "${id}": ${what} needs a closed shape, but "${ref}" is an open curve` };
     return { base: b };
   };
   // per-entry lowering; success mutates shapes/warnings, failure returns
   // { error }. ctx (content machined so far) is consulted only by fit.
   const lowerEntry = (s, ctx) => {
+    // an UNDRAWN base propagates down the whole derivation chain: a fit or
+    // inset over a shape the user has not sketched yet is itself undrawn,
+    // not an error. The ops referencing it skip; drawing lights them up.
+    const undrawnRef = (refsOf(s) ?? []).find(r => shapes[r]?.kind === 'undrawn');
+    if (undrawnRef) {
+      shapes[s.id] = { kind: 'undrawn', drawName: shapes[undrawnRef].drawName, root: s.id };
+      return;
+    }
     if (s.path !== undefined) {
       const ex = expandTemplate(s.path ?? '', vars);
       if (ex.error) return { error: `shape "${s.id}": ${ex.error}` };
@@ -177,13 +189,24 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
         if (r.error) return { error: `shape "${s.id}": ${r.error}` };
         shapes[s.id] = { kind: 'region', regions: r.regions, root: s.id };
       }
-    } else if (s.asset) {
+    } else if (s.asset || s.draw) {
       // an UPLOADED SVG file as a shape: the filled artwork, welded and
       // sized, becomes ordinary region geometry — cutouts, pockets, and
-      // along-derivations neither know nor care it came from a file
-      const spec = s.asset;
+      // along-derivations neither know nor care it came from a file.
+      // `draw` is the SAME lowering against artwork the user sketches in
+      // the app instead of uploading — the only difference is what a
+      // missing one means (see below).
+      const spec = s.asset ?? s.draw;
       const asset = (recipe.assets ?? []).find(a => a.id === spec.of || a.name === spec.of);
       if (!asset) {
+        // a DRAWN shape that has not been drawn yet is the normal opening
+        // state of a sketch recipe, not an authoring mistake: hold the id
+        // with no geometry so the rest of the recipe (typed text, cutouts,
+        // controls) still previews, and skip only the ops that need it.
+        if (s.draw) {
+          shapes[s.id] = { kind: 'undrawn', drawName: spec.of, root: s.id };
+          return;
+        }
         const names = (recipe.assets ?? []).map(a => `"${a.name}"`).join(', ');
         return { error: `shape "${s.id}": no uploaded file "${spec.of}" — uploads: ${names || 'none'}` };
       }
@@ -297,7 +320,7 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       if (f.error) return { error: `shape "${s.id}": fit of "${s.fit.of}" ${f.error}` };
       shapes[s.id] = { kind: 'region', regions: f.regions, root: b.base.root, fitted: true, scale: f.scale };
     } else {
-      return { error: `shape "${s.id}" needs a path, an asset, or a derivation (inset/outset/band/union/difference/intersect/fit)` };
+      return { error: `shape "${s.id}" needs a path, an asset, a drawing, or a derivation (inset/outset/band/union/difference/intersect/fit)` };
     }
   };
 
@@ -492,7 +515,7 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
  *                        fit regardless.
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
-export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}) {
+export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}, placeAt = null) {
   const errors = [];
   const stock = recipe.stock;
   if (!recipe.pipeline.length) {
@@ -519,6 +542,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   const outlined = new Set();
   const addOutline = (id, sh) => {
     outlined.add(id);
+    if (sh.kind === 'undrawn') return;   // no geometry to preview yet
     const rings = sh.kind === 'region'
       ? sh.regions.flatMap(r => [r.outer, ...r.holes])
       : sh.polylines.map(p => p.points);
@@ -571,6 +595,16 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
     const p = resolveParams(entry, op, controlValues, vars, errors, strategyWarnings);
     if (errors.length) break;
+    // an op whose shape is still waiting on the user's drawing SKIPS, the
+    // way a blank optional caption does — the rest of the recipe previews
+    // and this op joins in as soon as the outline is sketched
+    const undrawn = Object.values(p)
+      .map(v => (typeof v === 'string' ? bs.shapes[v] : null))
+      .find(sh => sh?.kind === 'undrawn');
+    if (undrawn) {
+      strategyWarnings.push(`op "${op.id}": waiting on the drawing "${undrawn.drawName}" — click “Draw a shape…” and name it "${undrawn.drawName}"`);
+      continue;
+    }
     // fit-derived shapes lower HERE, at first reference: the content
     // machined so far is exactly what they must wrap
     for (const v of Object.values(p)) {
@@ -681,15 +715,29 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   const w = b.maxX - b.minX, h = b.maxY - b.minY;
   const margin = recipe.margin ?? 0.375;
   const roundQ = (x) => Math.ceil((x - 1e-9) / 0.25) * 0.25;
-  const autoStock = {
-    w: roundQ(w + 2 * margin),
-    h: roundQ(h + 2 * margin),
-    thickness: stock.thickness,
-  };
-  const placement = {
-    x: (autoStock.w - w) / 2 - b.minX,
-    y: (autoStock.h - h) / 2 - b.minY,
-  };
+  // Board sizing + placement, in priority order:
+  //   placeAt — SHEET-POSITIONED export (the ledger): the SHEET is the stock
+  //             and the design sits at its nested (x,y) so the cut lands in a
+  //             free spot, not overlapping earlier cuts. Content is margin-inset
+  //             from the reserved footprint's corner.
+  //   pinned  — a fixed blank (recipe.stock.width/height); centered within it.
+  //   else    — auto-size to the content (the minimum board to fixture).
+  const pinned = stock.width > 0 && stock.height > 0;
+  let autoStock, placement;
+  if (placeAt) {
+    autoStock = { w: placeAt.sheetW, h: placeAt.sheetH, thickness: stock.thickness, placed: true };
+    placement = { x: placeAt.x + margin - b.minX, y: placeAt.y + margin - b.minY };
+  } else if (pinned) {
+    autoStock = { w: stock.width, h: stock.height, thickness: stock.thickness, pinned: true };
+    placement = { x: (autoStock.w - w) / 2 - b.minX, y: (autoStock.h - h) / 2 - b.minY };
+    const needW = w + 2 * margin, needH = h + 2 * margin;
+    if (needW > autoStock.w + 0.01 || needH > autoStock.h + 0.01) {
+      shapesWarnings.push(`the design needs ${roundQ(needW)}" × ${roundQ(needH)}" but your blank is ${autoStock.w}" × ${autoStock.h}" — shrink the design or use a bigger blank`);
+    }
+  } else {
+    autoStock = { w: roundQ(w + 2 * margin), h: roundQ(h + 2 * margin), thickness: stock.thickness };
+    placement = { x: (autoStock.w - w) / 2 - b.minX, y: (autoStock.h - h) / 2 - b.minY };
+  }
 
   // ---- tool table: one entry per distinct tool spec, in first-use order ----
   const tools = {};

@@ -1742,7 +1742,7 @@ console.log('--- asset shape failure modes stay honest ---');
   if (junk.includes('no <svg> element')) pass('unparseable file refused at apply time, not at weave time');
   else fail(`junk message wrong: ${junk}`);
   const both = tryShape({ id: 'x', path: 'M 0 0 L 1 0 L 1 1 Z', asset: { of: 'logo.svg' } });
-  if (both.includes('give a path, an asset, a glyph, OR')) pass('path + asset together refused as ambiguous');
+  if (both.includes('give a path, an asset, a drawing, a glyph, OR')) pass('path + asset together refused as ambiguous');
   else fail(`both-forms message wrong: ${both}`);
 }
 
@@ -1940,18 +1940,158 @@ console.log('--- shape scalar accepts a {ctrl} control binding ---');
 // A bull/eagle/face/logo hand-drawn from a few béziers is a blob that passes
 // every toolpath check yet looks nothing like the subject — worse than a clean
 // decline (the naive user just sees a bad drawing). The grounding prompt must
-// tell the model to refuse the likeness and offer the asset-upload path WITHOUT
-// chilling the geometric shapes it draws well. (Calibration — that it declines a
-// bull but still draws a star — is a live-key check; this guards the guidance.)
-console.log('--- prompt: decline likenesses, offer upload, still author geometry ---');
+// tell the model to refuse AUTHORING the likeness and offer the two real
+// sources — the user's own hand (set_shape draw) or a file (set_shape asset) —
+// WITHOUT chilling the geometric shapes it draws well. (Calibration — that it
+// refuses to author a bull but still draws a star — is a live-key check; this
+// guards the guidance.)
+console.log('--- prompt: decline authored likenesses, offer draw + upload, still author geometry ---');
 {
   const sys = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
-  const declinesLikeness = /REPRESENTATIONAL/.test(sys) && /blob/.test(sys) && /clean decline beats a bad drawing/.test(sys);
-  const offersAsset = /set_shape asset/.test(sys) && /UPLOAD the artwork/.test(sys) && /MORE DESCRIPTION WILL NOT HELP/.test(sys);
+  const declinesLikeness = /REPRESENTATIONAL/.test(sys) && /blob/.test(sys) && /beats a bad one you invented/.test(sys);
+  const offersSources = /set_shape asset/.test(sys) && /UPLOAD the artwork/.test(sys)
+    && /DRAW it themselves/.test(sys) && /MORE DESCRIPTION WILL NOT HELP/.test(sys);
   const stillAuthorsGeometry = /AUTHOR it yourself as an SVG path/.test(sys) && /star, heart/.test(sys);
-  if (declinesLikeness && offersAsset && stillAuthorsGeometry) {
-    pass('prompt declines likenesses + offers asset upload, and still authors geometric outlines');
-  } else fail(`likeness-decline guidance wrong: decline=${declinesLikeness} asset=${offersAsset} geom=${stillAuthorsGeometry}`);
+  if (declinesLikeness && offersSources && stillAuthorsGeometry) {
+    pass('prompt refuses authored likenesses + offers draw AND upload, and still authors geometric outlines');
+  } else fail(`likeness-decline guidance wrong: decline=${declinesLikeness} sources=${offersSources} geom=${stillAuthorsGeometry}`);
+}
+
+// ---------------- draw modality: a smoothed sketch → an SVG shape asset ----------------
+// A hand-drawn outline is stored as an SVG asset and lowers through the SAME
+// svgAssetToRegions the file-upload path uses — so a drawn shape composes like
+// any uploaded one (set_shape asset {of, width} → cutout/pocket). outlineToSvg
+// is pure (no DOM), so it tests headless; the canvas capture is exercised live.
+console.log('--- draw: smoothed outline → SVG asset lowers to a shape ---');
+{
+  const { outlineToSvg } = await import('./draw.mjs');
+  const pts = [{ x: 10, y: 10 }, { x: 110, y: 20 }, { x: 130, y: 90 }, { x: 60, y: 130 }, { x: 5, y: 80 }];
+  const svg = outlineToSvg(pts, { maxInches: 4 });
+  const r = svgAssetToRegions(svg, {});
+  if (!r.error && r.regions.length === 1 && Math.abs(r.w - 4) < 0.5) {
+    pass(`drawn outline → one SVG region at ~4" default (w=${r.w.toFixed(2)}")`);
+  } else fail(`drawn SVG lowered wrong: ${JSON.stringify({ error: r.error, w: r.w, n: r.regions?.length })}`);
+  const sized = svgAssetToRegions(svg, { width: 6 });
+  if (!sized.error && Math.abs(sized.w - 6) < 1e-6) pass('set_shape width overrides the drawn default size');
+  else fail(`width override wrong: ${sized.w}`);
+  if (outlineToSvg([{ x: 0, y: 0 }, { x: 1, y: 1 }]) === null) pass('a degenerate sketch (< 3 pts) yields no SVG');
+  else fail('outlineToSvg should reject < 3 points');
+}
+
+// ---------------- pinned blank: design to a real piece, not a grown board ----------------
+// A user with a specific offcut pins recipe.stock.width/height; the board is
+// then that exact piece (content centered within), and the model is grounded to
+// fit it. Empty = the board auto-sizes to the content, exactly as before.
+console.log('--- pinned blank pins the board + grounds the model ---');
+{
+  const base = structuredClone(EMPTY_RECIPE);
+  base.pipeline.push({ id: 'name', strategy: 'vcarve_text', params: { text: 'HI', letterHeight: 1 } });
+
+  const auto = run(base, {});
+  if (auto.ok && !auto.preview.stock.pinned && auto.preview.stock.w > 0) {
+    pass(`no blank: board auto-sizes to content (${auto.preview.stock.w}" × ${auto.preview.stock.h}")`);
+  } else fail(`auto-size baseline wrong: ${JSON.stringify(auto.preview?.stock)}`);
+
+  const big = structuredClone(base); big.stock.width = 12; big.stock.height = 8;
+  const rBig = run(big, {});
+  if (rBig.preview.stock.pinned && rBig.preview.stock.w === 12 && rBig.preview.stock.h === 8) {
+    pass('pinned blank fixes the board at 12" × 8" (not grown to content)');
+  } else fail(`pinned blank wrong: ${JSON.stringify(rBig.preview?.stock)}`);
+
+  const small = structuredClone(base); small.stock.width = 0.5; small.stock.height = 0.5;
+  const rSmall = run(small, {});
+  if ((rSmall.warnings ?? []).some(w => w.includes('your blank is 0.5"'))) {
+    pass('design bigger than the blank warns, does not silently overrun');
+  } else fail(`too-small blank warning missing: ${JSON.stringify(rSmall.warnings)}`);
+
+  const sysPinned = buildParseRequest(big, 'x').system;
+  const sysAuto = buildParseRequest(base, 'x').system;
+  if (sysPinned.includes('PINNED A BLANK') && sysPinned.includes('12" × 8"')
+    && !sysAuto.includes('PINNED A BLANK') && sysAuto.includes('AUTO-SIZED')) {
+    pass('prompt grounds the pinned blank only when declared');
+  } else fail(`blank grounding wrong: pinned=${sysPinned.includes('PINNED A BLANK')} auto=${sysAuto.includes('AUTO-SIZED')}`);
+}
+
+// ---------------- sheet ledger: track a piece of stock + what's been cut ----------------
+// Pure state/geometry: place a footprint into the free space, record cuts, and
+// report % free — the local "keep cutting from my sheet" workflow. UI/persistence
+// live in main.js; the packer here is the reusable nesting primitive.
+console.log('--- sheet ledger: nest into free space, record cuts, report free % ---');
+{
+  const L = await import('./ledger.mjs');
+  const ok = (msg, cond, detail) => (cond ? pass(msg) : fail(detail ? `${msg} — ${detail}` : msg));
+  const s0 = L.makeSheet(24, 12, 0.5);
+
+  const first = L.placeOnSheet(s0, 6, 4);
+  if (first && Math.abs(first.x) < 1e-9 && Math.abs(first.y) < 1e-9) pass('empty sheet: first part lands at the origin');
+  else fail(`first placement wrong: ${JSON.stringify(first)}`);
+  if (L.sheetFreePct(s0) === 100) pass('empty sheet is 100% free'); else fail(`empty free% = ${L.sheetFreePct(s0)}`);
+
+  // two cuts must not overlap, and free% must drop
+  const r1 = L.recordCut(s0, 6, 4, 'a');
+  const r2 = L.recordCut(r1.sheet, 6, 4, 'b');
+  if (!r1.error && !r2.error) pass('two 6×4 parts both record onto a 24×12 sheet'); else fail(`record failed: ${r1.error || r2.error}`);
+  const [o0, o1] = r2.sheet.occupied;
+  const overlap = o0.x < o1.x + o1.w && o1.x < o0.x + o0.w && o0.y < o1.y + o1.h && o1.y < o0.y + o0.h;
+  ok('the two recorded footprints do not overlap', !overlap, JSON.stringify(r2.sheet.occupied));
+  const free = L.sheetFreePct(r2.sheet);
+  ok('free% drops after cuts', free < 100 && free > 50, `free=${free}%`);
+
+  // a long-thin part fits a narrow-tall sheet ONLY when turned
+  const rot = L.placeOnSheet(L.makeSheet(3, 12, 0.5), 10, 2);
+  ok('a 10×2 part fits a 3×12 sheet by rotating', !!rot && rot.rotated && rot.w === 2 && rot.h === 10, JSON.stringify(rot));
+
+  // won't-fit is honest and records nothing
+  const tooBig = L.recordCut(s0, 40, 40, 'huge');
+  ok('a part bigger than the remaining space is refused with a reason', !!tooBig.error && /won't fit/.test(tooBig.error));
+  ok('fitsOnSheet agrees with placement', !L.fitsOnSheet(s0, 40, 40) && L.fitsOnSheet(s0, 6, 4));
+
+  // clear + inactive-sheet guards
+  ok('clearCuts wipes the history', L.clearCuts(r2.sheet).occupied.length === 0);
+  const none = L.makeSheet(0, 0, 0.5);
+  ok('an undeclared sheet nests nothing and reads 100% free', L.placeOnSheet(none, 2, 2) === null && L.sheetFreePct(none) === 100);
+}
+
+// ---------------- place-on-export: sheet is the stock, design offset to its spot ----------------
+// runRecipe's 6th arg (placeAt) makes the SHEET the stock and offsets the design
+// to its nested (x,y), so the exported cut lands in the free space rather than at
+// a lone board origin — the ledger's Record button uses this.
+console.log('--- place-on-export: cut lands at its sheet position, not centered ---');
+{
+  const base = structuredClone(EMPTY_RECIPE);
+  base.pipeline.push({ id: 'name', strategy: 'vcarve_text', params: { text: 'HI', letterHeight: 1 } });
+  const placed = quiet(() => runRecipe(base, {}, FONT_SHELF, {}, {}, { x: 5, y: 3, sheetW: 12, sheetH: 12 }));
+  if (placed.ok && placed.preview.stock.w === 12 && placed.preview.stock.h === 12 && placed.preview.stock.placed) pass('placeAt makes the 12×12 sheet the stock');
+  else fail(`placeAt stock wrong: ${JSON.stringify(placed.preview?.stock)} ok=${placed.ok}`);
+  const cuts = (placed.composed ?? []).filter((m) => m.type === 'linear' || m.type === 'arc');
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const m of cuts) {
+    if (Number.isFinite(m.x)) { minX = Math.min(minX, m.x); maxX = Math.max(maxX, m.x); }
+    if (Number.isFinite(m.y)) { minY = Math.min(minY, m.y); maxY = Math.max(maxY, m.y); }
+  }
+  if (minX >= 5 - 0.01 && minY >= 3 - 0.01 && maxX <= 12.01 && maxY <= 12.01) {
+    pass(`the toolpath sits in the (5,3) corner of the 12×12 sheet (x[${minX.toFixed(2)},${maxX.toFixed(2)}] y[${minY.toFixed(2)},${maxY.toFixed(2)}])`);
+  } else fail(`toolpath not placed at (5,3): x[${minX.toFixed(2)},${maxX.toFixed(2)}] y[${minY.toFixed(2)},${maxY.toFixed(2)}]`);
+}
+
+// ---------------- redrawn shape flows into its cutout (replace the asset in place) ----------------
+// The per-person shape input: replacing a drawn SVG asset's data in place (same
+// id) re-lowers any cutout referencing it — the geometry drives the cut, so a
+// redraw changes the part without re-pointing anything.
+console.log('--- redrawn shape flows into its cutout ---');
+{
+  const square = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M0 0 L10 0 L10 10 L0 10 Z" fill="#000"/></svg>';
+  const wide = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 5"><path d="M0 0 L20 0 L20 5 L0 5 Z" fill="#000"/></svg>';
+  const rec = structuredClone(EMPTY_RECIPE);
+  rec.assets = [{ id: 'tag', name: 'tag', kind: 'svg', data: square }];
+  rec.shapes = [{ id: 'tagshape', asset: { of: 'tag', width: 4 } }];
+  rec.pipeline = [{ id: 'cut', strategy: 'shape_cutout', params: { shape: 'tagshape' } }];
+  const before = run(rec, {});
+  rec.assets[0].data = wide;   // "redraw" — replace the drawn shape's geometry in place
+  const after = run(rec, {});
+  if (before.ok && after.ok && Math.abs(before.preview.stock.h - after.preview.stock.h) > 1) {
+    pass(`replacing the drawn shape re-lowers the cutout (board ${before.preview.stock.w}×${before.preview.stock.h} → ${after.preview.stock.w}×${after.preview.stock.h})`);
+  } else fail(`replace didn't flow through: before=${JSON.stringify(before.preview?.stock)} after=${JSON.stringify(after.preview?.stock)} ok=${before.ok}/${after.ok}`);
 }
 
 // ---------------- 29. guest strategies: a sibling app as a catalog verb ----------------
@@ -2676,6 +2816,69 @@ console.log('--- blank text skips, the rest still builds; unknown params warn --
   if (res.skipped.length === 1 && res.skipped[0].includes('unknown param "enabled"')) {
     pass('set_operation with an invented param: skipped with the reason');
   } else fail(`set_operation leak: applied=${JSON.stringify(res.applied)} skipped=${JSON.stringify(res.skipped)}`);
+}
+
+// ---------------- 33. drawn shapes: the "hand-drawn outline" decline, converted ----------------
+// Until 2026-07-21 a tablet-drawn nametag outline was declined ("a shape
+// must be an SVG path I author, a built-in glyph, or an uploaded asset")
+// even though the draw modality shipped. set_shape draw is the fill: the
+// model authors the WHOLE app before any drawing exists, ops that need
+// the outline SKIP with an honest note, and drawing lights them up.
+
+console.log('--- drawn shape: authored before it is drawn, completed by drawing ---');
+{
+  const rec = structuredClone(EMPTY_RECIPE);
+  const res = applyActions(rec, {
+    summary: 'Nametag app with a drawn outline.',
+    actions: [
+      { kind: 'set_name', name: 'Nametags' },
+      { kind: 'add_control', control: { id: 'name', type: 'text', label: 'Name', default: 'Brian' } },
+      { kind: 'set_shape', shape: { id: 'tag', draw: { of: 'outline', width: 4 } } },
+      { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'name' }, letterHeight: 0.6 } } },
+      { kind: 'add_operation', operation: { id: 'cutout', strategy: 'shape_cutout', params: { shape: 'tag' } } },
+    ],
+    declined: [],
+  });
+  if (res.skipped.length === 0 && res.recipe.shapes.length === 1) {
+    pass('set_shape draw applies with NO artwork behind it (nothing skipped)');
+  } else fail(`draw shape rejected at authoring: ${JSON.stringify(res.skipped)}`);
+
+  // undrawn: the recipe still builds, minus exactly the op that needs it
+  const before = run(res.recipe);
+  const cutBefore = before.job?.operations?.some((o) => o.name.includes('cutout'));
+  if (before.ok && !cutBefore && before.warnings.some((w) => w.includes('waiting on the drawing') && w.includes('outline'))) {
+    pass('undrawn: engraving verifies, the cutout skips with a named warning');
+  } else fail(`undrawn build wrong: ok=${before.ok} cutout=${cutBefore} warnings=${JSON.stringify(before.warnings)}`);
+
+  // the user draws it — a plain SVG asset under the name the shape asked for
+  const drawn = structuredClone(res.recipe);
+  drawn.assets.push({
+    id: 'outline', name: 'outline', kind: 'svg',
+    data: '<svg xmlns="http://www.w3.org/2000/svg" width="4in" height="2in" viewBox="0 0 4 2"><path d="M 0 0 L 4 0 L 4 2 L 0 2 Z" fill="#000"/></svg>',
+  });
+  const after = run(drawn);
+  const cutAfter = after.job?.operations?.some((o) => o.name.includes('cutout'));
+  if (after.ok && cutAfter && !after.warnings.some((w) => w.includes('waiting on the drawing'))) {
+    pass('drawn: the same recipe now cuts the outline, warning gone');
+  } else fail(`drawn build wrong: ok=${after.ok} cutout=${cutAfter} warnings=${JSON.stringify(after.warnings)}`);
+
+  // a derivation over an undrawn shape waits too, instead of erroring
+  const derived = structuredClone(res.recipe);
+  derived.shapes.push({ id: 'ring', outset: { of: 'tag', by: 0.25 } });
+  derived.pipeline.push({ id: 'ringcut', strategy: 'shape_cutout', params: { shape: 'ring' } });
+  const dr = run(derived);
+  if (dr.ok && dr.warnings.some((w) => w.includes('ringcut') && w.includes('waiting on the drawing'))) {
+    pass('a derivation over an undrawn shape waits instead of failing the weave');
+  } else fail(`derived-undrawn wrong: ok=${dr.ok} errors=${JSON.stringify(dr.errors)} warnings=${JSON.stringify(dr.warnings)}`);
+
+  // and the prompt teaches it rather than declining it
+  const sys = buildParseRequest(rec, 'nametag outlines drawn by hand on a tablet').system;
+  if (sys.includes('DRAWN SHAPES') && sys.includes('draw {of:') && sys.includes('is NOT a decline')) {
+    pass('prompt teaches set_shape draw for hand-drawn outlines');
+  } else fail('prompt still lacks the drawn-shape rule');
+  if (sys.includes('Sheet ledger') && sys.includes('Record on sheet')) {
+    pass('prompt answers sheet nesting/run-tracking with the ledger instead of declining');
+  } else fail('prompt still lacks the sheet-ledger rule');
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

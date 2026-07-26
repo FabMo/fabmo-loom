@@ -7,6 +7,8 @@
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars } from './runtime.mjs';
 import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
+import { openDraw, initDraw } from './draw.mjs';
+import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
 import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { startWeave } from './weave.mjs';
@@ -26,6 +28,8 @@ let view3d = null;
 let recipe = loadRecipe();
 let controlValues = controlDefaults(recipe);
 let shop = loadShop();
+let sheet = loadSheet();
+let lastTerrains = {};   // last resolved terrains, reused for sheet-positioned re-runs
 let result = null;
 let busy = false;
 
@@ -56,6 +60,40 @@ function persistShop() {
   try { localStorage.setItem('loom:shop', JSON.stringify(shop)); } catch {}
 }
 
+// The sheet ledger — a specific piece of stock the operator keeps cutting from,
+// with the footprints already taken from it. App-level and persistent (outlives
+// every recipe, like the shop settings): flipping to a new design must not
+// forget what's already been cut. w/h = 0 → the ledger is off (purely additive).
+function loadSheet() {
+  const base = { w: 0, h: 0, thickness: 0.5, occupied: [] };
+  try {
+    const s = { ...base, ...JSON.parse(localStorage.getItem('loom:sheet') ?? '{}') };
+    if (!Array.isArray(s.occupied)) s.occupied = [];
+    return s;
+  } catch { return base; }
+}
+function persistSheet() {
+  try { localStorage.setItem('loom:sheet', JSON.stringify(sheet)); } catch {}
+}
+
+// The status chip: "Sheet: 24×12 — 83% free · 2 parts cut · this design fits ✓".
+// Record is enabled only when the sheet is on, the design verifies, and its
+// footprint actually fits the remaining space.
+function updateSheetChip(st) {
+  const chip = $('sheetChip'), rec = $('sheetRecord');
+  if (!sheetActive(sheet)) { chip.textContent = ''; rec.disabled = true; return; }
+  let text = `Sheet: ${sheet.w}" × ${sheet.h}" — ${sheetFreePct(sheet)}% free`;
+  const cuts = sheet.occupied.length;
+  if (cuts) text += ` · ${cuts} part${cuts > 1 ? 's' : ''} cut`;
+  let fits = false;
+  if (st && st.w > 0 && st.h > 0) {
+    fits = !!placeOnSheet(sheet, st.w, st.h);
+    text += fits ? ' · this design fits ✓' : ' · won’t fit ✗';
+  }
+  chip.textContent = text;
+  rec.disabled = !(fits && result?.ok);
+}
+
 function persist() {
   try {
     localStorage.setItem('loom:recipe', JSON.stringify(recipe));
@@ -71,6 +109,8 @@ function persist() {
 function renderControls() {
   $('appName').textContent = recipe.name;
   $('thickness').value = recipe.stock.thickness;
+  $('blankW').value = recipe.stock.width > 0 ? recipe.stock.width : '';
+  $('blankH').value = recipe.stock.height > 0 ? recipe.stock.height : '';
   const host = $('controls');
   host.innerHTML = '';
   for (const c of recipe.controls) {
@@ -177,41 +217,68 @@ async function imageToDataUrl(file, maxDim = 1024) {
   }
 }
 
-async function addAssetFile(f) {
-  const isSvg = f.type === 'image/svg+xml' || f.name.toLowerCase().endsWith('.svg');
-  let asset;
-  if (isSvg) {
-    if (f.size > 512 * 1024) throw new Error('SVG larger than 512 KB — simplify it first');
-    const text = await f.text();
-    if (!text.includes('<svg')) throw new Error('that file does not look like an SVG');
-    asset = { kind: 'svg', data: text };
-  } else {
-    const { data, width, height } = await imageToDataUrl(f);
-    if (data.length > 1.5e6) throw new Error('image still too large after downscaling — crop it and retry');
-    asset = { kind: 'image', data, width, height };
-  }
+// Add any prepared asset under a unique id; returns the stored entry.
+function pushAsset(asset, displayName) {
   recipe.assets ??= [];
-  const id = `${f.name.replace(/[^A-Za-z0-9._-]+/g, '_')}`;
-  let unique = id, n = 2;
-  while (recipe.assets.some(a => a.id === unique)) unique = `${id}~${n++}`;
-  recipe.assets.push({ id: unique, name: f.name, ...asset });
+  const base = String(displayName).replace(/[^A-Za-z0-9._-]+/g, '_') || 'asset';
+  let unique = base, n = 2;
+  while (recipe.assets.some(a => a.id === unique)) unique = `${base}~${n++}`;
+  const entry = { id: unique, name: displayName, ...asset };
+  recipe.assets.push(entry);
   persist();
   renderAssets();
-  if (asset.kind === 'svg') {
-    // parse it NOW so the user hears "ready" or the honest reason before
-    // they ask for a cut — same lowering the weave will run
-    const probe = svgAssetToRegions(asset.data, {});
-    if (probe.error) {
-      addTurn(`Added svg "${escapeHtml(f.name)}" to the recipe, but it won't lower to a shape yet: ${escapeHtml(probe.error)}`, true);
-    } else {
-      const pieces = probe.regions.length;
-      const holes = probe.regions.reduce((n, r) => n + r.holes.length, 0);
-      const notes = probe.warnings.length ? ` (${probe.warnings.map(escapeHtml).join('; ')})` : '';
-      addTurn(`Added svg "${escapeHtml(f.name)}" — ${pieces} filled piece${pieces > 1 ? 's' : ''}${holes ? `, ${holes} hole${holes > 1 ? 's' : ''}` : ''}${notes}. Ask to use it: "cut out ${escapeHtml(f.name)} 4 inches wide", "pocket it 1/8 deep"…`);
-    }
+  return entry;
+}
+
+// Store an SVG — uploaded OR hand-drawn — as a shape-able asset, and report how
+// it lowers so the user hears "ready" (or the honest reason) before asking for a
+// cut. Shared by the file upload and the Draw modality; a drawn shape is just an
+// SVG the user made by sketching instead of by picking a file.
+function addSvgAsset(svgText, displayName) {
+  if (!svgText || !svgText.includes('<svg')) throw new Error('that does not look like an SVG');
+  const entry = pushAsset({ kind: 'svg', data: svgText }, displayName);
+  const probe = svgAssetToRegions(svgText, {}); // same lowering the weave will run
+  const nm = escapeHtml(entry.name);
+  if (probe.error) {
+    addTurn(`Added "${nm}" to the recipe, but it won't lower to a shape yet: ${escapeHtml(probe.error)}`, true);
   } else {
-    addTurn(`Added image "${escapeHtml(f.name)}" (${asset.width}×${asset.height}px) to the recipe. Raster carving isn't in the catalog yet — it is stored for when that arrives.`);
+    const pieces = probe.regions.length;
+    const holes = probe.regions.reduce((n, r) => n + r.holes.length, 0);
+    const notes = probe.warnings.length ? ` (${probe.warnings.map(escapeHtml).join('; ')})` : '';
+    addTurn(`Added "${nm}" — ${pieces} filled piece${pieces > 1 ? 's' : ''}${holes ? `, ${holes} hole${holes > 1 ? 's' : ''}` : ''}${notes}. Ask to use it: "cut out ${nm} 4 inches wide", "pocket it 1/8 deep"…`);
   }
+  return entry;
+}
+
+// Replace an existing SVG asset's geometry IN PLACE (a redrawn shape): the id
+// and name stay, so any cutout/pocket referencing it re-weaves with the new
+// drawing — the per-person "redraw this tag" input, the way a text control retypes.
+function replaceSvgAsset(id, svgText) {
+  if (!svgText || !svgText.includes('<svg')) throw new Error('that does not look like an SVG');
+  const a = (recipe.assets ?? []).find((z) => z.id === id);
+  if (!a) return addSvgAsset(svgText, 'drawing');   // it vanished — just add a new one
+  a.data = svgText;
+  persist();
+  renderAssets();
+  const probe = svgAssetToRegions(svgText, {});
+  addTurn(probe.error
+    ? `Updated "${escapeHtml(a.name)}", but it won't lower yet: ${escapeHtml(probe.error)}`
+    : `Updated the shape "${escapeHtml(a.name)}" — anything cutting it re-weaves with the new drawing.`);
+  debounceRun();   // the referencing cutout re-lowers with the new geometry
+  return a;
+}
+
+async function addAssetFile(f) {
+  const isSvg = f.type === 'image/svg+xml' || f.name.toLowerCase().endsWith('.svg');
+  if (isSvg) {
+    if (f.size > 512 * 1024) throw new Error('SVG larger than 512 KB — simplify it first');
+    addSvgAsset(await f.text(), f.name);
+    return;
+  }
+  const { data, width, height } = await imageToDataUrl(f);
+  if (data.length > 1.5e6) throw new Error('image still too large after downscaling — crop it and retry');
+  pushAsset({ kind: 'image', data, width, height }, f.name);
+  addTurn(`Added image "${escapeHtml(f.name)}" (${width}×${height}px) to the recipe. Raster carving isn't in the catalog yet — it is stored for when that arrives.`);
 }
 
 // ---------------------------------------------------------------- run/draw
@@ -241,6 +308,7 @@ function runAndRender() {
       }
     }
     if (seq !== weaveSeq) return;
+    lastTerrains = terrains;
     result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains, shop));
     render();
   }, 0));
@@ -279,7 +347,7 @@ function render() {
     const sheetTag = st && (declared || Math.max(st.w, st.h) > 24)
       ? (fitsMat ? ` — fits ${mat.name} ✓` : ` — does NOT fit ${mat.name}`)
       : '';
-    $('minStock').textContent = st ? `minimum stock: ${st.w}" × ${st.h}" × ${st.thickness}"${sheetTag}` : '';
+    $('minStock').textContent = st ? `${st.pinned ? 'blank' : 'minimum stock'}: ${st.w}" × ${st.h}" × ${st.thickness}"${sheetTag}` : '';
   } else {
     // EMPTY is only the nothing-here state; every real failure is
     // REJECTED with its reason — a fit conflict must never read as
@@ -292,6 +360,7 @@ function render() {
   }
   $('errors').textContent = (r.preview?.empty && r.errors[0]?.includes('no operations')) ? '' : r.errors.join('\n');
   $('warnings').textContent = r.warnings.join('\n');
+  updateSheetChip(r.preview?.stock);
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
   renderHandoffs();
@@ -811,6 +880,23 @@ $('saveKey').addEventListener('click', () => {
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.sbp`, result.sbp));
 $('dlNc').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.nc`, result.gcode));
 $('addAsset').addEventListener('click', () => $('assetFile').click());
+$('drawShape').addEventListener('click', () => {
+  const targets = (recipe.assets ?? []).filter((a) => a.kind === 'svg').map((a) => ({ id: a.id, name: a.name }));
+  // shapes the recipe asks the user to draw that have no artwork yet — the
+  // ops referencing them are skipping until one of these gets sketched
+  const wanted = (recipe.shapes ?? [])
+    .filter((s) => s.draw?.of && !(recipe.assets ?? []).some((a) => a.id === s.draw.of || a.name === s.draw.of))
+    .map((s) => s.draw.of);
+  openDraw({
+    targets,
+    wanted,
+    onAccept: (svg, name, targetId) => {
+      try { targetId ? replaceSvgAsset(targetId, svg) : addSvgAsset(svg, name); }
+      catch (e) { addTurn(escapeHtml(e.message), true); }
+    },
+  });
+});
+initDraw();
 $('assetFile').addEventListener('change', async () => {
   const f = $('assetFile').files[0];
   $('assetFile').value = '';
@@ -889,6 +975,19 @@ $('thickness').addEventListener('input', () => {
   }
 });
 
+// blank W×H: pin the board to a real piece the design must fit within. Blank
+// (or ≤0) clears it and the board auto-sizes to the content again. Per-recipe
+// (saves with the design), NOT a shop-level default.
+for (const [id, key] of [['blankW', 'width'], ['blankH', 'height']]) {
+  $(id).addEventListener('input', () => {
+    const v = parseFloat($(id).value);
+    if (isNaN(v) || v <= 0) delete recipe.stock[key];
+    else recipe.stock[key] = v;
+    persist();
+    debounceRun();
+  });
+}
+
 // shop settings inputs: typing a size IS the "re-nest to fit" action —
 // every edit re-weaves, so a layout reflows to the machine the moment
 // the machine is declared, with no separate button to remember
@@ -905,6 +1004,45 @@ for (const [id, key] of [
     debounceRun();
   });
 }
+
+// sheet-ledger inputs: app-level, so set once and persist on edit. No re-weave —
+// the ledger tracks the material, it doesn't change the cut. Record stamps the
+// current verified design's footprint onto the sheet; New sheet forgets history.
+$('sheetW').value = sheet.w > 0 ? sheet.w : '';
+$('sheetH').value = sheet.h > 0 ? sheet.h : '';
+for (const [id, key] of [['sheetW', 'w'], ['sheetH', 'h']]) {
+  $(id).addEventListener('input', () => {
+    const v = parseFloat($(id).value);
+    sheet[key] = isNaN(v) || v <= 0 ? 0 : v;
+    persistSheet();
+    updateSheetChip(result?.preview?.stock);
+  });
+}
+$('sheetClear').addEventListener('click', () => {
+  sheet = clearCuts(sheet);
+  persistSheet();
+  updateSheetChip(result?.preview?.stock);
+  addTurn('New sheet — the cut history is cleared.');
+});
+$('sheetRecord').addEventListener('click', () => {
+  const st = result?.preview?.stock;
+  if (!result?.ok || !st) return;
+  // nest axis-aligned (rotation-baking is a follow-up), then re-weave with the
+  // SHEET as the stock and the design offset to that spot — the exported cut
+  // lands in the free space instead of at a lone board origin.
+  const rec = recordCut(sheet, st.w, st.h, recipe.name, { allowRotate: false });
+  if (rec.error) { addTurn(escapeHtml(rec.error), true); return; }
+  const p = rec.placement;
+  const placed = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, lastTerrains, shop,
+    { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }));
+  if (!placed.ok) { addTurn('Could not position this cut on the sheet — ' + escapeHtml(placed.errors[0] ?? 'the verifier refused it'), true); return; }
+  download(`${slug(recipe.name)}-on-sheet.sbp`, placed.sbp);
+  sheet = rec.sheet;
+  persistSheet();
+  updateSheetChip(st);
+  const n = sheet.occupied.length;
+  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${p.x.toFixed(1)}", ${p.y.toFixed(1)}" on the sheet and downloaded the positioned cut (.sbp) — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
+});
 
 // ------------------------------------------------------------- theme
 // The document theme is set before first paint by an inline script in
