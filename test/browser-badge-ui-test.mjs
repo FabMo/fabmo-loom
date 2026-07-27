@@ -182,6 +182,45 @@ try {
   await new Promise((r) => setTimeout(r, 200));
   await page.screenshot({ path: path.join(out, 'badge-ui-3b-cutstep.png') });
 
+  // ---- state 3c: drag-to-place — grab the engraving in the 2D view and
+  // drop it 1" right / 0.5" down; the drop must write posX/posY into the
+  // recipe and the re-weave must come back VERIFIED
+  await page.click('#btn2d');
+  await new Promise((r) => setTimeout(r, 300));
+  const di = await page.evaluate(() => {
+    const ops = window.loomDrag?.ops() ?? [];
+    const g = ops.find((o) => o.opId === 'engrave');
+    if (!g) return { ops: ops.map((o) => o.opId) };
+    const c = { x: (g.bbox.minX + g.bbox.maxX) / 2, y: (g.bbox.minY + g.bbox.maxY) / 2 };
+    return { c, from: window.loomDrag.clientOf(c.x, c.y), to: window.loomDrag.clientOf(c.x + 1, c.y - 0.5) };
+  });
+  if (di.from) pass(`engrave op is grabbable (center ${di.c.x.toFixed(2)}, ${di.c.y.toFixed(2)})`);
+  else fail(`engrave not in loomDrag.ops(): ${JSON.stringify(di.ops)}`);
+  if (di.from) {
+    await page.mouse.move(di.from.x, di.from.y);
+    await new Promise((r) => setTimeout(r, 100));
+    const hoverCursor = await page.evaluate(() => document.getElementById('preview').style.cursor);
+    if (hoverCursor === 'grab') pass('hover over the engraving shows the grab cursor');
+    else fail(`hover cursor = "${hoverCursor}"`);
+    await page.mouse.down();
+    await page.mouse.move(di.to.x, di.to.y, { steps: 8 });
+    await new Promise((r) => setTimeout(r, 100));
+    await page.screenshot({ path: path.join(out, 'badge-ui-3c-dragging.png') });
+    await page.mouse.up();
+    await page.waitForFunction(() => document.getElementById('badge').textContent === 'VERIFIED', { timeout: 60000 });
+    const dropped = await page.evaluate(() => {
+      const r = JSON.parse(localStorage.getItem('loom:recipe'));
+      return r.pipeline.find((o) => o.id === 'engrave').params;
+    });
+    const wantX = di.c.x + 1, wantY = di.c.y - 0.5;
+    if (Math.abs(dropped.posX - wantX) < 0.05 && Math.abs(dropped.posY - wantY) < 0.05) {
+      pass(`drop wrote posX/posY (${dropped.posX}, ${dropped.posY}) and re-wove VERIFIED`);
+    } else fail(`posX/posY (${dropped.posX}, ${dropped.posY}) ≠ expected (${wantX.toFixed(3)}, ${wantY.toFixed(3)})`);
+    await page.screenshot({ path: path.join(out, 'badge-ui-3d-dropped.png') });
+  }
+  await page.click('#btn3d');
+  await new Promise((r) => setTimeout(r, 300));
+
   // ---- the weave overlay shows while a control edit re-weaves, then clears —
   // and with the weave in a worker, the page keeps PAINTING throughout
   const workerActive = await page.evaluate(() => window.loomWeave?.workerActive() ?? false);
@@ -220,6 +259,88 @@ try {
   await page.click('#setupBox summary');
   await new Promise((r) => setTimeout(r, 200));
   await page.screenshot({ path: path.join(out, 'badge-ui-4-setup-open.png') });
+
+  // ---- What is this?: overlay opens, an example loads and weaves
+  await page.click('#whatBtn');
+  await new Promise((r) => setTimeout(r, 200));
+  const intro = await page.evaluate(() => ({
+    open: document.getElementById('introOverlay').style.display !== 'none',
+    cards: document.querySelectorAll('#introExamples button').length,
+  }));
+  if (intro.open && intro.cards >= 4) pass(`intro overlay opens with ${intro.cards} examples`);
+  else fail(`intro wrong: ${JSON.stringify(intro)}`);
+  await page.screenshot({ path: path.join(out, 'badge-ui-6-intro.png') });
+  await page.evaluate(() => document.querySelectorAll('#introExamples button')[1].click());   // Welcome sign
+  await new Promise((r) => setTimeout(r, 500));
+  const loaded = await page.evaluate(() => ({
+    closed: document.getElementById('introOverlay').style.display === 'none',
+    name: document.getElementById('appName').textContent,
+    seen: localStorage.getItem('loom:introSeen'),
+  }));
+  await page.waitForFunction(() => document.getElementById('badge').textContent === 'VERIFIED', { timeout: 60000 });
+  if (loaded.closed && loaded.name === 'Welcome sign' && loaded.seen === '1') {
+    pass('example loads: overlay closes, recipe swaps in, weaves VERIFIED');
+  } else fail(`example load wrong: ${JSON.stringify(loaded)}`);
+  await page.screenshot({ path: path.join(out, 'badge-ui-7-example.png') });
+
+  // ---- drag on a tag_cutout badge (the welcome sign): the tag must PIN
+  // where it stands and the name move ON it — field report 2026-07-27:
+  // unpinned, the self-sizing tag chased the text and every drag re-woven
+  // back to a centered name
+  await page.click('#btn2d');
+  await new Promise((r) => setTimeout(r, 300));
+  const w1 = await page.evaluate(() => {
+    const tag = window.loomDrag.ringBBoxOf('cutout');
+    const grabbable = window.loomDrag.ops().map((o) => o.opId);
+    const g = window.loomDrag.ops().find((o) => o.opId === 'carve');
+    if (!tag || !g) return { grabbable };
+    const c = { x: (g.bbox.minX + g.bbox.maxX) / 2, y: (g.bbox.minY + g.bbox.maxY) / 2 };
+    return { tag, c, grabbable, from: window.loomDrag.clientOf(c.x, c.y), to: window.loomDrag.clientOf(c.x - 0.3, c.y + 0.3) };
+  });
+  if (w1.from && !w1.grabbable.includes('cutout')) pass('welcome sign: carve grabbable, tag itself is not');
+  else fail(`grabbable wrong: ${JSON.stringify(w1.grabbable)}`);
+  if (w1.from) {
+    await page.mouse.move(w1.from.x, w1.from.y);
+    await page.mouse.down();
+    await page.mouse.move(w1.to.x, w1.to.y, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForFunction(() => document.getElementById('badge').textContent === 'VERIFIED', { timeout: 60000 });
+    const w2 = await page.evaluate(() => {
+      const r = JSON.parse(localStorage.getItem('loom:recipe'));
+      return {
+        carve: r.pipeline.find((o) => o.id === 'carve').params,
+        cut: r.pipeline.find((o) => o.id === 'cutout').params,
+        tagNow: window.loomDrag.ringBBoxOf('cutout'),
+      };
+    });
+    const pinOk = [w2.cut.posX, w2.cut.posY, w2.cut.width, w2.cut.height].every(Number.isFinite);
+    const tagHeld = Math.abs((w2.tagNow.minX + w2.tagNow.maxX) / 2 - (w1.tag.minX + w1.tag.maxX) / 2) < 0.02
+      && Math.abs((w2.tagNow.maxX - w2.tagNow.minX) - (w1.tag.maxX - w1.tag.minX)) < 0.02;
+    const textMoved = Math.abs(w2.carve.posX - (w1.c.x - 0.3)) < 0.05 && Math.abs(w2.carve.posY - (w1.c.y + 0.3)) < 0.05;
+    if (pinOk && tagHeld && textMoved) {
+      pass(`drag pinned the tag (${w2.cut.width}" × ${w2.cut.height}") and moved the name on it, VERIFIED`);
+    } else fail(`tag pin wrong: pin=${pinOk} held=${tagHeld} moved=${textMoved} ${JSON.stringify(w2.cut)}`);
+    await page.screenshot({ path: path.join(out, 'badge-ui-8-tag-pinned.png') });
+  }
+  await page.click('#btn3d');
+  await new Promise((r) => setTimeout(r, 300));
+
+  // ---- a brand-new visitor gets the intro unprompted, once — in an
+  // INCOGNITO context: a plain newPage shares this profile's localStorage,
+  // where the example-load above already stamped loom:introSeen
+  const freshCtx = await browser.createBrowserContext();
+  const fresh = await freshCtx.newPage();
+  await fresh.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await fresh.waitForFunction(() => document.getElementById('badge').textContent !== '…', { timeout: 60000 });
+  await new Promise((r) => setTimeout(r, 500));
+  const auto = await fresh.evaluate(() => document.getElementById('introOverlay').style.display !== 'none');
+  if (auto) pass('fresh visitor: intro auto-opens'); else fail('intro did not auto-open on a fresh visit');
+  await fresh.click('#introClose');
+  await fresh.reload({ waitUntil: 'domcontentloaded' });
+  await new Promise((r) => setTimeout(r, 2500));
+  const again = await fresh.evaluate(() => document.getElementById('introOverlay').style.display !== 'none');
+  if (!again) pass('intro stays closed after being seen'); else fail('intro re-opened after close');
+  await freshCtx.close();
 
   const pageErrs = errors.filter((e) => !e.includes('favicon') && !e.includes('intent/invite') && !e.includes('404'));
   if (!pageErrs.length) pass('no page errors'); else fail(`page errors: ${pageErrs.join(' | ')}`);

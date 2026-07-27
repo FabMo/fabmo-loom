@@ -550,7 +550,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.68</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.69</span></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -563,6 +563,7 @@
       <textarea id="prompt" placeholder='e.g. "an app to engrave names"'></textarea>
       <div class="btns">
         <button id="generate">Generate</button>
+        <button id="whatBtn" class="big ghost" title="How Loom works, and example apps to load">What is this?</button>
         <button id="reset" class="ghost small">Start over</button>
       </div>
       <!-- Suggested prompts are teaching aids, not shortcuts: full sentences
@@ -747,6 +748,46 @@
         Draw a closed outline — ends that land close snap together; stopped short? <em>Close the gap</em> finishes it
         with a curve tangent to your stroke. It becomes an SVG shape you can cut out, pocket, or ring with holes:
         try “cut out <em>my drawing</em> 4 inches wide”.
+      </div>
+    </div>
+  </div>
+
+  <!-- What is this?: the first-visit story + example recipes. Auto-opens
+     once when Loom is empty and nothing has been seen (loom:introSeen);
+     the big button beside the prompt reopens it any time. Example cards
+     are rendered from app/examples.mjs — every one is woven by the
+     gauntlet, so what a first-timer loads is always VERIFIED. -->
+  <div id="introOverlay" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(10,12,20,.55); align-items:center; justify-content:center">
+    <div style="display:flex; flex-direction:column; width:min(92vw,640px); max-height:88vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 40px rgba(0,0,0,.35); overflow:hidden">
+      <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border)">
+        <strong style="margin-right:auto; font-size:1.05rem">What is FabMo Loom?</strong>
+        <button id="introClose" class="ghost small">Close</button>
+      </div>
+      <div style="padding:14px 16px; overflow-y:auto; display:flex; flex-direction:column; gap:12px">
+        <div style="font-size:.92rem; line-height:1.55">
+          Loom weaves <b>small CNC apps on demand</b>: describe the thing you want to
+          make, and an app for making it appears — controls, a live preview, and a
+          cut file for a ShopBot.
+          <ol style="margin:10px 0 0; padding-left:22px; display:flex; flex-direction:column; gap:6px">
+            <li><b>Say it.</b> Type what you want (“a round coaster with initials”) and
+              hit Generate. Prompting runs on an AI key or a guest-pass link — everything
+              below works without one.</li>
+            <li><b>Shape it.</b> The controls the app grew are yours: type the name, drag
+              the sliders, sketch an outline if it asks for one. Every change re-runs the
+              whole toolpath pipeline.</li>
+            <li><b>Trust it.</b> <span style="color:var(--ok); font-weight:700">VERIFIED</span>
+              means this exact motion was measured against the declared shape — gouges,
+              depths, coverage — not assumed. Exports only unlock on VERIFIED.</li>
+            <li><b>Cut it.</b> Download the .sbp / .nc, or send it straight to a FabMo
+              set up under ⚙ Machine &amp; tools. First run cuts air.</li>
+          </ol>
+        </div>
+        <div>
+          <label style="margin:0 0 6px">Or just try one — these load a working app:</label>
+          <div id="introExamples" style="display:flex; flex-direction:column; gap:8px"></div>
+        </div>
+        <div class="keynote">Examples, sliders, drawing, and exports all work with no AI key.
+          The recipe is a document — “Save recipe” keeps any state you like.</div>
       </div>
     </div>
   </div>

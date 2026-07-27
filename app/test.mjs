@@ -3169,5 +3169,144 @@ console.log('--- positioned pockets (posX/posY): multi-pocket face ---');
   } else fail(`moved reference rejected: ${m.errors?.join(' | ')}`);
 }
 
+// ---------------- 34. the "What is this?" examples all weave ----------------
+// One click loads these for a brand-new visitor; a catalog or schema change
+// that breaks one must fail HERE, not greet a first-timer with REJECTED.
+
+console.log('--- examples: every What-is-this recipe weaves ---');
+{
+  const { EXAMPLES } = await import('./examples.mjs');
+  for (const ex of EXAMPLES) {
+    const r = run(migrateRecipe(structuredClone(ex.recipe)));
+    if (r.ok) pass(`example "${ex.id}" weaves ok${r.warnings.length ? ` (${r.warnings.length} warning${r.warnings.length > 1 ? 's' : ''})` : ''}`);
+    else fail(`example "${ex.id}" failed: ${r.errors.join(' | ')}`);
+  }
+  // the badge example is authored around a not-yet-drawn outline: it must
+  // arrive VERIFIED with the cutout honestly waiting, not REJECTED
+  const badge = run(migrateRecipe(structuredClone(EXAMPLES.find((e) => e.id === 'name_badge').recipe)));
+  if (badge.ok && badge.warnings.some((w) => w.includes('waiting on the drawing'))) {
+    pass('name-badge example waits for its drawing (the step-1 state)');
+  } else fail(`badge example state wrong: ok=${badge.ok} warnings=${JSON.stringify(badge.warnings)}`);
+}
+
+// ---------------- 35. pinned cutouts: the drag-to-place wrapper contract ----------------
+// Field report (2026-07-27): dragging a name on a tag_cutout badge read as
+// a no-op — the self-sizing tag re-wrapped the moved text and re-centered
+// it. The wrappers now take posX/posY (+ width/height on tag_cutout) so
+// the 2D drag can PIN them where they stand; a pinned outline that no
+// longer contains the content is refused with the fix named, never grown
+// silently.
+
+console.log('--- pinned cutouts: the outline holds still, the content moves ---');
+{
+  const ringBBoxOf = (r, id) => {
+    const ring = r.preview?.built?.find((x) => x.op.id === id)?.r.previewRing;
+    if (!ring) return null;
+    return ring.reduce((a, q) => ({
+      minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+      maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  };
+  const mid = (b) => ({ x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
+
+  // baseline: a self-sized tag around centered text
+  const base = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1 } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4 } },
+    ],
+  });
+  const bb0 = ringBBoxOf(base, 'cutout');
+  if (base.ok && bb0) pass(`baseline self-sized tag verified (${(bb0.maxX - bb0.minX).toFixed(2)}" × ${(bb0.maxY - bb0.minY).toFixed(2)}")`);
+  else fail(`baseline failed: ${base.errors?.join(' | ')}`);
+
+  // the no-op mechanism itself: move the text WITHOUT pinning — the tag
+  // chases it (this is what the drag must prevent by pinning)
+  const chase = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1, posX: 1, posY: -0.5 } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4 } },
+    ],
+  });
+  const bbChase = ringBBoxOf(chase, 'cutout');
+  if (chase.ok && Math.abs(mid(bbChase).x - mid(bb0).x - 1) < 0.01 && Math.abs(mid(bbChase).y - mid(bb0).y + 0.5) < 0.01) {
+    pass('unpinned tag chases moved text (the re-centering the pin exists to stop)');
+  } else fail(`chase geometry unexpected: ${JSON.stringify(bbChase)}`);
+
+  // pin the tag at the baseline geometry, then move the text: the tag must
+  // NOT move, and the text sits off-center ON it
+  const c0 = mid(bb0);
+  const pin = {
+    posX: c0.x || 0.001, posY: c0.y || 0.001,
+    width: Math.ceil((bb0.maxX - bb0.minX) * 1000) / 1000,
+    height: Math.ceil((bb0.maxY - bb0.minY) * 1000) / 1000,
+  };
+  const pinned = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1, posX: 0.2, posY: 0.001 } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4, ...pin } },
+    ],
+  });
+  const bbPin = ringBBoxOf(pinned, 'cutout');
+  const textBB = pinned.preview?.built?.find((x) => x.op.id === 'engrave')?.r.bbox;
+  if (pinned.ok
+    && Math.abs(mid(bbPin).x - c0.x) < 0.01 && Math.abs(mid(bbPin).y - c0.y) < 0.01
+    && Math.abs((bbPin.maxX - bbPin.minX) - pin.width) < 0.01
+    && textBB && Math.abs((textBB.minX + textBB.maxX) / 2 - 0.2) < 0.01) {
+    pass('pinned tag holds still while the text moves 0.2" across it, verified');
+  } else fail(`pinned tag wrong: ok=${pinned.ok} ring=${JSON.stringify(bbPin)} ${pinned.errors?.join(' | ')}`);
+
+  // content dragged past the pinned edge: an honest refusal naming the fix
+  const over = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1, posX: pin.width, posY: 0.001 } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4, ...pin } },
+    ],
+  });
+  if (!over.ok && over.errors[0]?.includes('no longer contains')) {
+    pass(`overflowing a pinned tag refused: "${over.errors[0].slice(0, 70)}..."`);
+  } else fail(`overflow leaked: ok=${over.ok} ${JSON.stringify(over.errors)}`);
+
+  // disc_cutout: pinned center holds, reach measured from the pin
+  const disc = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'carve', strategy: 'vcarve_text', params: { text: 'AB', letterHeight: 0.8 } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 4, posX: 0.5, posY: 0.001 } },
+    ],
+  });
+  const bbDisc = ringBBoxOf(disc, 'disc');
+  if (disc.ok && Math.abs(mid(bbDisc).x - 0.5) < 0.01 && Math.abs(mid(bbDisc).y) < 0.01) {
+    pass('pinned disc centers at (0.5, 0), content off-center inside, verified');
+  } else fail(`pinned disc wrong: ok=${disc.ok} ${JSON.stringify(bbDisc)} ${disc.errors?.join(' | ')}`);
+  const discFar = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'carve', strategy: 'vcarve_text', params: { text: 'AB', letterHeight: 0.8 } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 3, posX: 2.5 } },
+    ],
+  });
+  if (!discFar.ok && discFar.errors[0]?.includes('pinned at')) {
+    pass(`disc pinned too far refused: "${discFar.errors[0].slice(0, 70)}..."`);
+  } else fail(`far disc leaked: ok=${discFar.ok} ${JSON.stringify(discFar.errors)}`);
+
+  // shape_cutout: a pinned inline outline centers at the pin
+  const heart = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'carve', strategy: 'vcarve_text', params: { text: 'AB', letterHeight: 0.6 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { path: 'M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z', width: 5, posX: 0.4, posY: 0.001 } },
+    ],
+  });
+  const bbHeart = ringBBoxOf(heart, 'cut');
+  if (heart.ok && Math.abs(mid(bbHeart).x - 0.4) < 0.01) {
+    pass('pinned shape_cutout centers its outline at the pin, verified');
+  } else fail(`pinned shape wrong: ok=${heart.ok} ${JSON.stringify(bbHeart)} ${heart.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

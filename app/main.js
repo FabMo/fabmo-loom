@@ -19,6 +19,7 @@ import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { FONTS } from './fonts.mjs';
 import { probe, machineName, machineStatus, scanSubnet, submitJob, submitAndRun } from './fabmo.mjs';
+import { EXAMPLES } from './examples.mjs';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
@@ -481,14 +482,50 @@ async function runAndRender() {
 let timer = null;
 function debounceRun() { clearTimeout(timer); timer = setTimeout(runAndRender, 250); }
 
+// The per-target verify lines, folded for display: a pattern's instances
+// ("squares bulk 7/32") group into ONE summed line, and the whole list
+// tucks behind a "measurements" disclosure — a chessboard was printing 33
+// lines of zeros and burying the headline (field report 2026-07-27). The
+// numbers are all still there, one click away; the verdict badge and the
+// machine-time line carry the message.
+function targetGroups(targets) {
+  const groups = new Map();
+  for (const tt of targets) {
+    // the instance counter sits mid-name: "squares bulk 7/32 (pocket_shape)"
+    const base = tt.name.replace(/\s+\d+\/\d+(?=\s|$)/, '');
+    const key = `${tt.type}|${base}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, g = { type: tt.type, name: base, count: 0, samples: 0, gouges: 0, depthViolations: 0, intrusionArea: 0, maskViolations: 0 });
+    g.count++;
+    g.samples += tt.samples ?? 0;
+    g.gouges += tt.gouges ?? 0;
+    g.depthViolations += tt.depthViolations ?? 0;
+    g.intrusionArea += tt.intrusionArea ?? 0;
+    g.maskViolations += tt.maskViolations ?? 0;
+  }
+  return [...groups.values()];
+}
+
+function measurementsHtml(targets) {
+  if (!targets.length) return '';
+  const groups = targetGroups(targets);
+  const line = (g) => {
+    const name = `<i>${g.count > 1 ? `${g.count}× ` : ''}${g.name}</i>`;
+    if (g.type === 'profile') {
+      return `<b>${g.samples.toLocaleString()}</b> samples · <b>${Math.round(g.intrusionArea * 1000) / 1000}</b> sq in intrusion · <b>${g.depthViolations}</b> depth violations — ${name}`;
+    }
+    if (g.type === 'heightmap') {
+      return `<b>${g.samples.toLocaleString()}</b> samples · <b>${g.gouges}</b> gouges · <b>${g.maskViolations}</b> mask escapes — ${name}`;
+    }
+    return `<b>${g.samples.toLocaleString()}</b> samples · <b>${g.gouges}</b> gouges · <b>${g.depthViolations}</b> depth violations — ${name}`;
+  };
+  const totalSamples = groups.reduce((n, g) => n + g.samples, 0);
+  return `<details><summary>the measurements — ${targets.length} target${targets.length > 1 ? 's' : ''} · ${totalSamples.toLocaleString()} samples</summary>${groups.map(line).join('<br>')}</details>`;
+}
+
 function render() {
   const r = result;
-  const targetLine = (tt) => tt.type === 'profile'
-    ? `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.intrusionArea ?? 0}</b> sq in intrusion · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`
-    : tt.type === 'heightmap'
-    ? `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.gouges}</b> gouges · <b>${tt.maskViolations}</b> mask escapes — <i>${tt.name}</i>`
-    : `<b>${tt.samples.toLocaleString()}</b> samples · <b>${tt.gouges}</b> gouges · <b>${tt.depthViolations}</b> depth violations — <i>${tt.name}</i>`;
-  const targetLines = (r.report?.stats.targets ?? []).map(targetLine).join('<br>');
+  const measurements = measurementsHtml(r.report?.stats.targets ?? []);
 
   if (r.ok) {
     setBadge('ok', 'VERIFIED');
@@ -498,8 +535,8 @@ function render() {
     const runMin = r.report.stats.estRunTimeMin;
     const runTxt = runMin >= 90 ? `${(runMin / 60).toFixed(1)} hr` : `${Math.max(1, Math.round(runMin))} min`;
     $('verdictText').textContent = `this exact motion was measured, not assumed · ≈ ${runTxt} on the machine`;
-    $('numbers').innerHTML = targetLines + `<br><b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
-      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '');
+    $('numbers').innerHTML = `<b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
+      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '') + measurements;
     const st = r.preview?.stock;
     // sheet-fit tag: the user's declared material wins; 4×8 (96×48, the
     // standard full-size sheet) is the fallback once the board outgrows
@@ -520,7 +557,7 @@ function render() {
     const nothingYet = r.preview?.empty && r.errors[0]?.includes('no operations');
     setBadge('bad', nothingYet ? 'EMPTY' : 'REJECTED');
     $('verdictText').textContent = nothingYet ? 'describe an app to begin' : 'the verifier refused this state';
-    $('numbers').innerHTML = targetLines;
+    $('numbers').innerHTML = measurements;
     $('minStock').textContent = '';
   }
   $('errors').textContent = (r.preview?.empty && r.errors[0]?.includes('no operations')) ? '' : r.errors.join('\n');
@@ -691,13 +728,205 @@ $('assembleSlider').addEventListener('input', () => {
   }
 });
 
+// the 2D board mapping, shared by draw() and the drag-to-place pointer
+// handlers so a grabbed point and a drawn point can never disagree
+function viewTransform() {
+  const stock = result?.preview?.stock ?? { w: 8, h: 2.5 };
+  const pad = 28;
+  const s = Math.min((canvas.width - 2 * pad) / stock.w, (canvas.height - 2 * pad) / stock.h);
+  const ox = (canvas.width - stock.w * s) / 2, oy = (canvas.height + stock.h * s) / 2;
+  return { stock, s, ox, oy, place: result?.preview?.placement ?? { x: 0, y: 0 } };
+}
+
+// ------------------------------------------------ drag-to-place (2D view)
+// Direct manipulation for the ops that already understand absolute
+// placement: any UNFRAMED pipeline op whose entry takes posX/posY (the
+// text verbs, pocket_shape) can be grabbed in the 2D view and dragged to
+// a new spot. A drag is nothing more than a hands-on way of authoring
+// those two params — the drop writes posX/posY into the recipe and the
+// ordinary re-weave (and the verifier gate) takes it from there, so a
+// dragged state carries exactly the guarantees a typed one does.
+// Excluded: framed ops (the delta would need the inverse frame rotation
+// — a later move) and edgeTreatment bands (they hug their cutout's edge
+// by construction; posX/posY docs forbid positioning them).
+
+function ringsOf(r) {
+  if (r.previewRegions) return r.previewRegions.flatMap((g) => [g.outer, ...g.holes]);
+  if (r.target?.rings) return r.target.rings;
+  return [];
+}
+
+// built sub-ops grouped per draggable pipeline op: grab-box + ghost rings.
+// Cached per weave result — hover hit-tests run on every pointer move.
+let dragOpsFor = null;
+let dragOpsCache = [];
+function dragOps() {
+  if (dragOpsFor === result) return dragOpsCache;
+  dragOpsFor = result;
+  const byId = new Map();
+  for (const { op, r } of result?.preview?.built ?? []) {
+    const entry = CATALOG[op.strategy];
+    if (!entry?.params?.posX || !entry?.params?.posY || op.frame) continue;
+    // wrappers (tag/disc/shape_cutout) are positionable but NOT grabbable:
+    // their outline contains everything, so they would shadow every grab
+    // aimed at the content on them — and with auto board placement, moving
+    // the whole part is meaningless anyway. Dragging content pins them.
+    if (entry.wrapsContent) continue;
+    if (op.params?.edgeTreatment === true || op.params?.edgeTreatment === 'true') continue;
+    let g = byId.get(op.id);
+    if (!g) byId.set(op.id, g = { opId: op.id, rings: [], bbox: null });
+    const rings = ringsOf(r);
+    g.rings.push(...rings);
+    // a single-result op carries its block bbox (the exact point posX/posY
+    // positions); multi-sub verbs (bulk + rest) union their sub geometry
+    const pts = r.bbox
+      ? [{ x: r.bbox.minX, y: r.bbox.minY }, { x: r.bbox.maxX, y: r.bbox.maxY }]
+      : rings.flat();
+    for (const q of pts) {
+      g.bbox = g.bbox
+        ? {
+            minX: Math.min(g.bbox.minX, q.x), minY: Math.min(g.bbox.minY, q.y),
+            maxX: Math.max(g.bbox.maxX, q.x), maxY: Math.max(g.bbox.maxY, q.y),
+          }
+        : { minX: q.x, minY: q.y, maxX: q.x, maxY: q.y };
+    }
+  }
+  dragOpsCache = [...byId.values()].filter((g) => g.bbox);
+  return dragOpsCache;
+}
+
+let drag = null;   // { g, sx, sy, dx, dy, moved } — deltas in board inches
+
+// pointer event → recipe-local inches (the frame posX/posY live in)
+function previewPoint(e) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * canvas.width / rect.width;
+  const cy = (e.clientY - rect.top) * canvas.height / rect.height;
+  const { s, ox, oy, place } = viewTransform();
+  return { x: (cx - ox) / s - place.x, y: (oy - cy) / s - place.y, s };
+}
+
+function hitDragOp(p) {
+  const ops = dragOps();
+  const pad = 6 / p.s;   // ~6px of grab slack, in inches
+  for (let i = ops.length - 1; i >= 0; i--) {   // topmost = latest in the pipeline
+    const b = ops[i].bbox;
+    if (p.x >= b.minX - pad && p.x <= b.maxX + pad && p.y >= b.minY - pad && p.y <= b.maxY + pad) return ops[i];
+  }
+  return null;
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || !result) return;
+  const p = previewPoint(e);
+  const g = hitDragOp(p);
+  if (!g) return;
+  drag = { g, sx: p.x, sy: p.y, dx: 0, dy: 0, moved: false };
+  canvas.setPointerCapture(e.pointerId);
+  canvas.style.cursor = 'grabbing';
+  e.preventDefault();
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) {
+    if (result) canvas.style.cursor = hitDragOp(previewPoint(e)) ? 'grab' : '';
+    return;
+  }
+  const p = previewPoint(e);
+  drag.dx = p.x - drag.sx;
+  drag.dy = p.y - drag.sy;
+  // a real drag, not a jittery click: ~3px of travel arms the ghost
+  if (!drag.moved && Math.hypot(drag.dx, drag.dy) * p.s > 3) drag.moved = true;
+  if (drag.moved) draw();
+});
+
+const endDrag = (commit) => (e) => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  canvas.style.cursor = '';
+  if (canvas.hasPointerCapture?.(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  const op = commit && d.moved ? (recipe.pipeline ?? []).find((o) => o.id === d.g.opId) : null;
+  if (!op) { draw(); return; }
+  // posX/posY position the op's bbox CENTER, and 0 means "unset — leave
+  // to place", so a drop landing exactly on an axis nudges to 0.001"
+  // (invisible at cut scale) instead of silently reverting the op to
+  // its automatic placement
+  const rnd = (v) => { const r = Math.round(v * 1000) / 1000; return r === 0 ? 0.001 : r; };
+  op.params ??= {};
+  op.params.posX = rnd((d.g.bbox.minX + d.g.bbox.maxX) / 2 + d.dx);
+  op.params.posY = rnd((d.g.bbox.minY + d.g.bbox.maxY) / 2 + d.dy);
+  // a self-sizing cutout AFTER the dragged op would chase the content and
+  // re-center it (a tag_cutout badge re-wraps the moved name — the drag
+  // reads as a no-op). Pin every such wrapper at its CURRENT geometry, so
+  // the part outline stays put and the content moves ON it; overflow past
+  // the pinned edge is then the entry's own honest refusal.
+  const idx = recipe.pipeline.indexOf(op);
+  for (const w of recipe.pipeline.slice(idx + 1)) {
+    const entry = CATALOG[w.strategy];
+    if (!entry?.wrapsContent || w.frame) continue;
+    const unset = (k) => { const v = w.params?.[k]; return v === undefined || v === null || v === 0 || v === ''; };
+    if (!unset('posX') || !unset('posY')) continue;   // already pinned or authored
+    const bb = builtRingBBox(w.id);
+    if (!bb) continue;
+    w.params ??= {};
+    w.params.posX = rnd((bb.minX + bb.maxX) / 2);
+    w.params.posY = rnd((bb.minY + bb.maxY) / 2);
+    if (entry.wrapsContent === 'sized') {   // tag_cutout also self-SIZES
+      // ceil, not round: a pinned tag must never come out a half-thou
+      // SMALLER than the content it was wrapping when pinned
+      if (unset('width')) w.params.width = Math.ceil((bb.maxX - bb.minX) * 1000) / 1000;
+      if (unset('height')) w.params.height = Math.ceil((bb.maxY - bb.minY) * 1000) / 1000;
+    }
+  }
+  persist();
+  renderControls();   // the recipe debug view shows the new coordinates
+  runAndRender();
+};
+
+// a wrapper op's cut outline as-built: previewRing is the authoritative
+// profile (target rings can include chamfer bands that slightly differ)
+function builtRingBBox(opId) {
+  let bb = null;
+  const grow = (q) => {
+    bb = bb
+      ? {
+          minX: Math.min(bb.minX, q.x), minY: Math.min(bb.minY, q.y),
+          maxX: Math.max(bb.maxX, q.x), maxY: Math.max(bb.maxY, q.y),
+        }
+      : { minX: q.x, minY: q.y, maxX: q.x, maxY: q.y };
+  };
+  for (const { op, r } of result?.preview?.built ?? []) {
+    if (op.id === opId && r.previewRing) r.previewRing.forEach(grow);
+  }
+  if (bb) return bb;
+  for (const { op, r } of result?.preview?.built ?? []) {
+    if (op.id === opId) for (const ring of r.target?.rings ?? []) ring.forEach(grow);
+  }
+  return bb;
+}
+canvas.addEventListener('pointerup', endDrag(true));
+canvas.addEventListener('pointercancel', endDrag(false));
+
+// test/debug handle: what's grabbable, and board-inch → client-pixel
+// mapping so a browser test can aim a synthetic drag
+window.loomDrag = {
+  ops: () => dragOps().map((g) => ({ opId: g.opId, bbox: g.bbox })),
+  ringBBoxOf: (opId) => builtRingBBox(opId),
+  clientOf: (x, y) => {
+    const rect = canvas.getBoundingClientRect();
+    const { s, ox, oy, place } = viewTransform();
+    return {
+      x: rect.left + (ox + (x + place.x) * s) * rect.width / canvas.width,
+      y: rect.top + (oy - (y + place.y) * s) * rect.height / canvas.height,
+    };
+  },
+};
+
 function draw() {
   const { width: W, height: H } = canvas;
   ctx.clearRect(0, 0, W, H);
-  const stock = result?.preview?.stock ?? { w: 8, h: 2.5 };
-  const pad = 28;
-  const s = Math.min((W - 2 * pad) / stock.w, (H - 2 * pad) / stock.h);
-  const ox = (W - stock.w * s) / 2, oy = (H + stock.h * s) / 2;
+  const { stock, s, ox, oy } = viewTransform();
   const X = (x) => ox + x * s, Y = (y) => oy - y * s;
 
   ctx.fillStyle = '#f3ead8';
@@ -801,6 +1030,28 @@ function draw() {
       ctx.lineTo(X(to.x + place.x), Y(to.y + place.y));
       ctx.stroke();
     });
+  }
+
+  // the drag ghost: the grabbed op's outlines at the pointer's offset —
+  // the op itself stays put until the drop re-weaves
+  if (drag?.moved) {
+    const gx = place.x + drag.dx, gy = place.y + drag.dy;
+    ctx.strokeStyle = 'rgba(123,163,212,0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    for (const ring of drag.g.rings) {
+      ctx.beginPath();
+      ring.forEach((pt, i) => {
+        const px = X(pt.x + gx), py = Y(pt.y + gy);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+      ctx.stroke();
+    }
+    const b = drag.g.bbox;
+    ctx.strokeStyle = 'rgba(123,163,212,0.5)';
+    ctx.strokeRect(X(b.minX + gx), Y(b.maxY + gy), (b.maxX - b.minX) * s, (b.maxY - b.minY) * s);
+    ctx.setLineDash([]);
   }
 }
 
@@ -1228,6 +1479,44 @@ $('sheetClear').addEventListener('click', () => {
   updateSheetChip(result?.preview?.stock);
   addTurn('New board — the cut history is cleared.');
 });
+// ---- What is this? (app/examples.mjs): the first-visit story + example
+// recipes. Auto-opens ONCE when Loom is empty and never seen; the button
+// reopens it any time. Loading an example is exactly "Open recipe" with
+// a built-in file — same migrate, same weave, same verifier.
+function closeIntro() {
+  $('introOverlay').style.display = 'none';
+  try { localStorage.setItem('loom:introSeen', '1'); } catch {}
+}
+
+function loadExample(ex) {
+  recipe = migrateRecipe(structuredClone(ex.recipe));
+  controlValues = controlDefaults(recipe);
+  persist();
+  renderControls();
+  runAndRender();
+  addTurn(`Opened the example "${escapeHtml(ex.title)}". ${escapeHtml(ex.next)}`);
+  closeIntro();
+}
+
+{
+  const host = $('introExamples');
+  for (const ex of EXAMPLES) {
+    const card = document.createElement('div');
+    card.style.cssText = 'display:flex; align-items:center; gap:12px; border:1px solid var(--border); border-radius:10px; padding:8px 12px';
+    const text = document.createElement('div');
+    text.style.cssText = 'flex:1; min-width:0';
+    text.innerHTML = `<b>${escapeHtml(ex.title)}</b><div class="keynote" style="margin-top:2px">${escapeHtml(ex.blurb)}</div>`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Open';
+    btn.addEventListener('click', () => loadExample(ex));
+    card.append(text, btn);
+    host.append(card);
+  }
+}
+
+$('whatBtn').addEventListener('click', () => { $('introOverlay').style.display = 'flex'; });
+$('introClose').addEventListener('click', closeIntro);
+
 // ---- Machine & tools (⚙): the system-facts menu. Machine reach, sheet
 // size, spindle band, material, and the tool rack — set once, never part
 // of a recipe. The rack is the SHARED shopbot:tools drawer (ir/tools.js):
@@ -1620,4 +1909,8 @@ async function loadGuests() {
   initWeaveWorker(guestUrls);
   renderControls();
   runAndRender();
+  // first visit, empty loom → open the story unprompted, exactly once
+  if (!(recipe.pipeline ?? []).length && !localStorage.getItem('loom:introSeen')) {
+    $('introOverlay').style.display = 'flex';
+  }
 })();

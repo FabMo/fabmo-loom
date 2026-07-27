@@ -1268,9 +1268,12 @@ export const CATALOG = {
   },
 
   disc_cutout: {
-    doc: 'Cut out a ROUND part of an explicit diameter — coasters, discs, wheels — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Use this, not tag_cutout, when the user names a round part or gives its diameter. Everything machined so far must fit inside the disc. Holding tabs available, same behavior as tag_cutout; without tabs, hold with tape/onion skin.',
+    doc: 'Cut out a ROUND part of an explicit diameter — coasters, discs, wheels — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone) — or PINNED at an explicit posX/posY center so off-center layouts hold still. Use this, not tag_cutout, when the user names a round part or gives its diameter. Everything machined so far must fit inside the disc. Holding tabs available, same behavior as tag_cutout; without tabs, hold with tape/onion skin.',
+    wrapsContent: true,   // centers on content; pinnable via posX/posY
     params: {
       diameter: { type: 'number', default: 3, doc: 'the finished disc diameter, inches', bindable: true },
+      posX: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE X of the disc\'s center, inches, {arithmetic} allowed; 0/absent = center on the content machined so far' },
+      posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the disc\'s center, inches, {arithmetic} allowed; 0/absent = center on content' },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
@@ -1280,10 +1283,15 @@ export const CATALOG = {
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
+      const pinned = (Number.isFinite(p.posX) && p.posX !== 0) || (Number.isFinite(p.posY) && p.posY !== 0);
+      if (Number.isFinite(p.posX) && p.posX !== 0) c.x = p.posX;
+      if (Number.isFinite(p.posY) && p.posY !== 0) c.y = p.posY;
       const R = p.diameter / 2;
+      // contentReach measures from the (possibly pinned) center, so an
+      // off-center pin that leaves content poking out is refused here
       const reach = contentReach(ctx, c);
       if (reach > R + 1e-9) {
-        return { error: `a ${p.diameter}" disc is too small for the content so far (needs ≥ ${(2 * reach).toFixed(2)}" diameter)` };
+        return { error: `a ${p.diameter}" disc ${pinned ? `pinned at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}) ` : ''}is too small for the content so far (needs ≥ ${(2 * reach).toFixed(2)}" diameter${pinned ? ' around that center — move the content, enlarge the disc, or clear posX/posY to recenter' : ''})` };
       }
       const ring = circleRing(c.x, c.y, R);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
@@ -1319,9 +1327,12 @@ export const CATALOG = {
 
   shape_cutout: {
     doc: 'Cut out a part with ANY outline — ellipse, star, heart, arch, hexagon, shield, arrow, cloud... — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone). Author the outline yourself as one SVG path "d" string in the path param: pick any convenient coordinate box (100×100 is fine) — it is scaled to width/height, centered, and flipped to shop coordinates automatically. An ellipse is two A arcs (M 0 50 A 50 30 0 1 1 100 50 A 50 30 0 1 1 0 50 Z); an n-pointed star is 2n straight lines alternating outer/inner radius points; hearts and leaves are a few C béziers. PARAMETRIC shapes — when a DIMENSION OF THE SHAPE ITSELF must be adjustable (an arch with radius and band-thickness sliders): write {arithmetic} of number-control ids inside the path, set width AND height to 0, and create the controls. The arch: path "M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z" with controls r and t — every slider move re-evaluates, re-lowers, re-verifies. (A part dimension like that band thickness is a shape control — it is NOT the stock thickness.) Width/height 0 is ANCHORED mode: authored units are inches and authored coordinates are kept verbatim (y still flips), NOT auto-centered — so several parametric ops written in one frame align by construction (a rabbet band on the arch\'s inside edge shares the arch\'s own r and t), and prior content (which sits centered near the origin) must be enclosed by where YOU put the shape. Use absolute commands, close every subpath with Z, and keep the outline smooth — this edge gets cut by a round bit, so needle-thin spikes and slots narrower than the bit will not survive. Self-intersections weld under the nonzero fill rule (a pentagram becomes its solid star). Everything machined so far must fit INSIDE the shape — and when the content is the point (a name inside a heart), do NOT guess a width: reference a fit-derived shape (set_shape base outline centered on the origin, then fit {of, margin}) and the outline sizes itself around the content, like tag_cutout does. Use disc_cutout for circles and tag_cutout for rounded rectangles (they self-size; this one is explicit). Holding tabs and rim chamfer behave as on those entries.',
+    wrapsContent: true,   // centers on content; pinnable via posX/posY
     params: {
       shape: { type: 'string', default: '', doc: 'PREFERRED: the id of a shapes-section entry to cut out (always anchored in the shared frame; width/height/path ignored)' },
       path: { type: 'string', default: '', template: true, doc: 'inline alternative to shape: the outline as one SVG path "d" string (any coordinate box; scaled to width/height); may contain {arithmetic} of control ids' },
+      posX: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE X of the outline\'s center, inches, {arithmetic} allowed; 0/absent = center on the content machined so far (anchored shapes: authored coords). A referenced/anchored shape moves as a whole so its bbox center lands here' },
+      posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the outline\'s center, inches, {arithmetic} allowed; 0/absent = center on content (anchored shapes: authored coords)' },
       width: { type: 'number', default: 4, doc: 'inline path only: finished part width, inches; 0 = the path is already in inches (REQUIRED for parametric {…} paths — do not fight the shape controls with a second scale)', bindable: true },
       height: { type: 'number', default: 0, doc: 'inline path only: finished part height, inches; 0 = scale uniformly from width (aspect preserved), or true size if width is also 0', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
@@ -1346,9 +1357,27 @@ export const CATALOG = {
         warnings.push('interior holes in the shape are ignored for a cutout — add pocket/bore operations for interior features');
       }
       const c = contentCenter(ctx);
-      const ring = cs.anchored
+      // posX/posY pin the outline's center (TEXT_PLACE_PARAMS convention:
+      // 0/absent = leave to the default placement)
+      const px = Number.isFinite(p.posX) && p.posX !== 0 ? p.posX : null;
+      const py = Number.isFinite(p.posY) && p.posY !== 0 ? p.posY : null;
+      if (px !== null) c.x = px;
+      if (py !== null) c.y = py;
+      let ring = cs.anchored
         ? cs.region.outer
         : cs.region.outer.map(q => ({ x: q.x + c.x, y: q.y + c.y }));
+      if (cs.anchored && (px !== null || py !== null)) {
+        // anchored geometry carries its own coordinates — an explicit
+        // posX/posY moves the whole outline so its bbox center lands there
+        // (same convention as pocket_shape's anchored references)
+        const ab = ring.reduce((a, q) => ({
+          minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+          maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+        }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+        const dx = px !== null ? px - (ab.minX + ab.maxX) / 2 : 0;
+        const dy = py !== null ? py - (ab.minY + ab.maxY) / 2 : 0;
+        if (dx || dy) ring = ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
+      }
       const shapeRegion = { outer: ring, holes: [] };
       // content-fit: everything machined so far must sit INSIDE the shape.
       // Check the TRUE content outlines when entries recorded them (a star
@@ -1415,10 +1444,15 @@ export const CATALOG = {
   },
 
   tag_cutout: {
-    doc: 'Cut the work free as a rounded-corner rectangular tag: an outside profile around everything machined so far, with a buffer. (For a ROUND part with an explicit diameter, use disc_cutout instead.) Cuts through the full stock thickness with an endmill (ramp entry, depth passes). Holding tabs are available: triangular bridges that keep the piece attached to the sheet (snap out by hand, dress with a roundover) — placement is automatic with shop practice (a tab near each cardinal point, concave corners avoided). Without tabs, the part must be held with tape/onion skin.',
+    doc: 'Cut the work free as a rounded-corner rectangular tag: an outside profile around everything machined so far, with a buffer. (For a ROUND part with an explicit diameter, use disc_cutout instead.) Cuts through the full stock thickness with an endmill (ramp entry, depth passes). By default the tag SELF-SIZES: centered on the content with the buffer all around. To PIN the tag instead — a fixed badge the content is placed on, so off-center layouts hold still — set posX/posY (its center) and width/height; a pinned tag that no longer contains the content is refused with the fix named. Holding tabs are available: triangular bridges that keep the piece attached to the sheet (snap out by hand, dress with a roundover) — placement is automatic with shop practice (a tab near each cardinal point, concave corners avoided). Without tabs, the part must be held with tape/onion skin.',
+    wrapsContent: 'sized',   // self-sizes around content; pinnable via posX/posY + width/height
     params: {
-      buffer: { type: 'number', default: 0.25, doc: 'clearance from the content bounding box to the tag edge, inches', bindable: true },
+      buffer: { type: 'number', default: 0.25, doc: 'clearance from the content bounding box to the tag edge, inches (ignored on an axis with an explicit width/height)', bindable: true },
       cornerRadius: { type: 'number', default: 0.5, doc: 'tag corner radius, inches (clamped to fit)', bindable: true },
+      posX: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE X of the tag\'s center, inches, {arithmetic} allowed; 0/absent = center on the content machined so far. With width/height this pins the whole tag' },
+      posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the tag\'s center, inches, {arithmetic} allowed; 0/absent = center on content' },
+      width: { type: 'number', default: 0, template: true, doc: 'explicit tag width, inches, {arithmetic} allowed; 0/absent = size from the content + buffer', bindable: true },
+      height: { type: 'number', default: 0, template: true, doc: 'explicit tag height, inches, {arithmetic} allowed; 0/absent = size from the content + buffer', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
       tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
@@ -1429,8 +1463,22 @@ export const CATALOG = {
     run(p, ctx) {
       const b = ctx.contentBBox; // union of prior ops' bboxes
       if (!b) return { error: 'tag_cutout needs at least one prior operation to cut around' };
-      const ring = roundedRectRing(b.minX - p.buffer, b.minY - p.buffer,
-        b.maxX + p.buffer, b.maxY + p.buffer, p.cornerRadius);
+      // pinning, the posX/posY convention (0/absent = self-place): a pinned
+      // CENTER alone grows the tag symmetrically about it until the buffer
+      // clears on the far side; an explicit width/height wins outright. The
+      // unpinned case reduces to exactly content bbox ± buffer.
+      const cx = Number.isFinite(p.posX) && p.posX !== 0 ? p.posX : (b.minX + b.maxX) / 2;
+      const cy = Number.isFinite(p.posY) && p.posY !== 0 ? p.posY : (b.minY + b.maxY) / 2;
+      const w = p.width > 0 ? p.width : 2 * Math.max(cx - (b.minX - p.buffer), (b.maxX + p.buffer) - cx);
+      const h = p.height > 0 ? p.height : 2 * Math.max(cy - (b.minY - p.buffer), (b.maxY + p.buffer) - cy);
+      const x0 = cx - w / 2, y0 = cy - h / 2, x1 = cx + w / 2, y1 = cy + h / 2;
+      // 5 thou of grace: pinned values are rounded to 0.001", and a pin
+      // taken from a live weave must not refuse the very state it pinned
+      const TOL = 5e-3;
+      if (b.minX < x0 - TOL || b.maxX > x1 + TOL || b.minY < y0 - TOL || b.maxY > y1 + TOL) {
+        return { error: `the pinned tag (${w.toFixed(2)}" × ${h.toFixed(2)}" centered at ${cx.toFixed(2)}, ${cy.toFixed(2)}) no longer contains the content (${b.minX.toFixed(2)}..${b.maxX.toFixed(2)} × ${b.minY.toFixed(2)}..${b.maxY.toFixed(2)}) — move the content back inside, enlarge width/height, or clear posX/posY/width/height to let the tag size itself again` };
+      }
+      const ring = roundedRectRing(x0, y0, x1, y1, p.cornerRadius);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
         side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
         safeZ: ctx.safeZ, entry: 'ramp',
