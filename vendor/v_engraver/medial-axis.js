@@ -1,7 +1,9 @@
 // Medial Axis computation using Voronoi diagram
 // Computes the skeleton of maximal inscribed circles within each polygon.
 
-import { Delaunay } from 'd3-delaunay';
+// via the vendor wrapper, NOT the bare 'd3-delaunay' specifier: the weave
+// worker has no import map, so the graph must resolve on relative paths
+import { Delaunay } from '../delaunay.js';
 import { pointInPolygon, samplePolyline, distanceToBoundary, computeBounds } from './polygon-utils.js';
 
 /**

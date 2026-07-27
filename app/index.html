@@ -190,6 +190,42 @@
       padding: 5px 10px;
     }
 
+    /* the visitor-facing step buttons: draw, type, cut — big enough to hit
+       on a shop tablet, readable from arm's length */
+    button.big {
+      font-size: 1.2rem;
+      padding: 14px 26px;
+      border-radius: 12px;
+    }
+
+    .step {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .step-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      font-size: 1.02rem;
+      margin-bottom: 8px;
+    }
+
+    .step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+      font-size: .92rem;
+      flex: none;
+    }
+
     .chips {
       display: flex;
       flex-wrap: wrap;
@@ -371,7 +407,8 @@
       margin: 0 0 2px;
     }
 
-    #controls {
+    #controls,
+    #controlsMore {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 0 12px;
@@ -382,7 +419,8 @@
     }
 
     #controls .ctl-text input {
-      font-size: 1.35rem;
+      font-size: 1.5rem;
+      padding: 12px 14px;
       border: 2px solid var(--accent);
       border-radius: 10px;
     }
@@ -400,6 +438,85 @@
       font-size: .72rem;
       color: var(--mut);
       margin-top: 8px;
+    }
+
+    /* The re-weave overlay: shown while the weave + verify + preview
+       rebuild BLOCK the main thread. Every animated property is
+       transform/opacity only and the shuttle is layer-promoted, so the
+       COMPOSITOR keeps it moving while JS is busy — an rAF or layout
+       animation would freeze exactly when this overlay matters (which is
+       why startWeave's canvas loom can't be reused here). The .15s fade
+       delay keeps quick weaves from flashing it. */
+    #weaveOverlay {
+      position: absolute;
+      inset: 0;
+      z-index: 8;
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: var(--surround);
+      background: color-mix(in srgb, var(--surround) 80%, transparent);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    #weaveOverlay.show {
+      visibility: visible;
+      animation: wo-fade .2s ease .15s forwards;
+    }
+
+    @keyframes wo-fade {
+      to { opacity: 1; }
+    }
+
+    .wo-loom {
+      position: relative;
+      width: 96px;
+      height: 46px;
+    }
+
+    .wo-warp {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 9px;
+      border-radius: 5px;
+    }
+
+    .wo-shuttle {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: 17px;
+      height: 17px;
+      margin-top: -8.5px;
+      border-radius: 50%;
+      background: var(--red);
+      will-change: transform;
+    }
+
+    #weaveOverlay.show .wo-shuttle {
+      animation: wo-shuttle 1.1s ease-in-out infinite alternate;
+    }
+
+    @keyframes wo-shuttle {
+      from { transform: translateX(5px); }
+      to { transform: translateX(74px); }
+    }
+
+    .wo-note {
+      font-size: .9rem;
+      color: var(--mut);
+      font-style: italic;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #weaveOverlay.show { animation: none; opacity: 1; }
+      #weaveOverlay.show .wo-shuttle { animation: none; transform: translateX(39px); }
     }
 
     footer {
@@ -433,7 +550,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.67</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.68</span></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -471,43 +588,61 @@
 
     <section class="panel" id="appPanel" style="position:relative">
       <p id="appName">Untitled</p>
-      <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-        <div style="width:130px"><label>Stock thickness (in)</label><input id="thickness" type="number" step="0.125"
-            min="0.125" value="0.5"></div>
-        <div><label>Blank W × H (in)</label>
-          <div style="display:flex; gap:6px; align-items:center">
-            <input id="blankW" type="number" min="0.25" step="0.25" placeholder="auto" style="width:72px">
-            <span style="color:var(--mut)">×</span>
-            <input id="blankH" type="number" min="0.25" step="0.25" placeholder="auto" style="width:72px">
+      <!-- Board & material — the per-design setup (thickness, pinned blank)
+         plus the sheet-ledger sizing. Tucked behind one summary line so the
+         visitor flow below starts at step 1; the summary keeps the facts
+         visible without the controls. Machine cut area / material sheet /
+         tool rack / FabMo live in ⚙ Machine & tools — system facts. -->
+      <details id="setupBox">
+        <summary>Board &amp; material — <span id="setupSummary"></span></summary>
+        <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
+          <div style="width:130px"><label>Stock thickness (in)</label><input id="thickness" type="number" step="0.125"
+              min="0.125" value="0.5"></div>
+          <div><label>Blank W × H (in)</label>
+            <div style="display:flex; gap:6px; align-items:center">
+              <input id="blankW" type="number" min="0.25" step="0.25" placeholder="auto" style="width:72px">
+              <span style="color:var(--mut)">×</span>
+              <input id="blankH" type="number" min="0.25" step="0.25" placeholder="auto" style="width:72px">
+            </div>
+          </div>
+          <div id="minStock" class="numbers" style="color:var(--mut)"></div>
+        </div>
+        <!-- Current board (the sheet ledger): the specific piece on the machine
+           right now, cut from across many designs — records each committed
+           footprint so the next nests into what's left. Off until a size is
+           entered; "New board" starts a fresh one at the shop's sheet size. -->
+        <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
+          <div><label title="The actual piece of stock on the machine — record each cut and the next design nests into what's left">Current
+              board W × H (in)</label>
+            <div style="display:flex; gap:6px; align-items:center">
+              <input id="sheetW" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
+              <span style="color:var(--mut)">×</span>
+              <input id="sheetH" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
+              <button id="sheetClear" class="ghost small" title="Start a fresh board (forgets the cut history; sized from your material sheets when set)">New board</button>
+            </div>
           </div>
         </div>
-        <div id="minStock" class="numbers" style="color:var(--mut)"></div>
+      </details>
+      <!-- The visitor flow: numbered steps, populated from the recipe. A
+         recipe with a drawn shape gets step 1 = draw; text controls are
+         step 2 (other controls tuck under "More adjustments"); the export
+         row is the last step. Headings hide when only one step exists. -->
+      <div class="step" id="stepDraw" style="display:none">
+        <div class="step-head"><span class="step-num">1</span><span>Draw the outline</span></div>
+        <!-- Drawing inputs: every set_shape draw the recipe asks for renders a
+           control HERE, at the TOP of the design flow — the outline is drawn
+           first, the typed controls refine it. The generic "Draw a shape…"
+           button under Recipe tools stays as the freehand entry point. -->
+        <div id="drawControls"></div>
       </div>
-      <!-- Current board (the sheet ledger): the specific piece on the machine
-         right now, cut from across many designs — records each committed
-         footprint so the next nests into what's left. Off until a size is
-         entered; "New sheet" starts a fresh one at the shop's sheet size.
-         Machine cut area / material sheet size live in ⚙ Machine & tools —
-         system facts, not per-design ones. -->
-      <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap">
-        <div><label title="The actual piece of stock on the machine — record each cut and the next design nests into what's left">Current
-            board W × H (in)</label>
-          <div style="display:flex; gap:6px; align-items:center">
-            <input id="sheetW" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
-            <span style="color:var(--mut)">×</span>
-            <input id="sheetH" type="number" min="1" step="0.5" placeholder="off" style="width:72px">
-            <button id="sheetRecord" class="ghost small" disabled title="Stamp this verified design's footprint onto the board">Record on board</button>
-            <button id="sheetClear" class="ghost small" title="Start a fresh board (forgets the cut history; sized from your material sheets when set)">New board</button>
-          </div>
-        </div>
-        <div id="sheetChip" class="numbers" style="color:var(--mut)"></div>
+      <div class="step" id="stepType" style="display:none">
+        <div class="step-head"><span class="step-num">2</span><span id="stepTypeLabel">Type it in</span></div>
+        <div id="controls"></div>
+        <details id="moreCtls" style="display:none">
+          <summary>More adjustments</summary>
+          <div id="controlsMore"></div>
+        </details>
       </div>
-      <!-- Drawing inputs: every set_shape draw the recipe asks for renders a
-         control HERE, at the TOP of the design flow — the outline is drawn
-         first, the typed controls refine it. The generic "Draw a shape…"
-         button in the export row below stays as the freehand entry point. -->
-      <div id="drawControls"></div>
-      <div id="controls"></div>
       <div id="assets" class="chips"></div>
       <div id="previewWrap" style="position:relative">
         <div style="position:absolute; top:8px; right:8px; z-index:5; display:flex; gap:4px">
@@ -521,28 +656,53 @@
         </div>
         <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
         <div id="preview3d"></div>
+        <div id="weaveOverlay" aria-hidden="true">
+          <div class="wo-loom">
+            <span class="wo-warp" style="left:14px; background:var(--btn-bg)"></span>
+            <span class="wo-warp" style="left:43px; background:var(--sky)"></span>
+            <span class="wo-warp" style="left:72px; background:var(--btn-bg)"></span>
+            <span class="wo-shuttle"></span>
+          </div>
+          <div class="wo-note">weaving…</div>
+        </div>
       </div>
       <div class="verdict"><span id="badge" class="badge wait">…</span><span id="verdictText" class="numbers"></span>
       </div>
       <div id="numbers" class="numbers"></div>
       <div id="errors" class="errors"></div>
       <div id="warnings" class="warnings"></div>
-      <div class="btns">
-        <button id="dlSbp" disabled>Download .sbp</button>
-        <button id="dlNc" class="ghost" disabled>Download .nc</button>
-        <button id="saveRecipe" class="ghost small">Save recipe</button>
-        <button id="openRecipe" class="ghost small">Open recipe…</button>
-        <button id="addAsset" class="ghost small">Add image/graphic…</button>
-        <button id="drawShape" class="ghost small">Draw a shape…</button>
-        <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
-        <input id="assetFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg"
-          style="display:none">
+      <div class="step" id="stepCut" style="display:none">
+        <div class="step-head"><span class="step-num">3</span><span>Cut it</span></div>
+        <div class="btns">
+          <button id="sendFabmo" class="big" style="display:none" disabled
+            title="Queue this verified cut on the connected FabMo — start it from the tool">Send to machine</button>
+          <button id="dlSbp" class="big" disabled>Download .sbp</button>
+          <button id="sheetRecord" class="big ghost" disabled
+            title="Nest this verified cut into the current board's free space — the positioned file goes to the machine (or downloads) and the footprint is recorded">Add
+            to board</button>
+          <button id="sendRunFabmo" class="ghost small" style="display:none" disabled
+            title="Queue AND start cutting — only when the machine is idle and the queue is empty">Send &amp; run</button>
+          <button id="dlNc" class="ghost small" disabled>Download .nc</button>
+        </div>
+        <div class="keynote"><span id="fabmoChip" style="display:none"></span> <span id="sheetChip"></span></div>
       </div>
       <div id="handoffs" class="btns"></div>
       <div class="foot-note">The app is a document: prompts and sliders edit the same recipe, and every state runs the
         full pipeline through the verifier. Stock auto-sizes to the content — the board shown is the minimum you must
         fixture. The 3D view is the simulated cut surface (drag to rotate); 2D shows the toolpath. Exports unlock only
         on VERIFIED. First run cuts air.</div>
+      <details>
+        <summary>recipe tools — save, open, add an image, freehand shapes</summary>
+        <div class="btns">
+          <button id="saveRecipe" class="ghost small">Save recipe</button>
+          <button id="openRecipe" class="ghost small">Open recipe…</button>
+          <button id="addAsset" class="ghost small">Add image/graphic…</button>
+          <button id="drawShape" class="ghost small">Draw a shape…</button>
+          <input id="openFile" type="file" accept=".json,.loom.json" style="display:none">
+          <input id="assetFile" type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml,.svg"
+            style="display:none">
+        </div>
+      </details>
       <details>
         <summary>the recipe (what the prompts are editing)</summary>
         <pre id="recipeJson"></pre>
@@ -568,20 +728,24 @@
   <div id="drawOverlay" style="display:none; position:fixed; inset:0; z-index:100; background:rgba(10,12,20,.55); align-items:center; justify-content:center">
     <div style="display:flex; flex-direction:column; width:min(92vw,760px); height:min(88vh,720px); background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 40px rgba(0,0,0,.35); overflow:hidden">
       <div style="display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border); flex-wrap:wrap">
-        <strong style="margin-right:auto">Draw a shape</strong>
+        <strong id="drawTitle" style="margin-right:auto; font-size:1.05rem">Draw a shape</strong>
         <select id="drawTarget" title="Replace an existing drawn shape, or make a new one" style="max-width:150px"></select>
         <input id="drawName" placeholder="name (e.g. bull)" style="width:120px">
         <label style="display:flex; align-items:center; gap:6px; margin:0; color:var(--mut)">smooth
           <input id="drawSmooth" type="range" min="0" max="10" step="1" value="3" style="width:90px">
         </label>
         <button id="drawUndo" class="ghost small">Undo</button>
-        <button id="drawClear" class="ghost small">Clear</button>
         <button id="drawCancel" class="ghost small">Cancel</button>
-        <button id="drawUse" class="small">Use shape</button>
+        <button id="drawClear" class="ghost">Clear</button>
+        <button id="drawClose" style="display:none"
+          title="Finish the outline with a smooth curve — it leaves and lands tangent to the ends you drew">↩ Close
+          the gap</button>
+        <button id="drawUse" class="big">✓ Accept</button>
       </div>
       <canvas id="drawCanvas" style="flex:1; min-height:0; width:100%; display:block; touch-action:none; cursor:crosshair; background:var(--bg)"></canvas>
       <div style="padding:6px 14px; border-top:1px solid var(--border); color:var(--mut); font-size:.82rem">
-        Draw a closed outline — the ends snap together. It becomes an SVG shape you can cut out, pocket, or ring with holes:
+        Draw a closed outline — ends that land close snap together; stopped short? <em>Close the gap</em> finishes it
+        with a curve tangent to your stroke. It becomes an SVG shape you can cut out, pocket, or ring with holes:
         try “cut out <em>my drawing</em> 4 inches wide”.
       </div>
     </div>
@@ -667,7 +831,27 @@
         <div class="keynote">With a material chosen, every rack-matched bit runs chipload-derived feed, plunge, and RPM
           (per-tool TR in the file) instead of each strategy's stock numbers — deterministic tables, no guessing. "Keep
           app feeds" leaves everything exactly as before.</div>
-      </div>
+        <!-- FabMo on the network: verified cuts go straight to the tool's job
+           queue over its local HTTP API. Discovery is an HTTP probe of a /24
+           (the engine's own UDP beacon is invisible to browsers). -->
+        <div>
+          <label>FabMo machine — send verified cuts straight to the tool</label>
+          <div id="fabmoMachines" style="display:flex; flex-direction:column; gap:4px; margin:6px 0"></div>
+          <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+            <input id="fabmoAddr" placeholder="address — 192.168.1.42 or mytool.local" style="width:220px">
+            <button id="fabmoConnect" class="small">Connect</button>
+            <span style="color:var(--mut)">or</span>
+            <input id="fabmoSubnet" placeholder="192.168.1" style="width:100px" title="The /24 network your shop machines live on">
+            <button id="fabmoScan" class="small">Scan network</button>
+            <span id="fabmoScanNote" class="keynote"></span>
+          </div>
+          <div class="keynote" style="margin-top:6px">"Send to FabMo" queues the job on the tool — you still press run
+            there. "Send &amp; run" starts it only when the machine is idle and yours is the only queued job; check the
+            bit, Z zero, and that the deck is clear before using it.<span id="fabmoHttpsHint"> Over https your browser
+            must allow local-network access for this page (Chrome asks the first time — if a scan finds nothing, that
+            permission is the first thing to check; Loom on your shop's own http server needs no permission).</span>
+          </div>
+        </div>
     </div>
   </div>
 

@@ -18,6 +18,7 @@ import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { FONTS } from './fonts.mjs';
+import { probe, machineName, machineStatus, scanSubnet, submitJob, submitAndRun } from './fabmo.mjs';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
@@ -33,6 +34,7 @@ let toolLib = loadToolLibrary();   // the SHARED shopbot:tools drawer
 let sheet = loadSheet();
 let lastTerrains = {};   // last resolved terrains, reused for sheet-positioned re-runs
 let result = null;
+let lastSim = null;      // the worker's simulateJob output for `result` (3D surface)
 let busy = false;
 
 const quiet = (fn) => {
@@ -86,7 +88,24 @@ function persistSheet() {
 // The status chip: "Board: 24×12 — 83% free · 2 parts cut · this design fits ✓".
 // Record is enabled only when the sheet is on, the design verifies, and its
 // footprint actually fits the remaining space.
+// One line under the Board & material summary keeping the tucked-away
+// facts visible while the controls stay hidden.
+function updateSetupSummary() {
+  const st = result?.preview?.stock;
+  const parts = [`${recipe.stock.thickness}" thick`];
+  if (recipe.stock.width > 0 && recipe.stock.height > 0) {
+    parts.push(`blank ${recipe.stock.width}" × ${recipe.stock.height}"`);
+  } else if (st?.w > 0 && st?.h > 0) {
+    parts.push(`blank auto (${st.w}" × ${st.h}")`);
+  } else {
+    parts.push('blank auto');
+  }
+  if (sheetActive(sheet)) parts.push(`board ${sheet.w}×${sheet.h} · ${sheetFreePct(sheet)}% free`);
+  $('setupSummary').textContent = parts.join(' · ');
+}
+
 function updateSheetChip(st) {
+  updateSetupSummary();
   const chip = $('sheetChip'), rec = $('sheetRecord');
   if (!sheetActive(sheet)) { chip.textContent = ''; rec.disabled = true; return; }
   let text = `Board: ${sheet.w}" × ${sheet.h}" — ${sheetFreePct(sheet)}% free`;
@@ -118,8 +137,14 @@ function renderControls() {
   $('thickness').value = recipe.stock.thickness;
   $('blankW').value = recipe.stock.width > 0 ? recipe.stock.width : '';
   $('blankH').value = recipe.stock.height > 0 ? recipe.stock.height : '';
-  const host = $('controls');
+  const host = $('controls'), more = $('controlsMore');
   host.innerHTML = '';
+  more.innerHTML = '';
+  // Text controls are the step itself ("type your name") — everything else
+  // tucks under "More adjustments" so the visitor flow shows a minimum of
+  // controls. A recipe with no text keeps all its controls in the open (a
+  // slider-driven design IS its sliders).
+  const hasText = recipe.controls.some((c) => c.type === 'text');
   for (const c of recipe.controls) {
     const wrap = document.createElement('div');
     if (c.type === 'text') wrap.className = 'ctl-text';
@@ -151,8 +176,11 @@ function renderControls() {
       debounceRun();
     });
     wrap.append(label, input);
-    host.append(wrap);
+    (hasText && c.type !== 'text' ? more : host).append(wrap);
   }
+  $('moreCtls').style.display = more.children.length ? '' : 'none';
+  $('stepType').style.display = recipe.controls.length ? '' : 'none';
+  $('stepTypeLabel').textContent = hasText ? 'Type it in' : 'Adjust the design';
   renderAssets();
   renderChips();
   // the debug view elides asset payloads the same way the LLM prompt does
@@ -211,15 +239,17 @@ function renderAssets() {
 function renderDrawControls() {
   const host = $('drawControls');
   host.innerHTML = '';
+  let count = 0;
   for (const s of recipe.shapes ?? []) {
     const name = s.draw?.of;
     if (!name) continue;
+    count++;
     const drawn = (recipe.assets ?? []).some((a) => a.id === name || a.name === name);
     const row = document.createElement('div');
     row.style.cssText = 'display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap';
     const btn = document.createElement('button');
-    if (drawn) { btn.className = 'ghost small'; btn.textContent = `Redraw “${name}”…`; }
-    else { btn.textContent = `✏ Draw “${name}”…`; }
+    if (drawn) { btn.className = 'ghost'; btn.textContent = `↻ Redraw “${name}”`; }
+    else { btn.className = 'big'; btn.textContent = `✏ Draw “${name}”`; }
     btn.addEventListener('click', () => openDrawDialog(name));
     const note = document.createElement('span');
     note.className = 'keynote';
@@ -230,6 +260,17 @@ function renderDrawControls() {
     row.append(btn, note);
     host.append(row);
   }
+  $('stepDraw').style.display = count ? '' : 'none';
+  renumberSteps();
+}
+
+// The visitor flow's numbers stay honest as steps come and go: visible
+// steps count 1..n, and a lone step drops its heading entirely (numbering
+// a single step reads as a form, not a flow).
+function renumberSteps() {
+  const steps = ['stepDraw', 'stepType', 'stepCut'].map($).filter((el) => el.style.display !== 'none');
+  steps.forEach((el, i) => { el.querySelector('.step-num').textContent = String(i + 1); });
+  for (const el of steps) el.querySelector('.step-head').style.display = steps.length > 1 ? '' : 'none';
 }
 
 // raster uploads get downscaled client-side: carving heightmaps are ≤ a
@@ -287,6 +328,10 @@ function addSvgAsset(svgText, displayName) {
     const notes = probe.warnings.length ? ` (${probe.warnings.map(escapeHtml).join('; ')})` : '';
     addTurn(`Added "${nm}" — ${pieces} filled piece${pieces > 1 ? 's' : ''}${holes ? `, ${holes} hole${holes > 1 ? 's' : ''}` : ''}${notes}. Ask to use it: "cut out ${nm} 4 inches wide", "pocket it 1/8 deep"…`);
   }
+  // a recipe may already be waiting on this asset by name (a set_shape
+  // draw authored before anything was drawn) — re-weave so accepting the
+  // drawing lights up the ops referencing it, not the next unrelated edit
+  debounceRun();
   return entry;
 }
 
@@ -325,33 +370,113 @@ async function addAssetFile(f) {
 
 function setBadge(cls, text) { const b = $('badge'); b.className = `badge ${cls}`; b.textContent = text; }
 
-let weaveSeq = 0;   // stale async weaves (terrain still fetching) must not clobber newer ones
-function runAndRender() {
+// The weave overlay (index.html #weaveOverlay): shown before the
+// synchronous weave blocks the thread, hidden when render() finishes.
+// runAndRender's rAF→setTimeout structure guarantees one PAINT between
+// the class flip and the block, so the compositor has the layer and keeps
+// the shuttle moving while the page is frozen.
+const showWeaveOverlay = () => $('weaveOverlay').classList.add('show');
+const hideWeaveOverlay = () => $('weaveOverlay').classList.remove('show');
+// yield one painted frame — for click handlers that weave synchronously
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+
+// ---- the weave worker (app/weave-worker.mjs): runRecipe + simulateJob
+// off the main thread, so typing and drawing stay responsive while a
+// weave computes. Falls back to weaving on the main thread — same
+// results, old lockups — when module workers are unavailable or the
+// worker dies mid-session.
+let weaveWorker = null;
+let weaveMsgId = 0;
+const weavePending = new Map();   // id → { resolve, payload }
+
+function syncWeave(p) {
+  const result = quiet(() => runRecipe(p.recipe, p.values, LOADED_FONTS, p.terrains ?? {}, p.shop, p.placement));
+  let sim = null;
+  if (p.wantSim !== false && result.ok && result.preview?.built?.length) {
+    sim = simulateJob(result.preview.built, result.preview.placement ?? { x: 0, y: 0 },
+      result.preview.stock, { analyticVee: true });
+  }
+  return { result, sim };
+}
+
+function initWeaveWorker(guestUrls) {
+  let w;
+  try {
+    w = new Worker(new URL('./weave-worker.mjs', import.meta.url), { type: 'module' });
+  } catch {
+    return;   // no module workers here — the sync fallback carries on
+  }
+  w.onmessage = (e) => {
+    const m = e.data;
+    if (m.kind !== 'wove' && m.kind !== 'error') return;
+    const p = weavePending.get(m.id);
+    if (!p) return;
+    weavePending.delete(m.id);
+    // an error reply is a worker-side throw or unclonable result — weave
+    // honestly on this thread rather than showing nothing
+    p.resolve(m.kind === 'wove' ? { result: m.result, sim: m.sim } : syncWeave(p.payload));
+  };
+  w.onerror = (err) => {
+    // the worker is gone: finish everything in flight on the main thread
+    // and stay there for the rest of the session
+    console.warn('weave worker failed — weaving on the main thread from here on', err);
+    weaveWorker = null;
+    const pending = [...weavePending.values()];
+    weavePending.clear();
+    for (const p of pending) p.resolve(syncWeave(p.payload));
+  };
+  w.postMessage({ kind: 'init', fonts: LOADED_FONTS, guestUrls });
+  weaveWorker = w;
+  window.loomWeave = { workerActive: () => !!weaveWorker };   // test/debug handle
+}
+
+// weave a recipe state → Promise<{ result, sim }>, wherever it runs
+function weave(payload) {
+  // on-thread weaving blocks: let the overlay paint one frame first
+  if (!weaveWorker) return nextPaint().then(() => syncWeave(payload));
+  const id = ++weaveMsgId;
+  return new Promise((resolve) => {
+    weavePending.set(id, { resolve, payload });
+    try {
+      weaveWorker.postMessage({ kind: 'weave', id, ...payload });
+    } catch (e) {
+      // a payload that won't clone (should not happen — recipes are data)
+      weavePending.delete(id);
+      resolve(syncWeave(payload));
+    }
+  });
+}
+
+let weaveSeq = 0;   // stale async weaves must not clobber newer ones
+async function runAndRender() {
   if (!LOADED_FONTS) return;
   setBadge('wait', 'computing…');
+  showWeaveOverlay();
   const seq = ++weaveSeq;
-  requestAnimationFrame(() => setTimeout(async () => {
-    // terrain references resolve ABOVE the rail: geocode + public DEM
-    // tiles fetched on the user's own connection, cached per region, the
-    // resolved bbox/meta pinned back into the recipe. The weave below
-    // stays a pure function of the returned grids.
-    let terrains = {};
-    if (recipe.terrains?.length) {
-      try {
-        terrains = await resolveTerrains(recipe, (msg) => setBadge('wait', msg));
-        persist();   // keep the pinned bbox/meta
-      } catch (e) {
-        if (seq !== weaveSeq) return;
-        result = { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } };
-        render();
-        return;
-      }
+  // terrain references resolve ABOVE the rail: geocode + public DEM
+  // tiles fetched on the user's own connection, cached per region, the
+  // resolved bbox/meta pinned back into the recipe. The weave below
+  // stays a pure function of the returned grids.
+  let terrains = {};
+  if (recipe.terrains?.length) {
+    try {
+      terrains = await resolveTerrains(recipe, (msg) => setBadge('wait', msg));
+      persist();   // keep the pinned bbox/meta
+    } catch (e) {
+      if (seq !== weaveSeq) return;
+      result = { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } };
+      lastSim = null;
+      render();
+      return;
     }
-    if (seq !== weaveSeq) return;
-    lastTerrains = terrains;
-    result = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, terrains, shopForRun()));
-    render();
-  }, 0));
+  }
+  if (seq !== weaveSeq) return;
+  lastTerrains = terrains;
+  const out = await weave({ recipe, values: controlValues, terrains, shop: shopForRun() });
+  if (seq !== weaveSeq) return;   // a newer weave superseded this one
+  result = out.result;
+  lastSim = out.sim;
+  render();
 }
 let timer = null;
 function debounceRun() { clearTimeout(timer); timer = setTimeout(runAndRender, 250); }
@@ -403,6 +528,9 @@ function render() {
   updateSheetChip(r.preview?.stock);
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
+  $('stepCut').style.display = (recipe.pipeline ?? []).length ? '' : 'none';
+  renumberSteps();
+  updateFabmoSend();
   renderHandoffs();
   // the reveal: the first VERIFIED weave of the session that carries an
   // assembly jumps to 3D and plays the piece rising out of the board.
@@ -414,6 +542,7 @@ function render() {
   if (introNow) { assemblyIntroShown = true; viewMode = '3d'; }
   refreshPreview();
   if (introNow) playAssemblyIntro();
+  hideWeaveOverlay();
 }
 
 // "Continue in <app>" — a catalog entry may declare a `handoff` hook
@@ -468,7 +597,11 @@ function refreshPreview() {
     const stock = pre?.stock ?? { w: 8, h: 2.5, thickness: recipe.stock.thickness ?? 0.5 };
     // display surface: vee ops render their ideal analytic V-surface (smooth
     // groove walls). Everything is drawn at TRUE scale — no depth exaggeration.
-    const sim = pre?.built?.length ? simulateJob(pre.built, pre.placement, stock, { analyticVee: true }) : null;
+    // The worker computes it alongside every weave (lastSim), so 2D↔3D
+    // toggles are instant; the on-demand compute is the workerless fallback.
+    const sim = lastSim ?? (pre?.built?.length
+      ? simulateJob(pre.built, pre.placement, stock, { analyticVee: true })
+      : null);
     // feature depth (deepest cut that is NOT a through cut) normalizes the
     // depth TINT so an engraving next to a through cutout still uses the whole
     // color scale — a tag's kerf must not swallow the carve it surrounds.
@@ -1102,6 +1235,171 @@ $('sheetClear').addEventListener('click', () => {
 $('shopBtn').addEventListener('click', () => { renderRack(); $('shopOverlay').style.display = 'flex'; });
 $('shopClose').addEventListener('click', () => { $('shopOverlay').style.display = 'none'; });
 
+// ---- FabMo on the network: send verified cuts straight to the tool's
+// job queue over its local HTTP API (app/fabmo.mjs). The machine list is
+// an app-level fact like the rack — never part of a recipe. Discovery is
+// an HTTP probe: the engine's own UDP beacon is invisible to a browser.
+function loadFabmo() {
+  const base = { machines: [], selected: null };
+  try { return { ...base, ...JSON.parse(localStorage.getItem('loom:fabmo') ?? '{}') }; }
+  catch { return base; }
+}
+let fabmo = loadFabmo();
+let fabmoState = null;   // last polled state; null = not answering
+function persistFabmo() { try { localStorage.setItem('loom:fabmo', JSON.stringify(fabmo)); } catch {} }
+const fabmoSelected = () => fabmo.machines.find((m) => m.host === fabmo.selected) ?? null;
+const fabmoLabel = (m) => m.name ?? m.host;
+
+function updateFabmoSend() {
+  const sel = fabmoSelected();
+  for (const id of ['sendFabmo', 'sendRunFabmo']) {
+    $(id).style.display = sel ? '' : 'none';
+    $(id).disabled = !sel || !result?.ok;
+  }
+  // with a machine connected, sending is the big button and the download
+  // steps back; with none, the download IS the way a cut leaves the app
+  $('dlSbp').className = sel ? 'ghost' : 'big';
+  const chip = $('fabmoChip');
+  chip.style.display = sel ? '' : 'none';
+  if (sel) chip.textContent = `${fabmoLabel(sel)} — ${fabmoState ?? 'not answering'}`;
+}
+
+function renderFabmoMachines() {
+  const box = $('fabmoMachines');
+  box.innerHTML = '';
+  if (!fabmo.machines.length) {
+    box.innerHTML = '<span class="keynote">No machines yet — connect by address, or scan the shop network.</span>';
+    return;
+  }
+  for (const m of fabmo.machines) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:8px; align-items:center';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'fabmoPick';
+    radio.checked = m.host === fabmo.selected;
+    radio.addEventListener('change', () => { fabmo.selected = m.host; persistFabmo(); fabmoState = null; updateFabmoSend(); pollFabmo(); });
+    const label = document.createElement('span');
+    label.textContent = m.name ? `${m.name} (${m.host})` : m.host;
+    const forget = document.createElement('button');
+    forget.className = 'ghost small';
+    forget.textContent = 'forget';
+    forget.addEventListener('click', () => {
+      fabmo.machines = fabmo.machines.filter((x) => x.host !== m.host);
+      if (fabmo.selected === m.host) { fabmo.selected = fabmo.machines[0]?.host ?? null; fabmoState = null; }
+      persistFabmo(); renderFabmoMachines(); updateFabmoSend();
+    });
+    row.append(radio, label, forget);
+    box.append(row);
+  }
+}
+
+async function pollFabmo() {
+  const sel = fabmoSelected();
+  if (!sel || document.hidden) return;
+  try { fabmoState = (await machineStatus(sel.host))?.state ?? null; }
+  catch { fabmoState = null; }
+  updateFabmoSend();
+}
+setInterval(pollFabmo, 5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollFabmo(); });
+
+async function adoptFabmo(hit) {
+  const name = await machineName(hit.host);
+  const existing = fabmo.machines.find((m) => m.host === hit.host);
+  if (existing) existing.name = name ?? existing.name;
+  else fabmo.machines.push({ host: hit.host, name });
+  fabmo.selected = hit.host;
+  persistFabmo();
+  renderFabmoMachines();
+  updateFabmoSend();
+  pollFabmo();
+}
+
+const fabmoHttpsHint = () => (location.protocol === 'https:'
+  ? " — if the tool is on and reachable, the browser's local-network permission is the first thing to check"
+  : '');
+
+$('fabmoConnect').addEventListener('click', async () => {
+  const note = $('fabmoScanNote');
+  const addr = $('fabmoAddr').value.trim();
+  if (!addr) { note.textContent = 'enter the machine address first'; return; }
+  note.textContent = `looking for a FabMo at ${addr}…`;
+  const hit = await probe(addr, { timeoutMs: 3000 });
+  if (!hit) { note.textContent = `no FabMo answered at ${addr}${fabmoHttpsHint()}`; return; }
+  await adoptFabmo(hit);
+  note.textContent = `connected — ${fabmoLabel(fabmoSelected())}`;
+});
+
+// One /24 sweep; the button doubles as Stop while a scan is in flight.
+let fabmoScanStop = null;
+$('fabmoScan').addEventListener('click', async () => {
+  const note = $('fabmoScanNote');
+  if (fabmoScanStop) { fabmoScanStop.aborted = true; return; }
+  const sel = fabmoSelected();
+  const base = $('fabmoSubnet').value.trim()
+    || sel?.host.match(/^(\d+\.\d+\.\d+)\.\d+/)?.[1]
+    || '192.168.1';
+  fabmoScanStop = { aborted: false };
+  $('fabmoScan').textContent = 'Stop';
+  try {
+    const found = await scanSubnet(base, {
+      stop: fabmoScanStop,
+      onFound: (hit) => { adoptFabmo(hit); },
+      onProgress: (done, total) => { note.textContent = `scanning ${base}.0/24 — ${done}/${total}`; },
+    });
+    note.textContent = found.length
+      ? `found ${found.length} machine${found.length > 1 ? 's' : ''}`
+      : `no FabMo found on ${base}.0/24${fabmoHttpsHint()}`;
+  } catch (e) {
+    note.textContent = e.message;
+  }
+  fabmoScanStop = null;
+  $('fabmoScan').textContent = 'Scan network';
+});
+
+function fabmoJobFile() {
+  return {
+    content: result.sbp,
+    filename: `${slug(recipe.name)}.sbp`,
+    name: recipe.name,
+    description: 'Woven and verified by FabMo Loom',
+  };
+}
+
+$('sendFabmo').addEventListener('click', async () => {
+  const sel = fabmoSelected();
+  if (!sel || !result?.ok) return;
+  try {
+    const job = await submitJob(sel.host, fabmoJobFile());
+    addTurn(`Sent "${escapeHtml(recipe.name)}" to ${escapeHtml(fabmoLabel(sel))} — job #${job._id} is queued on the tool; start it there when the deck is clear.`);
+  } catch (e) {
+    addTurn(`Could not send to ${escapeHtml(fabmoLabel(sel))}: ${escapeHtml(e.message)}`, true);
+  }
+});
+
+$('sendRunFabmo').addEventListener('click', async () => {
+  const sel = fabmoSelected();
+  if (!sel || !result?.ok) return;
+  const label = fabmoLabel(sel);
+  // Loom verified the file; the physical setup it cannot see. Make the
+  // person say so before remote motion starts.
+  if (!confirm(`Start cutting on ${label} right now?\n\nBit loaded, Z zeroed, material fixtured, deck clear.`)) return;
+  try {
+    const r = await submitAndRun(sel.host, fabmoJobFile());
+    addTurn(r.ran
+      ? `Job #${r.job._id} is cutting on ${escapeHtml(label)}.`
+      : `Job #${r.job._id} queued on ${escapeHtml(label)}, not started — ${escapeHtml(r.reason)}.`, !r.ran);
+  } catch (e) {
+    addTurn(`Could not start on ${escapeHtml(label)}: ${escapeHtml(e.message)}`, true);
+  }
+});
+
+if (location.protocol !== 'https:') $('fabmoHttpsHint').style.display = 'none';
+renderFabmoMachines();
+updateFabmoSend();
+pollFabmo();
+
 // material select: '' = keep each strategy's own feeds (the pre-rack behavior)
 {
   const sel = $('shopMaterial');
@@ -1176,24 +1474,55 @@ $('rackAdd').addEventListener('click', () => {
   debounceRun();
 });
 
-$('sheetRecord').addEventListener('click', () => {
+$('sheetRecord').addEventListener('click', async () => {
   const st = result?.preview?.stock;
   if (!result?.ok || !st) return;
+  // the positioned re-weave below blocks the thread like any weave — show
+  // the overlay and let a frame paint before starting
+  showWeaveOverlay();
+  await nextPaint();
+  try {
   // nest axis-aligned (rotation-baking is a follow-up), then re-weave with the
   // SHEET as the stock and the design offset to that spot — the exported cut
   // lands in the free space instead of at a lone board origin.
   const rec = recordCut(sheet, st.w, st.h, recipe.name, { allowRotate: false });
   if (rec.error) { addTurn(escapeHtml(rec.error), true); return; }
   const p = rec.placement;
-  const placed = quiet(() => runRecipe(recipe, controlValues, LOADED_FONTS, lastTerrains, shopForRun(),
-    { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }));
+  const placed = (await weave({
+    recipe, values: controlValues, terrains: lastTerrains, shop: shopForRun(),
+    placement: { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }, wantSim: false,
+  })).result;
   if (!placed.ok) { addTurn('Could not position this cut on the board — ' + escapeHtml(placed.errors[0] ?? 'the verifier refused it'), true); return; }
-  download(`${slug(recipe.name)}-on-sheet.sbp`, placed.sbp);
+  // with a FabMo connected the positioned cut goes straight to the tool's
+  // queue (the visitor flow: each badge lands in its own spot on the same
+  // fixtured board); with none — or if the send fails — it downloads.
+  const at = `${p.x.toFixed(1)}", ${p.y.toFixed(1)}"`;
+  let delivered = 'downloaded the positioned cut (.sbp)';
+  const sel = fabmoSelected();
+  let sent = false;
+  if (sel) {
+    try {
+      const job = await submitJob(sel.host, {
+        content: placed.sbp,
+        filename: `${slug(recipe.name)}-on-sheet.sbp`,
+        name: `${recipe.name} @ ${at}`,
+        description: 'Positioned on the current board — woven and verified by FabMo Loom',
+      });
+      delivered = `queued job #${job._id} on ${escapeHtml(fabmoLabel(sel))} — start it there`;
+      sent = true;
+    } catch (e) {
+      addTurn(`Could not send to ${escapeHtml(fabmoLabel(sel))} (${escapeHtml(e.message)}) — downloading instead.`, true);
+    }
+  }
+  if (!sent) download(`${slug(recipe.name)}-on-sheet.sbp`, placed.sbp);
   sheet = rec.sheet;
   persistSheet();
   updateSheetChip(st);
   const n = sheet.occupied.length;
-  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${p.x.toFixed(1)}", ${p.y.toFixed(1)}" on the board and downloaded the positioned cut (.sbp) — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
+  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${at} on the board and ${delivered} — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
+  } finally {
+    hideWeaveOverlay();
+  }
 });
 
 // ------------------------------------------------------------- theme
@@ -1263,7 +1592,7 @@ async function loadGuests() {
   let list;
   try {
     list = (await import('./guests.local.mjs')).default ?? [];
-  } catch { return; }
+  } catch { return []; }
   for (const url of list) {
     try {
       const mod = await import(url);
@@ -1274,6 +1603,7 @@ async function loadGuests() {
       addTurn(`A guest app failed to load (${escapeHtml(String(url))}) — its verbs are unavailable this session.`, true);
     }
   }
+  return list;
 }
 
 (async function boot() {
@@ -1284,7 +1614,10 @@ async function loadGuests() {
     loaded[f.id] = await res.arrayBuffer();
   }));
   LOADED_FONTS = loaded;
-  await loadGuests();
+  // guests register on the page (docs, chips, handoffs) AND in the worker
+  // (where the weave actually runs) — same modules, same contract
+  const guestUrls = await loadGuests();
+  initWeaveWorker(guestUrls);
   renderControls();
   runAndRender();
 })();

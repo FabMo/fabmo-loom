@@ -124,6 +124,67 @@ export function smoothSketch(points, opts = {}) {
 }
 
 /**
+ * Bridge the gap of an OPEN outline with a tangent-continuous closing curve.
+ *
+ * A cubic Hermite segment that leaves the tail along the outline's final
+ * direction of travel and arrives at the head along its initial direction,
+ * so the closure meets both endpoint segments tangent — no corner at either
+ * joint. "I drew most of a tag and stopped short" → this finishes the
+ * outline the way the hand was already moving. Endpoint directions come
+ * from the end segments, measured over a small arc (~gap/20) so a
+ * micro-segment can't alias the direction while a curving stroke keeps
+ * its true end tangent; tangent magnitudes equal the gap, which tracks a
+ * circular arc to within a few percent.
+ *
+ * Pure and unit-agnostic like everything here. Returns ONLY the new points,
+ * strictly between tail and head, ordered tail → head — append them and
+ * treat the outline as closed, or feed [tail, ...bridge, head] back as one
+ * more stroke and let joinStrokes/smoothSketch weld and re-smooth it.
+ * Empty array when there is nothing to bridge (degenerate input, or the
+ * ends already touch).
+ *
+ * @param {{x,y}[]} points  an open outline (≥ 3 points after dedupe)
+ * @param {Object} [opts]
+ * @param {number} [opts.samples=24]  interior points sampled along the bridge
+ * @returns {{x,y}[]}
+ */
+export function tangentBridge(points, { samples = 24 } = {}) {
+  const pts = dedupe(points ?? []);
+  if (pts.length < 3) return [];
+  const A = pts[pts.length - 1], B = pts[0];
+  const gap = Math.sqrt(sqDist(A, B));
+  if (!(gap > 1e-9)) return [];
+  const reach = gap / 20;
+  // direction of travel AT the tail: from a point ~reach back, toward A
+  let ia = pts.length - 2;
+  while (ia > 0 && sqDist(A, pts[ia]) < reach * reach) ia--;
+  // direction of travel AT the head: from B, toward a point ~reach ahead
+  let ib = 1;
+  while (ib < pts.length - 1 && sqDist(B, pts[ib]) < reach * reach) ib++;
+  const unit = (from, to) => {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const len = Math.hypot(dx, dy);
+    return len > 1e-12 ? { x: dx / len, y: dy / len } : null;
+  };
+  const tA = unit(pts[ia], A), tB = unit(B, pts[ib]);
+  if (!tA || !tB) return [];
+  // Hermite from A to B with m0/m1 along the travel directions, |m| = gap
+  const m0 = { x: tA.x * gap, y: tA.y * gap }, m1 = { x: tB.x * gap, y: tB.y * gap };
+  const n = Math.max(2, samples | 0);
+  const out = [];
+  for (let k = 1; k <= n; k++) {
+    const t = k / (n + 1), t2 = t * t, t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t,
+      h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+    out.push({
+      x: h00 * A.x + h10 * m0.x + h01 * B.x + h11 * m1.x,
+      y: h00 * A.y + h10 * m0.y + h01 * B.y + h11 * m1.y,
+    });
+  }
+  return out;
+}
+
+/**
  * Chain several raw strokes into one polyline by welding endpoints that land
  * within `snap` of each other (a shape drawn as separate pen-down strokes).
  * Greedy nearest-end joining, flipping strokes as needed — the messy part of

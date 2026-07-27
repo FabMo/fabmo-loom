@@ -12,7 +12,7 @@
 // pure kernel. Credit: Jonathan Ward (FabMo SmoothSketch); simplify.js © 2015
 // Vladimir Agafonkin.
 
-import { smoothSketch, joinStrokes } from '../adapters/sketch.js';
+import { smoothSketch, joinStrokes, tangentBridge } from '../adapters/sketch.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,18 +43,41 @@ let smoothed = null;   // last smoothSketch() result
 let cv = null, ctx = null, onAcceptCb = null;
 
 // smoothness slider (0..10) → kernel opts. Higher = simpler + rounder.
-// close:true because cutouts / holes / cookie cutters are closed; a nearly-
-// closed loop welds shut. (Open curves are a later addition.)
+// close:'auto' — ends that land within snapDistance weld shut (cutouts /
+// holes / cookie cutters are closed); a real gap stays visibly OPEN, and
+// the "Close the gap" button bridges it with a tangent curve instead of
+// silently welding a chord across it.
 function opts() {
   const s = +$('drawSmooth').value;
-  return { tolerance: 1 + s * 0.8, iterations: Math.max(0, Math.min(6, 2 + Math.round(s / 2))), close: true };
+  return {
+    tolerance: 1 + s * 0.8,
+    iterations: Math.max(0, Math.min(6, 2 + Math.round(s / 2))),
+    close: 'auto',
+    snapDistance: 15,
+  };
 }
 
 function recompute() {
   const joined = joinStrokes(strokes, 24);
   smoothed = joined.length >= 3 ? smoothSketch(joined, opts()) : null;
   render();
-  $('drawUse').disabled = !(smoothed && smoothed.points.length >= 3);
+  const drawable = smoothed && smoothed.points.length >= 3;
+  // an open outline can't be accepted (what you see is what cuts) — the
+  // loud affordance while open is the close button, not a greyed Accept
+  $('drawUse').disabled = !(drawable && smoothed.closed);
+  $('drawClose').style.display = drawable && !smoothed.closed ? '' : 'none';
+}
+
+// Bridge the gap with a curve tangent to both endpoint segments
+// (adapters/sketch.js tangentBridge), fed back as one more STROKE: the
+// weld and re-smooth treat it like ink, and Undo peels it back off.
+function closeGap() {
+  if (!smoothed || smoothed.closed || smoothed.points.length < 3) return;
+  const P = smoothed.points;
+  const bridge = tangentBridge(P);
+  if (!bridge.length) return;
+  strokes.push([{ ...P[P.length - 1] }, ...bridge, { ...P[0] }]);
+  recompute();
 }
 
 function render() {
@@ -69,14 +92,25 @@ function render() {
     st.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     ctx.stroke();
   }
-  // smoothed outline, bold + tinted fill
+  // smoothed outline, bold — tinted fill only once it's CLOSED, so an open
+  // profile reads as unfinished; the loose ends get dots marking the gap
   if (smoothed && smoothed.points.length > 1) {
     const P = smoothed.points;
     ctx.beginPath();
     P.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-    if (smoothed.closed) ctx.closePath();
-    ctx.fillStyle = 'rgba(59,130,246,.12)'; ctx.fill();
+    if (smoothed.closed) {
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(59,130,246,.12)'; ctx.fill();
+    }
     ctx.lineWidth = 3; ctx.strokeStyle = '#3b82f6'; ctx.stroke();
+    if (!smoothed.closed) {
+      ctx.fillStyle = '#cc2229';
+      for (const p of [P[0], P[P.length - 1]]) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
   }
 }
 
@@ -126,7 +160,7 @@ function syncDrawName() {
 
 /**
  * Open the overlay for a drawing. onAccept(svgText, name, targetId) fires on
- * "Use shape" — targetId is '' for a new shape, or an existing asset id to
+ * "Accept" — targetId is '' for a new shape, or an existing asset id to
  * REPLACE in place. `targets` = [{id,name}] of the drawn shapes that can be
  * replaced; the most recent is preselected so "redraw this tag" is one step.
  *
@@ -156,10 +190,20 @@ export function openDraw({ onAccept, targets = [], wanted = [], select = '' }) {
     sel.value = select || (wanted.length ? '' : (targets.length ? targets[targets.length - 1].id : ''));
     syncDrawName();
     if (!select && wanted.length) $('drawName').value = wanted[0];
+    // AIMED at one known shape (a per-shape Draw/Redraw button, or exactly
+    // one outstanding request): the shape's name goes in the title and the
+    // target/name pickers hide — nothing to choose, just draw and Accept.
+    const aimedName = select
+      ? (targets.find((t) => t.id === select)?.name ?? '')
+      : (wanted.length === 1 ? wanted[0] : '');
+    $('drawTitle').textContent = aimedName ? `Draw “${aimedName}”` : 'Draw a shape';
+    sel.style.display = aimedName ? 'none' : '';
+    $('drawName').style.display = aimedName ? 'none' : '';
   }
   $('drawOverlay').style.display = 'flex';
   sizeCanvas();
   $('drawUse').disabled = true;
+  $('drawClose').style.display = 'none';
 }
 
 /** Wire the overlay's controls once, at boot. */
@@ -172,6 +216,7 @@ export function initDraw() {
   $('drawSmooth').addEventListener('input', recompute);
   $('drawClear').addEventListener('click', () => { strokes = []; current = null; recompute(); });
   $('drawUndo').addEventListener('click', () => { strokes.pop(); recompute(); });
+  $('drawClose').addEventListener('click', closeGap);
   $('drawCancel').addEventListener('click', closeOverlay);
   $('drawTarget').addEventListener('change', syncDrawName);
   $('drawUse').addEventListener('click', () => {

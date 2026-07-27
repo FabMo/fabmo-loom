@@ -2897,7 +2897,7 @@ console.log('--- drawn shape: authored before it is drawn, completed by drawing 
   if (sys.includes('DRAWN SHAPES') && sys.includes('draw {of:') && sys.includes('is NOT a decline')) {
     pass('prompt teaches set_shape draw for hand-drawn outlines');
   } else fail('prompt still lacks the drawn-shape rule');
-  if (sys.includes('Current board') && sys.includes('Record on board')) {
+  if (sys.includes('Current board') && sys.includes('Add to board')) {
     pass('prompt answers sheet nesting/run-tracking with the board tracker instead of declining');
   } else fail('prompt still lacks the current-board rule');
 }
