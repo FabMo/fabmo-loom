@@ -568,6 +568,15 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
       v = v === true || v === 'true' || v === 'yes';
     }
     if (spec.type === 'number') {
+      // template number params also take BARE expressions — models write
+      // posX: "length/2 - inset" as readily as "{length/2 - inset}", and
+      // shape specs already accept the braceless form. Number() (not
+      // parseFloat) so "2 + length" doesn't silently truncate to 2.
+      if (spec.template && typeof v === 'string' && v.trim() && Number.isNaN(Number(v))) {
+        const ex = expandTemplate(`{${v}}`, vars);
+        if (ex.error) { errors.push(`op "${opId}": param ${key}: ${ex.error}`); continue; }
+        v = ex.value;
+      }
       v = typeof v === 'number' ? v : parseFloat(v);
       if (isNaN(v)) { errors.push(`op "${opId}": param ${key} is not a number`); continue; }
       if (spec.min !== undefined) v = Math.max(spec.min, v);

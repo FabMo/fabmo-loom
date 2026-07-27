@@ -3,8 +3,14 @@
 //
 // Usage: node live-retest.mjs hex-trivet chess-board cribbage
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { PROMPTS, FAKE_SVG } from './prompts.mjs';
+
+// prompt ids resolve from the pilot set first, then any nightly batch
+// (runs/<day>-prompts.json) — nightly finds are retestable by id too
+const RUNS = new URL('./runs/', import.meta.url).pathname;
+const NIGHTLY = readdirSync(RUNS).filter(f => f.endsWith('-prompts.json'))
+  .flatMap(f => JSON.parse(readFileSync(RUNS + f, 'utf8')));
 
 const LOOM = new URL('../..', import.meta.url).pathname;
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
@@ -32,8 +38,8 @@ const quiet = (fn) => {
 
 const ids = process.argv.slice(2);
 for (const id of ids) {
-  const p = PROMPTS.find(x => x.id === id);
-  if (!p) { console.log(`${id}: no such prompt`); continue; }
+  const p = PROMPTS.find(x => x.id === id) ?? NIGHTLY.find(x => x.id === id);
+  if (!p) { console.log(`${id}: no such prompt (pilot or nightly)`); continue; }
   const recipe = structuredClone(EMPTY_RECIPE);
   if (p.asset === 'svg') recipe.assets.push({ id: 'logo.svg', name: 'logo.svg', kind: 'svg', data: FAKE_SVG });
   const req = buildParseRequest(recipe, p.prompt);

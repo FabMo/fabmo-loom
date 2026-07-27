@@ -3088,5 +3088,86 @@ console.log('--- truncation guard: the parse request budget and the prompt teach
   } else fail('prompt lacks the pattern rule');
 }
 
+// ---------------- positioned pockets: the jack-o-lantern story ----------------
+// The probe's top failure class: the model kept inventing posX/posY on
+// pocket_shape (12 hits) and the whole op was skipped as an unknown
+// param. Now they're real: absolute centers for multi-pocket faces.
+
+console.log('--- positioned pockets (posX/posY): multi-pocket face ---');
+{
+  // the action path is where the failure lived — posX must survive validation
+  const res = quiet(() => applyActions(structuredClone(EMPTY_RECIPE), {
+    summary: '', declined: [], actions: [
+      { kind: 'add_operation', operation: { id: 'eyeL', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.25, posX: -1, posY: 0.75 } } },
+    ],
+  }));
+  if (res.applied.length === 1 && !res.skipped.length) pass('posX/posY accepted by the action validator (was: op skipped as unknown param)');
+  else fail(`posX still rejected: applied=${JSON.stringify(res.applied)} skipped=${JSON.stringify(res.skipped)}`);
+
+  // eyes at absolute centers, mouth with only posY (X defaults to content center)
+  const face = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Jack-o-lantern face',
+    pipeline: [
+      { id: 'eyeL', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.25, posX: -1, posY: 0.75 } },
+      { id: 'eyeR', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.25, posX: 1, posY: 0.75 } },
+      { id: 'mouth', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 2.5, height: 0.6, cornerRadius: 0.2, depth: 0.25, posY: -1 } },
+      { id: 'cut', strategy: 'tag_cutout', params: { buffer: 0.5 } },
+    ],
+  };
+  const r = run(face);
+  if (r.ok && r.sbp) {
+    const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
+    const p = r.preview.placement;
+    const eyeL = surfaceAt(sim, -1 + p.x, 0.75 + p.y);
+    const eyeR = surfaceAt(sim, 1 + p.x, 0.75 + p.y);
+    const mouth = surfaceAt(sim, p.x, -1 + p.y);
+    const brow = surfaceAt(sim, p.x, 0.75 + p.y);   // between the eyes: untouched
+    if (Math.abs(eyeL + 0.25) < 0.005 && Math.abs(eyeR + 0.25) < 0.005 && Math.abs(mouth + 0.25) < 0.005 && brow === 0) {
+      pass(`face measured: eyes ${eyeL.toFixed(3)}/${eyeR.toFixed(3)} at ±1, mouth ${mouth.toFixed(3)} at -1, brow untouched`);
+    } else fail(`pockets landed wrong: eyeL=${eyeL} eyeR=${eyeR} mouth=${mouth} brow=${brow}`);
+  } else fail(`positioned face rejected: ${r.errors?.join(' | ')}`);
+
+  // {arithmetic} positions ride the controls (template params)
+  const spaced = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Spaced wells',
+    controls: [{ id: 'sp', type: 'number', label: 'Spacing', default: 1.5, min: 1, max: 3, step: 0.25 }],
+    pipeline: [
+      { id: 'wellL', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.2, posX: '{-sp}' } },
+      { id: 'wellR', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.2, posX: '{sp}' } },
+    ],
+  };
+  const s2 = run(spaced, { sp: 2 });
+  if (s2.ok) {
+    const sim = simulateJob(s2.preview.built, s2.preview.placement, s2.preview.stock);
+    const p = s2.preview.placement;
+    const at2 = surfaceAt(sim, 2 + p.x, p.y);
+    const mid = surfaceAt(sim, 1 + p.x, p.y);   // between the wells: clear at sp=2
+    if (Math.abs(at2 + 0.2) < 0.005 && mid === 0) pass(`parametric posX follows the slider: well at ±2.0 (sp=2), midfield clear`);
+    else fail(`template posX wrong: at2=${at2} mid=${mid}`);
+  } else fail(`parametric positions rejected: ${s2.errors?.join(' | ')}`);
+
+  // a referenced shape MOVES as a whole — silent no-op would be a
+  // confidently-wrong layout, the exact failure the probe hunts
+  const moved = {
+    ...structuredClone(EMPTY_RECIPE),
+    name: 'Moved star well',
+    shapes: [{ id: 'sq', path: 'M -0.5 -0.5 L 0.5 -0.5 L 0.5 0.5 L -0.5 0.5 Z' }],
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'sq', depth: 0.15, toolDiameter: 0.125, posX: 2, posY: 1 } },
+    ],
+  };
+  const m = run(moved);
+  if (m.ok) {
+    const sim = simulateJob(m.preview.built, m.preview.placement, m.preview.stock);
+    const p = m.preview.placement;
+    const there = surfaceAt(sim, 2 + p.x, 1 + p.y);
+    const home = surfaceAt(sim, p.x, p.y);   // authored origin: untouched
+    if (Math.abs(there + 0.15) < 0.005 && home === 0) pass(`referenced shape moved whole: pocket at (2,1), authored origin clear`);
+    else fail(`reference move wrong: there=${there} home=${home}`);
+  } else fail(`moved reference rejected: ${m.errors?.join(' | ')}`);
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -16,7 +16,8 @@ Conversion decisions stay human — this file ranks, it does not decide
 
 | class | evidence (synth/funnel) | examples | status |
 |---|---|---|---|
-| positioned-pockets — model invents posX/posY on pocket_shape | 12 hits / 0 | catan-insert ×2 runs | **open — top candidate** |
+| ~~positioned-pockets — model invents posX/posY on pocket_shape~~ | 15 / 0 | catan-insert ×2 runs, pumpkin-porch-sign, solar-system-map | **SHIPPED 2026-07-27** — posX/posY (absolute center, template) + template dims on pocket_shape; bare expressions now resolve on template number params (runtime). Retest: catan-insert, pumpkin-porch-sign, solar-system-map all verify → SBP |
+| counterbores — pocket + through-hole at the same spot trips the footprint-overlap gate (found by the posX conversion: cbores now LAND, then verify refuses) | 2 / 0 | drill-press-fence (recorded + live retest) | open — wants a scoped allowance like edgeTreatment's (bore fully inside an earlier shallower pocket), NOT a gate loosening |
 | curved-text — text along an arc/path | 1 / 0 | curved-text-arc | open |
 | open-path-engraving — score/V-line along an open curve | 2 / 0 | ruler-ticks, fret-slots | open |
 | batch-input — mail-merge a list into per-part exports | 1 / 0 | wedding-batch-list | open |
@@ -45,7 +46,8 @@ non-flat-stock objects; textile looms.
 | class | evidence | examples | status |
 |---|---|---|---|
 | content-vs-fixed-disc — fixed-diameter cutout smaller than authored content | 2 | clock-face, hex-trivet (post-pattern) | open |
-| overlapping-pockets — adjacent pockets should be difference-derived | 1 | make-it-fit | open |
+| overlapping-pockets — adjacent pockets should be difference-derived | 2 | make-it-fit, catan-hex-insert (slots overlap hexes — visible now that posX lands) | open |
+| choice-option-shapes — a shape dropdown authored with an option whose shape was never defined | 1 | christmas-ornament-set (live retest) | open |
 | texture-under-kerf — texture_field extends under a later cutout | 1 | herringbone-bg | open |
 | bore-vs-pocket — holes >3× bit authored as bore_hole | 1 | serving-tray | open |
 
@@ -75,3 +77,4 @@ prompts probed, outcomes, new classes, evidence increments, cost.)
 - 2026-07-26 — pilot: 50 synthetic, $5.75; 18F/11P/12D/8VF/1T; corpus seeded (49 rows); pattern + robustness shipped v0.67; funnel baseline pulled (67 loom entries, 14 with declines — beveled-panels, drawer-doors, conditional-panels classes opened from real stream)
 - 2026-07-26 — nightly: no probes; funnel +67 (14 declined); $0.29; dry run — no live probes
 - 2026-07-26 — nightly: 14 FULFILLED_UNVERIFIED, 5 FULFILLED, 1 DECLINED, 5 PARTIAL; 2 prior-miss (catan-hex-insert, hose-guide-stake); funnel +67 (14 declined); $3.45; triage unparseable ⚠ SEE ATTENTION FILE
+- 2026-07-27 — nightly: 5 FULFILLED_UNVERIFIED, 6 PARTIAL, 11 FULFILLED, 3 DECLINED; 7 prior-miss (menorah-candle-holder, retail-ring-display, periodic-table-tiles, pegboard-tool-labels, prop-sword-blade, lake-tahoe-topo, tahoe-depth-map); evidence: positioned-pockets +3, drawer-doors +1, qr-codes +1, beveled-panels +1, trig-derived-geometry +1, two-sided +1, open-path-engraving +2, curved-text +1, tiling +1; OVERCLAIMS: tahoe-depth-map, prop-sword-blade, geometry-protractor, christmas-ornament-set; funnel +1 (0 declined); $3.70; 25 rows: positioned-pockets keeps recurring (posX rejected on pocket_shape across 3 rows), one new trig-derived-geometry gap, and four overclaims where confident summaries outran empty/partial pipelines including a repeat bathymetry-claim. ⚠ SEE ATTENTION FILE

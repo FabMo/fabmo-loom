@@ -623,22 +623,31 @@ export const CATALOG = {
   },
 
   pocket_shape: {
-    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. A referenced shape with SEVERAL pieces (a signage glyph\'s separate figures, a multi-part logo) pockets EVERY piece; pieces too small for the bit are skipped with a warning. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation. Optional REST cleanup with a smaller bit for tight corners.',
+    doc: 'Pocket a SHAPE into the surface — a recess at constant depth (coaster wells, trays, inlay recesses). This is the verb for "a 2 inch round pocket"; pocket_text is only for letterforms. shape "circle" and "rectangle" are built in; shape "custom" pockets ANY outline you author as an SVG path in the path param (see shape_cutout for how to write one) — interior holes in the path survive as uncut islands. A referenced shape with SEVERAL pieces (a signage glyph\'s separate figures, a multi-part logo) pockets EVERY piece; pieces too small for the bit are skipped with a warning. This is also how EDGE PROFILES are cut: a RABBET/ledge/step along an edge of a later cutout is a custom pocket whose region is a band hugging that edge, overrunning it by ~0.05" so no sliver wall remains (set edgeTreatment true, and put this op BEFORE the cutout). With parametric {expressions} the band can share the cutout\'s controls — a rabbet on an arch\'s inside edge is the band from {r-t-0.05} to {r-t+rabbetW}, and it follows the radius/thickness sliders automatically. Centers itself on the content machined so far, or stands alone as the first operation — or give posX/posY for an ABSOLUTE center: several positioned pocket_shape ops lay out a multi-pocket face (a jack-o-lantern\'s eyes and mouth, a row of planet wells, an organizer tray\'s compartments), all BEFORE the cutout that frees the part. Optional REST cleanup with a smaller bit for tight corners.',
     params: {
       shape: { type: 'string', default: 'circle', doc: '"circle", "rectangle", "custom" (author the outline in the path param), or the id of a shapes-section entry (anchored in the shared frame)' },
       path: { type: 'string', default: '', template: true, doc: 'custom only: the outline as one SVG path "d" string — same authoring rules as shape_cutout.path, {arithmetic} of control ids included (set width and height 0 for parametric paths)' },
-      diameter: { type: 'number', default: 2, doc: 'circle only: pocket diameter, inches', bindable: true },
-      width: { type: 'number', default: 2, doc: 'rectangle/custom: pocket width, inches', bindable: true },
-      height: { type: 'number', default: 0, doc: 'rectangle/custom: pocket height, inches; 0 = default (rectangle 1.5"; custom scales uniformly from width, keeping the shape\'s aspect)', bindable: true },
+      diameter: { type: 'number', default: 2, template: true, doc: 'circle only: pocket diameter, inches; {arithmetic} of control ids allowed', bindable: true },
+      width: { type: 'number', default: 2, template: true, doc: 'rectangle/custom: pocket width, inches; {arithmetic} allowed', bindable: true },
+      height: { type: 'number', default: 0, template: true, doc: 'rectangle/custom: pocket height, inches, {arithmetic} allowed; 0 = default (rectangle 1.5"; custom scales uniformly from width, keeping the shape\'s aspect)', bindable: true },
       cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches' },
-      depth: { type: 'number', default: 0.125, doc: 'pocket floor depth, inches', bindable: true },
+      depth: { type: 'number', default: 0.125, template: true, doc: 'pocket floor depth, inches; {arithmetic} allowed', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
       restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit that cleans rectangle corners' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
       edgeTreatment: { type: 'boolean', default: false, doc: 'true when this pocket is a RABBET/LEDGE along a later cutout\'s edge and deliberately overruns that edge a little — permits overlapping the cut-free kerf (otherwise cross-operation overlap is an error)' },
+      posX: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE X of the pocket\'s center in the working frame, inches, {arithmetic} of control ids allowed; 0/absent = center on the content machined so far. THE way to lay out several pockets on one face: one pocket_shape op per pocket, each at its own posX/posY. A referenced shape moves as a whole so its pieces\' collective center lands here' },
+      posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the pocket\'s center, inches, {arithmetic} allowed; 0/absent = center on content. Never position an edgeTreatment band — it must hug its cutout\'s edge by construction' },
     },
     run(p, ctx) {
       const c = contentCenter(ctx);
+      // posX/posY override the content-center (TEXT_PLACE_PARAMS
+      // convention: 0/absent = leave to the default placement)
+      const px = Number.isFinite(p.posX) && p.posX !== 0 ? p.posX : null;
+      const py = Number.isFinite(p.posY) && p.posY !== 0 ? p.posY : null;
+      if (px !== null) c.x = px;
+      if (py !== null) c.y = py;
+      let anchored = false;   // anchored geometry ignores c — repositioned below
       let regions;   // one or more pieces — every piece gets pocketed
       let shapeRoot = null;   // lineage: the base shape a reference derives from
       const shapeWarnings = [];
@@ -651,6 +660,7 @@ export const CATALOG = {
         const cs = customShapeRegion(p);
         if (cs.error) return cs;
         shapeWarnings.push(...cs.warnings);
+        anchored = cs.anchored;
         const shift = cs.anchored ? (ring => ring) : (ring => ring.map(q => ({ x: q.x + c.x, y: q.y + c.y })));
         regions = [{ outer: shift(cs.region.outer), holes: cs.region.holes.map(shift) }];
       } else if (ctx.shapes?.[p.shape]) {
@@ -662,9 +672,26 @@ export const CATALOG = {
         const cs = namedShapeRegionsAll(ctx, p.shape, 'a pocket');
         if (cs.error) return cs;
         shapeRoot = ctx.shapes[p.shape].root;
+        anchored = true;
         regions = cs.regions;
       } else {
         return { error: `pocket_shape: unknown shape "${p.shape}" (circle, rectangle, custom, or a defined shape id)` };
+      }
+      const bboxOf = (regs) => regs.flatMap(r => r.outer).reduce((a, q) => ({
+        minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+        maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+      }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      if (anchored && (px !== null || py !== null)) {
+        // anchored geometry carries its own coordinates — an explicit
+        // posX/posY moves the whole piece set so its center lands there
+        // (a silent no-op here would be a confidently-wrong layout)
+        const ab = bboxOf(regions);
+        const dx = px !== null ? px - (ab.minX + ab.maxX) / 2 : 0;
+        const dy = py !== null ? py - (ab.minY + ab.maxY) / 2 : 0;
+        if (dx || dy) {
+          const mv = (ring) => ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
+          regions = regions.map(r => ({ outer: mv(r.outer), holes: r.holes.map(mv) }));
+        }
       }
       noteContent(ctx, regions.map(r => r.outer));
       const params = {
@@ -683,10 +710,7 @@ export const CATALOG = {
           chain.push({ d: p.restDiameter, prev: p.toolDiameter });
         }
       }
-      const bb = regions.flatMap(r => r.outer).reduce((a, q) => ({
-        minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
-        maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
-      }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+      const bb = bboxOf(regions);
       const ops = [];
       let cutPieces = 0;
       regions.forEach((region, ri) => {
