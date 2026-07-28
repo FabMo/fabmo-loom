@@ -177,8 +177,26 @@ export async function submitJob(host, { content, filename, name, description }, 
     throw new Error('FabMo refused the job file: ' + (fin?.message ?? `HTTP ${fileRes.status}`));
   }
   const job = fin.data?.data?.jobs?.[0];
-  if (!job?._id) throw new Error('FabMo accepted the upload but returned no job record');
-  return job;
+  if (job?._id) return job;
+
+  // Shipping engines lose the job records here: routes/jobs.js collects
+  // them with async.eachOf, whose completion callback gets only (err) —
+  // so `jobs` serializes away and the reply is data:{status:'complete',
+  // data:{}} even though the job WAS created and queued. Recover the
+  // record from the queue: our job is the newest pending entry with the
+  // name we just submitted.
+  const wanted = name ?? filename;
+  let queue = null;
+  try {
+    queue = await jobQueue(host, { timeoutMs, fetchFn });
+  } catch {
+    throw new Error('FabMo accepted the upload but the job record could not be confirmed — check the FabMo dashboard queue');
+  }
+  const mine = queue.pending
+    .filter((j) => j?._id && (j.name === wanted || j.filename === filename))
+    .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0) || (b._id > a._id ? 1 : -1));
+  if (!mine.length) throw new Error('FabMo accepted the upload but the job did not appear in the queue');
+  return mine[0];
 }
 
 // Start the next pending job. The engine offers no "run job N" without a

@@ -64,6 +64,9 @@ function makeStub() {
     ranJobs: [],
     preflightViolations: [],
     lastMetaContentType: null,
+    echoJobRecords: false, // real engines DON'T echo job records (see below)
+    dropJobs: false,       // simulate upload accepted but job never queued
+    queueGets: 0,
   };
   const server = http.createServer((req, res) => {
     // the engine's crossOrigin middleware — exactly these two headers, no OPTIONS route
@@ -92,6 +95,7 @@ function makeStub() {
         return json({ status: 'success', data: { engine: { name: 'Stub Desktop MAX' }, driver: {} } });
       }
       if (req.method === 'GET' && req.url.startsWith('/jobs/queue')) {
+        state.queueGets++;
         return json({ status: 'success', data: { jobs: { pending: state.queue, running: state.running } } });
       }
       if (req.method === 'POST' && req.url.startsWith('/jobs/queue/run')) {
@@ -108,10 +112,15 @@ function makeStub() {
           const up = state.uploads[fields.key];
           if (!up || !fields.file) return json({ status: 'error', message: 'Invalid upload key: ' + fields.key });
           const meta = up.files[Number(fields.index)];
-          const job = { _id: state.nextId++, name: meta.name, filename: fields.file.filename, description: meta.description ?? '', content: fields.file.content };
-          state.queue.push(job);
+          const job = { _id: state.nextId++, name: meta.name, filename: fields.file.filename, description: meta.description ?? '', created_at: state.nextId, content: fields.file.content };
+          if (!state.dropJobs) state.queue.push(job);
           delete state.uploads[fields.key];
-          return json({ status: 'success', data: { status: 'complete', data: { jobs: [job] } } });
+          // Real engines LOSE the job records here: routes/jobs.js gathers
+          // them with async.eachOf, whose final callback receives only
+          // (err) — `jobs` is undefined and serializes away, so the wire
+          // reply is data:{status:'complete',data:{}} even though the job
+          // was queued. echoJobRecords=true models a future fixed engine.
+          return json({ status: 'success', data: { status: 'complete', data: state.echoJobRecords ? { jobs: [job] } : {} } });
         }
         // metadata leg — must arrive urlencoded, like the browser sends it
         state.lastMetaContentType = ct;
@@ -171,11 +180,14 @@ const mb = metadataBody({ filename: 'sign.sbp', name: 'Shop sign', description: 
 check('bracket keys', mb.get('files[0][filename]'), 'sign.sbp');
 check('name defaults to filename when omitted', metadataBody({ filename: 'a.sbp' }).get('files[0][name]'), 'a.sbp');
 
-console.log('submit queues a job (two legs, no preflight)');
+console.log('submit queues a job (two legs, no preflight; engine echoes no record — recovered from queue)');
 const SBP = "'Loom test\nC7,1\nMZ,0.5\nM5,1,2,-0.1,,\n";
+const getsBefore = state.queueGets;
 const job = await submitJob(HOST, { content: SBP, filename: 'sign.sbp', name: 'Shop sign', description: 'verified by Loom' });
 check('job created with id', typeof job._id, 'number');
 check('job name carried', job.name, 'Shop sign');
+check('record recovered via queue readback', state.queueGets, getsBefore + 1);
+check('recovered the actual queued record', job._id, state.queue[0]?._id);
 check('file content survived byte-for-byte', state.queue[0]?.content, SBP);
 check('metadata leg was urlencoded', /^application\/x-www-form-urlencoded/.test(state.lastMetaContentType), true);
 check('no preflight-triggering requests so far', state.preflightViolations.join('; '), '');
@@ -184,6 +196,29 @@ console.log('run next');
 const ran = await runNextJob(HOST);
 check('ran the queued job', ran?._id, job._id);
 check('queue drained', state.queue.length, 0);
+
+console.log('recovery picks OUR job, not an older one with the same name');
+await submitJob(HOST, { content: SBP, filename: 'sign.sbp', name: 'Shop sign' });
+const dupe = await submitJob(HOST, { content: SBP, filename: 'sign.sbp', name: 'Shop sign' });
+check('two same-name jobs pending', state.queue.length, 2);
+check('newest matching pending job wins', dupe._id, state.queue[1]?._id);
+state.queue.length = 0;
+
+console.log('fixed-engine reply (job record echoed) skips the readback');
+state.echoJobRecords = true;
+const getsBefore2 = state.queueGets;
+const echoed = await submitJob(HOST, { content: SBP, filename: 'echo.sbp', name: 'Echoed' });
+check('echoed record used directly', echoed.name, 'Echoed');
+check('no queue readback on the direct path', state.queueGets, getsBefore2);
+state.echoJobRecords = false;
+state.queue.length = 0;
+
+console.log('upload accepted but job never queued — honest failure');
+state.dropJobs = true;
+let dropErr = null;
+await submitJob(HOST, { content: SBP, filename: 'lost.sbp', name: 'Lost' }).catch((e) => { dropErr = e.message; });
+check('missing job reported with reason', /did not appear in the queue/.test(dropErr ?? ''), true);
+state.dropJobs = false;
 
 console.log('bad upload key refused');
 let keyErr = null;
