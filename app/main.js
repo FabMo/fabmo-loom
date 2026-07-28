@@ -1656,14 +1656,67 @@ function fabmoJobFile() {
   };
 }
 
+// With a Current board active, EVERY path to the machine goes through it:
+// nest into the board's free space, re-weave with the sheet as the stock,
+// and stamp the footprint only once the file is actually delivered —
+// otherwise each successive send would recut the same origin corner.
+// Resolves { file, at, commit } or { error } (already user-worded).
+async function weavePositionedOnBoard() {
+  const st = result?.preview?.stock;
+  if (!st) return { error: 'Nothing woven yet.' };
+  const rec = recordCut(sheet, st.w, st.h, recipe.name, { allowRotate: false });
+  if (rec.error) return { error: rec.error };
+  const p = rec.placement;
+  const placed = (await weave({
+    recipe, values: controlValues, terrains: lastTerrains, shop: shopForRun(),
+    placement: { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }, wantSim: false,
+  })).result;
+  if (!placed.ok) return { error: 'Could not position this cut on the board — ' + (placed.errors[0] ?? 'the verifier refused it') };
+  const at = `${p.x.toFixed(1)}", ${p.y.toFixed(1)}"`;
+  return {
+    at,
+    file: {
+      content: placed.sbp,
+      filename: `${slug(recipe.name)}-on-sheet.sbp`,
+      name: `${recipe.name} @ ${at}`,
+      description: 'Positioned on the current board — woven and verified by FabMo Loom',
+    },
+    commit() {
+      sheet = rec.sheet;
+      persistSheet();
+      updateSheetChip(st);
+    },
+  };
+}
+
+const boardStatus = () => `${sheetFreePct(sheet)}% of the board free, ${sheet.occupied.length} part${sheet.occupied.length > 1 ? 's' : ''} cut`;
+const noBoardHint = ' (No board set up, so it cuts at the machine origin — start a Current board in ⚙ and each send lands in fresh material.)';
+
 $('sendFabmo').addEventListener('click', async () => {
   const sel = fabmoSelected();
   if (!sel || !result?.ok) return;
+  const label = escapeHtml(fabmoLabel(sel));
+  if (!sheetActive(sheet)) {
+    try {
+      const job = await submitJob(sel.host, fabmoJobFile());
+      addTurn(`Sent "${escapeHtml(recipe.name)}" to ${label} — job #${job._id} is queued on the tool; start it there when the deck is clear.${noBoardHint}`);
+    } catch (e) {
+      addTurn(`Could not send to ${label}: ${escapeHtml(e.message)}`, true);
+    }
+    return;
+  }
+  showWeaveOverlay();
+  await nextPaint();
   try {
-    const job = await submitJob(sel.host, fabmoJobFile());
-    addTurn(`Sent "${escapeHtml(recipe.name)}" to ${escapeHtml(fabmoLabel(sel))} — job #${job._id} is queued on the tool; start it there when the deck is clear.`);
+    const w = await weavePositionedOnBoard();
+    if (w.error) { addTurn(escapeHtml(w.error), true); return; }
+    const job = await submitJob(sel.host, w.file);
+    w.commit();
+    addTurn(`Sent "${escapeHtml(recipe.name)}" to ${label} placed at ${w.at} on the board — job #${job._id} is queued; start it there when the deck is clear. ${boardStatus()}.`);
   } catch (e) {
-    addTurn(`Could not send to ${escapeHtml(fabmoLabel(sel))}: ${escapeHtml(e.message)}`, true);
+    addTurn(`Could not send to ${label}: ${escapeHtml(e.message)}`, true);
+  } finally {
+    hideWeaveOverlay();
   }
 });
 
@@ -1674,13 +1727,32 @@ $('sendRunFabmo').addEventListener('click', async () => {
   // Loom verified the file; the physical setup it cannot see. Make the
   // person say so before remote motion starts.
   if (!confirm(`Start cutting on ${label} right now?\n\nBit loaded, Z zeroed, material fixtured, deck clear.`)) return;
+  const esc = escapeHtml(label);
+  if (!sheetActive(sheet)) {
+    try {
+      const r = await submitAndRun(sel.host, fabmoJobFile());
+      addTurn(r.ran
+        ? `Job #${r.job._id} is cutting on ${esc}.${noBoardHint}`
+        : `Job #${r.job._id} queued on ${esc}, not started — ${escapeHtml(r.reason)}.`, !r.ran);
+    } catch (e) {
+      addTurn(`Could not start on ${esc}: ${escapeHtml(e.message)}`, true);
+    }
+    return;
+  }
+  showWeaveOverlay();
+  await nextPaint();
   try {
-    const r = await submitAndRun(sel.host, fabmoJobFile());
+    const w = await weavePositionedOnBoard();
+    if (w.error) { addTurn(escapeHtml(w.error), true); return; }
+    const r = await submitAndRun(sel.host, w.file);
+    w.commit();  // queued on the tool = it will cut at that spot either way
     addTurn(r.ran
-      ? `Job #${r.job._id} is cutting on ${escapeHtml(label)}.`
-      : `Job #${r.job._id} queued on ${escapeHtml(label)}, not started — ${escapeHtml(r.reason)}.`, !r.ran);
+      ? `Job #${r.job._id} is cutting on ${esc} at ${w.at} on the board — ${boardStatus()}.`
+      : `Job #${r.job._id} queued on ${esc} at ${w.at}, not started — ${escapeHtml(r.reason)}. ${boardStatus()}.`, !r.ran);
   } catch (e) {
-    addTurn(`Could not start on ${escapeHtml(label)}: ${escapeHtml(e.message)}`, true);
+    addTurn(`Could not start on ${esc}: ${escapeHtml(e.message)}`, true);
+  } finally {
+    hideWeaveOverlay();
   }
 });
 
@@ -1764,51 +1836,34 @@ $('rackAdd').addEventListener('click', () => {
 });
 
 $('sheetRecord').addEventListener('click', async () => {
-  const st = result?.preview?.stock;
-  if (!result?.ok || !st) return;
-  // the positioned re-weave below blocks the thread like any weave — show
-  // the overlay and let a frame paint before starting
+  if (!result?.ok || !result?.preview?.stock) return;
+  // the positioned re-weave blocks the thread like any weave — show the
+  // overlay and let a frame paint before starting
   showWeaveOverlay();
   await nextPaint();
   try {
-  // nest axis-aligned (rotation-baking is a follow-up), then re-weave with the
-  // SHEET as the stock and the design offset to that spot — the exported cut
-  // lands in the free space instead of at a lone board origin.
-  const rec = recordCut(sheet, st.w, st.h, recipe.name, { allowRotate: false });
-  if (rec.error) { addTurn(escapeHtml(rec.error), true); return; }
-  const p = rec.placement;
-  const placed = (await weave({
-    recipe, values: controlValues, terrains: lastTerrains, shop: shopForRun(),
-    placement: { x: p.x, y: p.y, sheetW: sheet.w, sheetH: sheet.h }, wantSim: false,
-  })).result;
-  if (!placed.ok) { addTurn('Could not position this cut on the board — ' + escapeHtml(placed.errors[0] ?? 'the verifier refused it'), true); return; }
+  // nest axis-aligned (rotation-baking is a follow-up), then re-weave with
+  // the SHEET as the stock — the cut lands in free space, not at origin.
+  const w = await weavePositionedOnBoard();
+  if (w.error) { addTurn(escapeHtml(w.error), true); return; }
   // with a FabMo connected the positioned cut goes straight to the tool's
   // queue (the visitor flow: each badge lands in its own spot on the same
   // fixtured board); with none — or if the send fails — it downloads.
-  const at = `${p.x.toFixed(1)}", ${p.y.toFixed(1)}"`;
   let delivered = 'downloaded the positioned cut (.sbp)';
   const sel = fabmoSelected();
   let sent = false;
   if (sel) {
     try {
-      const job = await submitJob(sel.host, {
-        content: placed.sbp,
-        filename: `${slug(recipe.name)}-on-sheet.sbp`,
-        name: `${recipe.name} @ ${at}`,
-        description: 'Positioned on the current board — woven and verified by FabMo Loom',
-      });
+      const job = await submitJob(sel.host, w.file);
       delivered = `queued job #${job._id} on ${escapeHtml(fabmoLabel(sel))} — start it there`;
       sent = true;
     } catch (e) {
       addTurn(`Could not send to ${escapeHtml(fabmoLabel(sel))} (${escapeHtml(e.message)}) — downloading instead.`, true);
     }
   }
-  if (!sent) download(`${slug(recipe.name)}-on-sheet.sbp`, placed.sbp);
-  sheet = rec.sheet;
-  persistSheet();
-  updateSheetChip(st);
-  const n = sheet.occupied.length;
-  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${at} on the board and ${delivered} — ${sheetFreePct(sheet)}% free, ${n} part${n > 1 ? 's' : ''} cut.`);
+  if (!sent) download(w.file.filename, w.file.content);
+  w.commit();
+  addTurn(`Placed "${escapeHtml(recipe.name)}" at ${w.at} on the board and ${delivered} — ${boardStatus()}.`);
   } finally {
     hideWeaveOverlay();
   }
