@@ -443,8 +443,8 @@ function placeTextBlock(ctx, { regions, bbox }, p) {
 const TEXT_PLACE_PARAMS = {
   place: { type: 'string', default: 'center', doc: 'where the text sits RELATIVE to the content machined before it: "below" = a gap under it, "above" = a gap over it, "center" (default) = centered ON it (a monogram inside a pocket). For a stacked SIGN, set "below" on every element after the top one — no coordinates needed.' },
   gap: { type: 'number', default: 0.35, doc: 'spacing to the neighbouring element when place is "below"/"above", inches' },
-  posX: { type: 'number', default: 0, doc: 'ABSOLUTE X of the block\'s center, inches (overrides place\'s X); 0/absent = leave to place' },
-  posY: { type: 'number', default: 0, doc: 'ABSOLUTE Y of the block\'s center, inches (overrides place); 0/absent = leave to place' },
+  posX: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE X of the block\'s center, inches, {arithmetic} of control ids allowed (overrides place\'s X); 0/absent = leave to place' },
+  posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the block\'s center, inches, {arithmetic} allowed (overrides place); 0/absent = leave to place' },
 };
 
 // One text param spec shared by the text entries. Blank text SKIPS the
