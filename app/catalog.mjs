@@ -19,6 +19,7 @@
 // internal placements — translation of moves/targets — before returning).
 
 import { textToContours } from '../examples/engraver/text-to-regions.mjs';
+import { LINE_FONTS, DEFAULT_LINE_FONT, lineFontById, textToStrokes } from './stroke-fonts.mjs';
 import { computeMedialAxis } from '../vendor/v_engraver/medial-axis.js';
 import { pointInPolygon, distanceToBoundary } from '../vendor/v_engraver/polygon-utils.js';
 import { generateVEngraveToolpath, generatePocketPasses } from '../vendor/v_engraver/toolpath-gen.js';
@@ -97,7 +98,7 @@ function expandRing(ring, delta) {
   return biggest.map(q => ({ x: q.X / CLIP_SCALE_OFF, y: q.Y / CLIP_SCALE_OFF }));
 }
 
-function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
+export function roundedRectRing(x0, y0, x1, y1, r, seg = 10) {
   r = Math.max(0, Math.min(r, (x1 - x0) / 2, (y1 - y0) / 2));
   const ring = [];
   const corner = (cx, cy, a0) => {
@@ -348,8 +349,23 @@ function autoToolChain(regions, depth) {
   const pct = f => (f * 100).toFixed(1);
   const cov = chain.map(i => (slot ? curve[i].slotFrac : curve[i].frac));
   const note = `auto tool: ${seq.map(s => formatDiameter(s.d)).join(' + ')} — coverage ${cov.map(pct).join('% → ')}%${slot ? ' (slot-fit centerline rescue)' : ''}`;
-  return { chain: seq, note };
+  // the full curve rides along for the why-these-choices panel: every
+  // drawer bit's coverage, picked or not, is the evidence behind the knee
+  const fullCurve = curve.map(e => ({
+    label: formatDiameter(e.diameter),
+    pct: e.excluded ? null : +pct(slot ? e.slotFrac : e.frac),
+    excluded: e.excluded,
+    picked: seq.some(s => s.d === e.diameter),
+  }));
+  return { chain: seq, note, curve: fullCurve };
 }
+
+// why-strings for the why-these-choices panel: how a pocket's bit was
+// chosen (knee curve vs recipe param) and what a rest pass is for
+const pickedToolWhy = (auto) => auto.note;
+const paramToolWhy = (d) => `${formatDiameter(d)} endmill set by the recipe (toolDiameter)`;
+const restWhy = (d, prev) =>
+  `rest pass: the ${formatDiameter(d)} bit re-cuts only the corners the ${formatDiameter(prev)} bulk bit could not reach — a toolchange bought just for the corner detail`;
 
 // Edge-break sub-op for the cutout entries: a 90° V-bit rides the cutout
 // ring (CCW = material to the LEFT of travel = the part's top rim) cutting
@@ -421,7 +437,7 @@ function textGeometry(ctx, text, letterHeight, fontId) {
 // vertical stack the model expects (glyph, then text below, then braille
 // below). posX/posY remain an ABSOLUTE-center override for precise work.
 // Builds fresh arrays: centeredText's result is cached, never mutated.
-function placeTextBlock(ctx, { regions, bbox }, p) {
+function placeDelta(ctx, bbox, p) {
   const bc = { x: (bbox.minX + bbox.maxX) / 2, y: (bbox.minY + bbox.maxY) / 2 };
   const half = (bbox.maxY - bbox.minY) / 2;
   const cb = ctx.contentBBox;
@@ -430,7 +446,11 @@ function placeTextBlock(ctx, { regions, bbox }, p) {
   else if (p.place === 'above' && cb) ty = cb.maxY + p.gap + half;
   if (Number.isFinite(p.posX) && p.posX !== 0) tx = p.posX;
   if (Number.isFinite(p.posY) && p.posY !== 0) ty = p.posY;
-  const dx = tx - bc.x, dy = ty - bc.y;
+  return { dx: tx - bc.x, dy: ty - bc.y };
+}
+
+function placeTextBlock(ctx, { regions, bbox }, p) {
+  const { dx, dy } = placeDelta(ctx, bbox, p);
   if (!dx && !dy) return { regions, bbox };
   const mv = (ring) => ring.map(q => ({ x: q.x + dx, y: q.y + dy }));
   return {
@@ -473,7 +493,7 @@ export const CATALOG = {
       font: FONT_PARAM,
       letterHeight: { type: 'number', default: 1, min: 0.2, max: 4, doc: 'total text height in inches, descenders included', bindable: true },
       includedAngle: { type: 'number', default: 60, doc: 'vee bit included angle, degrees (30/60/90/120)' },
-      maxDepth: { type: 'number', default: 0.2, doc: 'depth cap in inches; wider strokes bottom out here' },
+      maxDepth: { type: 'number', default: 0, doc: 'depth cap in inches — wider strokes bottom out here and flat-clear. 0 = AUTO: 0.2" or HALF the stock thickness, whichever is shallower, so thin material (1/16" ply) engraves without cutting through. An explicit value that reaches the stock bottom is capped the same way, with a warning' },
       feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
       ...TEXT_PLACE_PARAMS,
     },
@@ -484,14 +504,26 @@ export const CATALOG = {
       if (fe.error) return fe;
       const { regions, bbox } = placeTextBlock(ctx, centeredText(ctx, p.text, p.letterHeight, p.font), p);
       if (!regions.length) return { error: 'no engravable outlines in that text' };
-      const vBit = { includedAngle: p.includedAngle, maxDepth: p.maxDepth };
+      // the depth cap is STOCK-AWARE: a vee that exits the bottom of the
+      // board is never what "engrave" meant, so auto = min(0.2", half the
+      // thickness) and an explicit cap at/past the bottom clamps there too
+      // (with the numbers named). Strokes wider than the capped vee reaches
+      // bottom out flat and the pocket passes below clear them.
+      const warnings = [];
+      const autoCap = Math.min(0.2, ctx.stock.thickness / 2);
+      let maxDepth = p.maxDepth > 0 ? p.maxDepth : autoCap;
+      if (maxDepth >= ctx.stock.thickness) {
+        warnings.push(`maxDepth ${maxDepth}" reaches through the ${ctx.stock.thickness}" stock — capped at ${autoCap}" (half the thickness); wider strokes bottom out flat there`);
+        maxDepth = autoCap;
+      }
+      const vBit = { includedAngle: p.includedAngle, maxDepth };
       const machine = { feedRate: p.feedRate, plungeRate: 30, safeZ: ctx.safeZ, rpm: ctx.rpm };
       noteContent(ctx, regions.map(r => r.outer));
       const ma = computeMedialAxis(regions, {});
       clampMedialAxis(ma, regions);
       const moves = generateVEngraveToolpath(ma, vBit, machine);
       const halfAngle = (p.includedAngle / 2) * Math.PI / 180;
-      const maxR = p.maxDepth * Math.tan(halfAngle);
+      const maxR = maxDepth * Math.tan(halfAngle);
       const pocketMoves = ma.branches.some(b => b.some(q => q.radius > maxR + 1e-9))
         ? generatePocketPasses(regions, vBit, machine, maxR * 0.8) : [];
       return {
@@ -499,13 +531,14 @@ export const CATALOG = {
         cutter: { type: 'vee', includedAngle: p.includedAngle },
         feedRate: p.feedRate, plungeRate: 30,
         moves: [...moves, ...pocketMoves],
-        target: { type: 'region', rings: regions.flatMap(r => [ccw(r.outer), ...r.holes.map(cwr)]), depth: p.maxDepth },
+        target: { type: 'region', rings: regions.flatMap(r => [ccw(r.outer), ...r.holes.map(cwr)]), depth: maxDepth },
         bbox,
         previewRegions: regions,
+        warnings,
         // analytic ideal V-surface inputs for the 3D preview (see
         // vcarve-surface.mjs): render smooth groove walls instead of the
         // toolpath's scallops. Op-local frame, same as moves/regions.
-        previewVee: { branches: ma.branches, regions, includedAngle: p.includedAngle, maxDepth: p.maxDepth },
+        previewVee: { branches: ma.branches, regions, includedAngle: p.includedAngle, maxDepth },
       };
     },
   },
@@ -552,6 +585,68 @@ export const CATALOG = {
     },
   },
 
+  line_text: {
+    doc: 'Engrave text as SINGLE-LINE strokes: each letter is a pen path the bit tip traces ONCE (Hershey engraving fonts) — no outline, no filled body. The classic machine-engraved nameplate look and the fastest text there is (one shallow pass per stroke). THE verb when the user asks for a single-line / stick / engraving font, "just trace the letters", or the quickest text. The milled line is exactly as wide as the bit: a small flat endmill (1/16" default) gives a constant-width groove, or set toolDiameter 0 for a fine 60° V-bit hairline. Uses its OWN font shelf (line-sans, line-script) — the outline faces (bold-sans, serif, script…) have no centerline to trace, and stroke fonts have no body to pocket or V-carve, so the shelves are not interchangeable: do NOT answer "single-line font" by pocketing or vcarving an outline face.',
+    params: {
+      text: textParam('engrave'),
+      font: {
+        type: 'string', default: DEFAULT_LINE_FONT, bindable: true,
+        doc: `single-line typeface id — ${LINE_FONTS.map(f => `"${f.id}" = ${f.blurb}`).join('; ')}. Only these; the outline shelf's ids are refused here`,
+      },
+      letterHeight: { type: 'number', default: 1, min: 0.2, max: 6, doc: 'capital-letter height in inches', bindable: true },
+      depth: { type: 'number', default: 0.03, doc: 'single-pass line depth, inches — shallow by design; the look is the traced line, not relief' },
+      toolDiameter: { type: 'number', default: 0.0625, doc: 'flat endmill diameter, inches — the engraved line is exactly this wide; 0 = trace with a fine 60° V-bit tip instead (hairline)' },
+      feedRate: { type: 'number', default: 60, doc: 'inches per minute' },
+      ...TEXT_PLACE_PARAMS,
+    },
+    run(p, ctx) {
+      const blank = blankTextSkip(p);
+      if (blank) return blank;
+      const font = lineFontById(p.font);
+      if (!font) {
+        return { error: `line_text: unknown single-line font "${p.font}" — this shelf is ${LINE_FONTS.map(f => `"${f.id}"`).join(', ')} (the outline faces can't single-line; use vcarve_text/pocket_text/outline_text for those)` };
+      }
+      const laid = textToStrokes(font, p.text, p.letterHeight);
+      if (!laid.bbox) return { error: `no single-line strokes in that text` };
+      // center the block on the origin (the layout comes out x-from-0,
+      // baseline-0), then place it exactly as the other text entries do
+      const c0 = { x: (laid.bbox.minX + laid.bbox.maxX) / 2, y: (laid.bbox.minY + laid.bbox.maxY) / 2 };
+      let bbox = {
+        minX: laid.bbox.minX - c0.x, minY: laid.bbox.minY - c0.y,
+        maxX: laid.bbox.maxX - c0.x, maxY: laid.bbox.maxY - c0.y,
+      };
+      const { dx, dy } = placeDelta(ctx, bbox, p);
+      const ox = dx - c0.x, oy = dy - c0.y;
+      const strokes = laid.polylines.map(pl => pl.map(q => ({ x: q.x + ox, y: q.y + oy })));
+      bbox = { minX: bbox.minX + dx, minY: bbox.minY + dy, maxX: bbox.maxX + dx, maxY: bbox.maxY + dy };
+      noteContent(ctx, strokes);
+      const moves = [];
+      for (const pl of strokes) {
+        moves.push({ type: 'rapid', x: pl[0].x, y: pl[0].y });
+        moves.push({ type: 'linear', z: -p.depth });
+        for (let i = 1; i < pl.length; i++) {
+          moves.push({ type: 'linear', x: pl[i].x, y: pl[i].y });
+        }
+        moves.push({ type: 'rapid', z: ctx.safeZ });
+      }
+      const vee = !(p.toolDiameter > 0);
+      return {
+        tool: vee
+          ? { name: '60° V-bit', diameter: 0.002 }
+          : { name: `${formatDiameter(p.toolDiameter)} endmill`, diameter: p.toolDiameter },
+        cutter: vee ? { type: 'vee', includedAngle: 60 } : { type: 'flat', diameter: p.toolDiameter },
+        feedRate: p.feedRate, plungeRate: 30,
+        moves,
+        // 'on' profile: the tip rides the stroke itself — depth is the check.
+        // The rings here are OPEN polylines (pen paths), which side:'on'
+        // handles: no closure is assumed anywhere downstream.
+        target: { type: 'profile', side: 'on', rings: strokes, depth: p.depth },
+        bbox,
+        warnings: laid.warnings,
+      };
+    },
+  },
+
   pocket_text: {
     doc: 'Pocket the text INTO the surface with a small endmill — flat-bottomed letterforms at constant depth, the look for paint-fill signs and inlays (vcarve_text is the variable-depth carved look instead). Counters preserved. Strokes narrower than the bit get a grazing slot-fit; genuinely too-narrow text fails with advice (bigger letters or a smaller bit). Optional REST cleanup: a second, smaller bit pockets only the corners the bulk bit could not reach (adds a toolchange).',
     params: {
@@ -576,13 +671,15 @@ export const CATALOG = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
       };
-      let chain, autoWarnings = [];
+      let chain, toolWhy, toolCurve;
       if (p.toolDiameter === 0) {
         const auto = autoToolChain(regions, p.depth);
         if (auto.error) return { error: `"${p.text}" at ${p.letterHeight}" letters: ${auto.error}` };
         chain = auto.chain;
-        autoWarnings = [auto.note];
+        toolWhy = pickedToolWhy(auto);
+        toolCurve = auto.curve;
       } else {
+        toolWhy = paramToolWhy(p.toolDiameter);
         chain = [{ d: p.toolDiameter, prev: null }];
         if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
           chain.push({ d: p.restDiameter, prev: p.toolDiameter });
@@ -615,7 +712,9 @@ export const CATALOG = {
           feedRate: p.feedRate, plungeRate: 30,
           moves: acc.moves,
           target: { type: 'region', rings: acc.rings, depth: p.depth },
-          ...(prev == null ? { previewRegions: regions, warnings: autoWarnings } : {}),
+          ...(prev == null
+            ? { previewRegions: regions, why: [toolWhy], toolCurve }
+            : { why: [restWhy(d, prev)] }),
         });
       }
       return { ops, bbox };
@@ -698,13 +797,15 @@ export const CATALOG = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
       };
-      let chain, autoWarnings = [];
+      let chain, toolWhy, toolCurve;
       if (p.toolDiameter === 0) {
         const auto = autoToolChain(regions, p.depth);
         if (auto.error) return { error: `that ${p.shape} pocket: ${auto.error}` };
         chain = auto.chain;
-        autoWarnings = [auto.note];
+        toolWhy = pickedToolWhy(auto);
+        toolCurve = auto.curve;
       } else {
+        toolWhy = paramToolWhy(p.toolDiameter);
         chain = [{ d: p.toolDiameter, prev: null }];
         if (p.restDiameter > 0 && p.restDiameter < p.toolDiameter) {
           chain.push({ d: p.restDiameter, prev: p.toolDiameter });
@@ -742,7 +843,9 @@ export const CATALOG = {
             feedRate: p.feedRate, plungeRate: 30,
             moves: g.moves,
             target: g.target ?? { type: 'region', rings: [ccw(region.outer), ...region.holes.map(cwr)], depth: p.depth },
-            ...(prev == null ? { previewRegions: [region] } : {}),
+            ...(prev == null
+              ? { previewRegions: [region], why: [toolWhy], toolCurve }
+              : { why: [restWhy(d, prev)] }),
           });
         }
         if (pieceCut) cutPieces++;
@@ -750,7 +853,7 @@ export const CATALOG = {
       if (!ops.length) {
         return { error: `a ${chain[0].d}" bit does not fit that ${p.shape} pocket — enlarge it or use a smaller bit` };
       }
-      ops[0] = { ...ops[0], warnings: [...shapeWarnings, ...autoWarnings] };
+      ops[0] = { ...ops[0], warnings: shapeWarnings };
       return { ops, bbox: bb };
     },
   },

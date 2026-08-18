@@ -17,13 +17,13 @@
 // LLM can propose a recipe state, but it cannot make an unverified file
 // exist.
 
-import { CATALOG } from './catalog.mjs';
+import { CATALOG, roundedRectRing } from './catalog.mjs';
 import { expandTemplate, pathToRegions, pathToCurve, offsetRegions, booleanRegions, fitRegionsSnug } from './shape.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { GLYPHS, glyphById } from './glyphs.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
-import { recommendFeeds, DEFAULT_MACHINE } from '../ir/tools.js';
+import { recommendFeeds, DEFAULT_MACHINE, MATERIALS } from '../ir/tools.js';
 
 export const EMPTY_RECIPE = {
   version: 2,                  // recipe grammar version (migrations key on this)
@@ -122,13 +122,14 @@ export function buildVars(recipe, controlValues) {
 // base shape be recognized as related. Returns { shapes, warnings } or
 // { error }.
 //
-// `fit` derivations self-size around CONTENT, which does not exist until
-// the pipeline runs — so with { defer: true } a fit entry (and anything
-// derived from it) is left out of `shapes` and listed in `pending`;
-// runRecipe resolves each via resolve(id, ctx) at the first op that
-// references it, when content-so-far is exactly what it must wrap.
-// Without defer (the intent layer's dry-run), fit resolves as the base
-// at scale 1: structure and expressions are what validation checks.
+// `fit` and `around` derivations self-size around CONTENT, which does
+// not exist until the pipeline runs — so with { defer: true } such an
+// entry (and anything derived from it) is left out of `shapes` and
+// listed in `pending`; runRecipe resolves each via resolve(id, ctx) at
+// the first op that references it, when content-so-far is exactly what
+// it must wrap. Without defer (the intent layer's dry-run), fit
+// resolves as the base at scale 1 and around as a unit rounded rect:
+// structure and expressions are what validation checks.
 export function buildShapes(recipe, vars, { defer = false } = {}) {
   const shapes = {};
   const warnings = [];
@@ -215,7 +216,7 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
         return { error: `shape "${s.id}": "${asset.name}" is a raster image — only SVG uploads lower to shapes (image carving is not in the catalog yet)` };
       }
       const size = {};
-      for (const k of ['width', 'height']) {
+      for (const k of ['width', 'height', 'maxWidth', 'maxHeight']) {
         if (spec[k] === undefined || spec[k] === null || spec[k] === '') continue;
         const d = num(spec[k], k, s.id);
         if (d.error) return d;
@@ -248,13 +249,13 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
         return { error: `shape "${s.id}": no built-in glyph "${glyphId}" — the library: ${GLYPHS.map(x => x.id).join(', ')}` };
       }
       const size = {};
-      for (const k of ['width', 'height']) {
+      for (const k of ['width', 'height', 'maxWidth', 'maxHeight']) {
         if (spec[k] === undefined || spec[k] === null || spec[k] === '') continue;
         const d = num(spec[k], k, s.id);
         if (d.error) return d;
         size[k] = d.value;
       }
-      if (size.width === undefined && size.height === undefined) size.width = 3;
+      if (!Object.keys(size).length) size.width = 3;
       const r = svgAssetToRegions(g.svg, size);
       if (r.error) return { error: `shape "${s.id}": ${r.error}` };
       const placed = placeArtwork(r.regions, spec, s.id, num);
@@ -320,6 +321,37 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
       const f = fitRegionsSnug(b.base.regions, m.value, pts);
       if (f.error) return { error: `shape "${s.id}": fit of "${s.fit.of}" ${f.error}` };
       shapes[s.id] = { kind: 'region', regions: f.regions, root: b.base.root, fitted: true, scale: f.scale };
+    } else if (s.around) {
+      // fit's sibling for when there is NO base outline to scale: a snug
+      // rounded RECTANGLE around the content machined so far (bbox +
+      // margin — the tag_cutout geometry as a derivable shape). Union it
+      // with another outline and the rectangle vanishes whenever that
+      // outline already contains the content; when it doesn't (fixed-size
+      // text overflowing a small drawn shape), the text carries its own
+      // tag into the cutout instead of failing the fit check.
+      const m = num(s.around.margin ?? 0.125, 'margin', s.id);
+      if (m.error) return m;
+      if (!(m.value >= 0)) return { error: `shape "${s.id}": around margin must be a number ≥ 0` };
+      const cr = num(s.around.cornerRadius ?? 0.4, 'cornerRadius', s.id);
+      if (cr.error) return cr;
+      if (!(cr.value >= 0)) return { error: `shape "${s.id}": around cornerRadius must be a number ≥ 0` };
+      if (!ctx) {
+        // validation dry-run: content does not exist yet — a unit rounded
+        // rect stands in; expressions and references are what's checked
+        shapes[s.id] = { kind: 'region', regions: [{ outer: roundedRectRing(-1, -0.5, 1, 0.5, 0.2), holes: [] }], root: s.id, fitted: true };
+        return;
+      }
+      const pts = contentPoints(ctx);
+      if (!pts.length) {
+        return { error: `shape "${s.id}": around has nothing to wrap yet — the operations it must contain (engraving, pockets, holes) go BEFORE the operation that references it` };
+      }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const q of pts) {
+        if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x;
+        if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y;
+      }
+      const ring = roundedRectRing(minX - m.value, minY - m.value, maxX + m.value, maxY + m.value, cr.value);
+      shapes[s.id] = { kind: 'region', regions: [{ outer: ring, holes: [] }], root: s.id, fitted: true };
     } else if (s.pattern) {
       // REPEAT one authored cell into a grid or a ring. This is the
       // primitive that keeps checkerboards, honeycombs, and hour-mark
@@ -394,7 +426,7 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
         return { error: `shape "${s.id}": pattern needs a shape or curve, but "${spec.of}" has no geometry` };
       }
     } else {
-      return { error: `shape "${s.id}" needs a path, an asset, a drawing, or a derivation (inset/outset/band/union/difference/intersect/fit/pattern)` };
+      return { error: `shape "${s.id}" needs a path, an asset, a drawing, or a derivation (inset/outset/band/union/difference/intersect/fit/around/pattern)` };
     }
   };
 
@@ -410,7 +442,7 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
   for (const s of recipe.shapes ?? []) {
     if (!ID_RE.test(s.id ?? '')) return { error: `shape has a bad id "${s.id}"` };
     const refs = refsOf(s);
-    if (defer && (s.fit !== undefined || (Array.isArray(refs) && refs.some(r => pending.has(r))))) {
+    if (defer && (s.fit !== undefined || s.around !== undefined || (Array.isArray(refs) && refs.some(r => pending.has(r))))) {
       pending.set(s.id, s);
       continue;
     }
@@ -852,6 +884,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   const tools = {};
   const toolNumber = new Map();   // spec key → posted tool number
   const toolFeeds = new Map();    // spec key → chipload-derived feeds
+  const toolRationale = [];       // per posted tool: how it was matched + fed
   let synth = 0;
   for (const { r } of built) {
     const key = `${r.tool.name}|${r.tool.diameter}`;
@@ -860,9 +893,10 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     // synthetic number: two specs sharing one table entry would let one
     // spec's geometry stand in for the other's in the verifier's model
     const hit = matchRack(r.tool);
-    let n;
+    let n, fromRack = false;
     if (hit && !(hit.number in tools)) {
       n = hit.number;
+      fromRack = true;
       if (shop.material) {
         const rec = recommendFeeds(hit, shop.material, shop.toolLibrary?.machine ?? DEFAULT_MACHINE);
         if (rec) toolFeeds.set(key, rec);
@@ -884,6 +918,14 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     const rec = toolFeeds.get(key);
     if (rec) t.rpm = rec.rpm;   // per-tool TR/S at the toolchange
     tools[n] = t;
+    toolRationale.push({
+      number: n, name: r.tool.name, diameter: r.tool.diameter,
+      kind: r.tool.kind ?? 'flat',
+      ...(r.tool.angleDeg ? { angleDeg: r.tool.angleDeg } : {}),
+      rackMatch: fromRack,                       // posted under its real &Tool number
+      synthetic: !fromRack && rackAll.length > 0, // rack declared but this bit isn't in it
+      feeds: rec ?? null,                        // chipload derivation incl. binding
+    });
   }
 
   const job = {
@@ -951,11 +993,37 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // gouge/depth/intrusion stay hard errors.
   const report = verifyJob(job, composed, { coverageWarnPct: 100 });
 
+  // ---- why-these-choices: the decision record, accumulated instead of
+  // discarded. Every entry is the deterministic evidence behind a choice
+  // the job actually posted — strategy why-strings (auto-tool knee, rest
+  // passes), the coverage curve, chipload feed derivations with their
+  // binding constraint, and how each tool got its posted number. The UI
+  // renders this verbatim; nothing here is a model's guess.
+  const rationale = {
+    material: shop.material ?? null,
+    materialLabel: MATERIALS[shop.material]?.label ?? null,
+    machine: shop.toolLibrary?.machine ?? null,
+    tools: toolRationale,
+    ops: built.map(({ op, r }, i) => {
+      const key = `${r.tool.name}|${r.tool.diameter}`;
+      return {
+        name: job.operations[i].name,
+        tool: toolNumber.get(key),
+        toolName: r.tool.name,
+        why: r.why ?? [],
+        ...(r.toolCurve ? { toolCurve: r.toolCurve } : {}),
+        feedSource: toolFeeds.has(key) ? 'chipload' : 'strategy',
+        feedRate: job.operations[i].feedRate,
+        plungeRate: job.operations[i].plungeRate,
+      };
+    }),
+  };
+
   const result = {
     ok: report.ok,
     errors: report.errors,
     warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
-    report, job, composed,
+    report, job, composed, rationale,
     preview: { built, placement, stock: autoStock, shapeOutlines, assemblies },
   };
   if (report.ok) {

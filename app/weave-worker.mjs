@@ -32,6 +32,15 @@ const quiet = (fn) => {
   try { return fn(); } finally { console.log = orig; }
 };
 
+// Weaves must WAIT for init: the init handler awaits guest-module
+// imports (slow — a whole interpreter chain over HTTP), and the moment
+// it yields, a queued 'weave' message would otherwise run against a
+// catalog with no guest verbs — the first furniture weave of a session
+// came back "unknown strategy" and nothing re-wove (field report
+// 2026-07-28). Gate every weave on init having fully finished.
+let initDone;
+const initReady = new Promise((r) => { initDone = r; });
+
 self.onmessage = async (e) => {
   const m = e.data;
 
@@ -47,11 +56,13 @@ self.onmessage = async (e) => {
         console.warn(`weave worker: guest ${url} failed to load:`, err);
       }
     }
+    initDone();
     self.postMessage({ kind: 'ready' });
     return;
   }
 
   if (m.kind === 'weave') {
+    await initReady;
     try {
       const result = quiet(() => runRecipe(m.recipe, m.values, FONT_SHELF, m.terrains ?? {}, m.shop, m.placement));
       let sim = null;

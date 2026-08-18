@@ -322,13 +322,17 @@ const ccw = (ring) => (ringArea(ring) > 0 ? ring : [...ring].reverse());
 /**
  * Lower an uploaded SVG file to shop-frame regions: inches, centered on
  * the origin, y-up (mirrors pathToRegions for authored paths).
- * @param {{width?:number, height?:number}} size  target size in inches.
- *   width only → uniform (aspect kept); both → stretched. NEITHER →
- *   the file's declared physical size when it has one, else 3" wide
- *   with a warning to set a size.
+ * @param {{width?:number, height?:number, maxWidth?:number, maxHeight?:number}} size
+ *   target size in inches. width only → uniform (aspect kept); both →
+ *   stretched. maxWidth+maxHeight → CONTAIN: uniform scale until the
+ *   artwork just fits inside that box (whichever dimension binds
+ *   touches — a tall sketch fills the height, a wide one the width);
+ *   explicit width/height win over max. NEITHER → the file's declared
+ *   physical size when it has one, else 3" wide with a warning to set
+ *   a size.
  * @returns {{regions, w, h, warnings} | {error}}
  */
-export function svgAssetToRegions(svgText, { width = 0, height = 0 } = {}) {
+export function svgAssetToRegions(svgText, { width = 0, height = 0, maxWidth = 0, maxHeight = 0 } = {}) {
   const src = svgToRegions(svgText);
   if (src.error) return src;
   const warnings = [...src.warnings];
@@ -347,6 +351,9 @@ export function svgAssetToRegions(svgText, { width = 0, height = 0 } = {}) {
   if (width > 0 && height > 0) { sx = width / bw; sy = height / bh; }
   else if (width > 0) { sx = sy = width / bw; }
   else if (height > 0) { sx = sy = height / bh; }
+  else if (maxWidth > 0 && maxHeight > 0) { sx = sy = Math.min(maxWidth / bw, maxHeight / bh); }
+  else if (maxWidth > 0) { sx = sy = maxWidth / bw; }
+  else if (maxHeight > 0) { sx = sy = maxHeight / bh; }
   else if (src.unitsPerInch) { sx = sy = 1 / src.unitsPerInch; }
   else {
     sx = sy = 3 / bw;

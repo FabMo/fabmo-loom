@@ -33,8 +33,9 @@ const RECIPE = {
   ],
   derived: [],
   shapes: [
-    { id: 'profile', draw: { of: 'profile', width: '3.5' } },
-    { id: 'tag', fit: { of: 'profile', margin: 0.3 } },
+    { id: 'profile', draw: { of: 'profile', maxWidth: 3.5, maxHeight: 2.5 } },
+    { id: 'nameRect', around: { margin: 0.3, cornerRadius: 0.4 } },
+    { id: 'tag', union: ['profile', 'nameRect'] },
   ],
   assets: [], terrains: [],
   pipeline: [

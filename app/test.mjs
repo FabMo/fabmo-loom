@@ -112,6 +112,27 @@ console.log('--- prompt 2 (scripted): a cutout around the names ---');
   else fail(`cutout recipe failed: ok=${r.ok} ${r.errors.join(' | ')}`);
 }
 
+// ---------------- suggested next prompts ride through sanitized ----------------
+// The model returns `suggest` alongside its actions (same call — targeted
+// chips cost no extra request); applyActions passes it through as clean
+// strings only. Model output is data: junk entries drop, never throw.
+
+console.log('--- suggest: targeted chips sanitized on the way through ---');
+{
+  const res = applyActions(recipe, {
+    summary: 'noop', actions: [], declined: [{ what: 'x', why: 'y' }],
+    suggest: ['  remove the grab handle  ', 42, '', '   ', 'carve ___ in the seat',
+              'x'.repeat(200), 'make the handle ___ inches wide', 'a fourth suggestion past the cap'],
+  });
+  const want = ['remove the grab handle', 'carve ___ in the seat', 'make the handle ___ inches wide'];
+  if (JSON.stringify(res.suggest) === JSON.stringify(want)) pass(`junk dropped, trimmed, capped at 3: ${res.suggest.join(' | ')}`);
+  else fail(`suggest sanitation: got ${JSON.stringify(res.suggest)}`);
+
+  const none = applyActions(recipe, { summary: 'noop', actions: [], declined: [] });
+  if (Array.isArray(none.suggest) && none.suggest.length === 0) pass('absent suggest field → empty array (old payloads unaffected)');
+  else fail(`absent suggest: got ${JSON.stringify(none.suggest)}`);
+}
+
 // ---------------- 4. prompt three: "add tabs" → now a FEATURE ----------------
 // (Until 2026-07-05 this was the honest-decline case; then the tab skill
 // graduated from the step app into seams/strategies/profile.js, synced in,
@@ -572,9 +593,10 @@ console.log('--- auto tool: coverage knee picks the chain, pick is reported ---'
     ...structuredClone(EMPTY_RECIPE),
     pipeline: [{ id: 'pocket', strategy: 'pocket_text', params: { text: 'Anna', letterHeight: 1.5, toolDiameter: 0 } }],
   });
-  const note = r.warnings.find(w => w.includes('auto tool:'));
+  // the pick reports through the decision record now, not the warnings
+  const note = r.rationale?.ops.flatMap(o => o.why ?? []).find(w => w.includes('auto tool:'));
   const nOps = r.report?.stats.targets?.length ?? 0;
-  if (r.ok && nOps >= 2 && note?.includes('1/4"')) {
+  if (r.ok && nOps >= 2 && note?.includes('1/4"') && !r.warnings.some(w => w.includes('auto tool:'))) {
     pass(`text chain picked and reported: "${note.slice(note.indexOf('auto'), note.indexOf('auto') + 60)}..." (${nOps} ops)`);
   } else fail(`auto text failed: ok=${r.ok} ops=${nOps} note=${note} ${r.errors?.join(' | ')}`);
 
@@ -601,6 +623,71 @@ console.log('--- auto tool: coverage knee picks the chain, pick is reported ---'
   });
   if (!none.ok && none.errors[0]?.includes('drawer')) pass(`nothing earns: "${none.errors[0].slice(0, 70)}..."`);
   else fail(`no-bit case leaked: ${JSON.stringify(none.errors)}`);
+}
+
+// ---------------- 15b. the decision record: choices explain themselves ----------------
+// Every exported job carries result.rationale — the deterministic evidence
+// behind each choice (auto-tool coverage curve, rest-pass economics,
+// chipload feed derivations with their binding constraint, rack matches).
+// The why-these-choices panel renders it verbatim, so the record itself is
+// gauntleted: the numbers must MATCH the job, not merely exist.
+
+console.log('--- decision record: rationale matches the posted job ---');
+{
+  const rack = {
+    machine: { minRPM: 6000, maxRPM: 24000, maxFeed: 360 },
+    tools: [
+      { number: 2, kind: 'flat', diameter: 0.25, flutes: 2 },
+      { number: 5, kind: 'flat', diameter: 0.0625, flutes: 1 },
+    ],
+  };
+  const shop = { material: 'plywood', toolLibrary: rack };
+  const r = quiet(() => runRecipe({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'tray', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 3, height: 2, cornerRadius: 0, depth: 0.25, toolDiameter: 0.25, restDiameter: 0.0625 } }],
+  }, {}, FONT_SHELF, {}, shop));
+  const ra = r.rationale;
+  if (!r.ok || !ra) fail(`no rationale on a verified job: ok=${r.ok} ${r.errors?.join(' | ')}`);
+  else {
+    // rack bits post under their real numbers, with chipload feeds attached
+    const bulk = ra.tools.find(t => t.diameter === 0.25);
+    const rest = ra.tools.find(t => t.diameter === 0.0625);
+    if (bulk?.number === 2 && bulk.rackMatch && rest?.number === 5 && rest.rackMatch) {
+      pass('both bits matched the rack under their real &Tool numbers');
+    } else fail(`rack match wrong: ${JSON.stringify(ra.tools)}`);
+    // the recorded derivation IS recommendFeeds — same numbers, named
+    // binding. This bit is the shed-rpm case: 18k × 2 × 0.011 = 396 in/min
+    // outruns the 360 cap, so rpm comes down to keep the chipload
+    const want = recommendFeeds(rack.tools[0], 'plywood', rack.machine);
+    if (bulk?.feeds && bulk.feeds.feedRate === want.feedRate && bulk.feeds.rpm === want.rpm
+        && bulk.feeds.binding === want.binding && want.binding === 'feed-cap' && want.rpm < 18000
+        && Math.abs(want.rpm * want.flutes * want.chipload - want.feedRate) < 2) {
+      pass(`chipload derivation recorded: ${want.rpm} rpm × ${want.flutes} fl × ${want.chipload}"/t ≈ ${want.feedRate} in/min (${want.binding})`);
+    } else fail(`feeds derivation mismatch: got=${JSON.stringify(bulk?.feeds)} want=${JSON.stringify(want)}`);
+    // the job posts the SAME feeds the record explains
+    const opFeeds = r.job.operations.map(o => o.feedRate);
+    const raFeeds = ra.ops.map(o => o.feedRate);
+    if (opFeeds.join() === raFeeds.join() && ra.ops.every(o => o.feedSource === 'chipload')) {
+      pass(`recorded feeds are the posted feeds: [${opFeeds.join(', ')}] in/min`);
+    } else fail(`rationale feeds diverge from job: job=[${opFeeds}] rationale=[${raFeeds}]`);
+    // rest-pass economics narrated on the rest op
+    if (ra.ops.some(o => o.why.some(w => w.startsWith('rest pass:')))) pass('rest pass explains its toolchange');
+    else fail(`no rest-pass why: ${JSON.stringify(ra.ops.map(o => o.why))}`);
+  }
+
+  // auto tool: the coverage curve rides along, knee marked
+  const auto = quiet(() => runRecipe({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [{ id: 'tray', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 3, height: 2, cornerRadius: 0, depth: 0.25, toolDiameter: 0 } }],
+  }, {}, FONT_SHELF, {}, {}));
+  const curve = auto.rationale?.ops.find(o => o.toolCurve)?.toolCurve;
+  if (auto.ok && curve?.length >= 4 && curve.some(e => e.picked) && curve.every(e => e.excluded || (e.pct >= 0 && e.pct <= 100))) {
+    pass(`coverage curve recorded: ${curve.map(e => `${e.label} ${e.excluded ? '—' : e.pct + '%'}${e.picked ? '✓' : ''}`).join(' · ')}`);
+  } else fail(`curve missing/malformed: ${JSON.stringify(curve)}`);
+  // no material, no rack: feeds honestly attributed to the strategy
+  if (auto.rationale?.ops.every(o => o.feedSource === 'strategy') && auto.rationale.tools.every(t => !t.synthetic && !t.rackMatch)) {
+    pass('no shop declared: feeds attributed to strategy defaults, no rack claims');
+  } else fail(`bare-shop attribution wrong: ${JSON.stringify(auto.rationale?.tools)}`);
 }
 
 // ---------------- 16. the font shelf: every face carves verified ----------------
@@ -3306,6 +3393,248 @@ console.log('--- pinned cutouts: the outline holds still, the content moves ---'
   if (heart.ok && Math.abs(mid(bbHeart).x - 0.4) < 0.01) {
     pass('pinned shape_cutout centers its outline at the pin, verified');
   } else fail(`pinned shape wrong: ok=${heart.ok} ${JSON.stringify(bbHeart)} ${heart.errors?.join(' | ')}`);
+}
+
+// ---------------- 36. line_text: single-line engraving fonts ----------------
+// Field report (2026-07-27): asked to swap V-carving for a single-line
+// font milled with a flat bit, the model pocketed the outline face
+// instead — there was nothing else it could reach for. line_text traces
+// vendored Hershey stroke fonts (open pen paths, no outline to fill), so
+// the ask now has an honest verb.
+
+console.log('--- line_text: single-line strokes, flat bit or vee hairline ---');
+{
+  const rec = (params) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'line', strategy: 'line_text', params },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.3 } },
+    ],
+  });
+
+  // the nameplate: flat endmill, verified through the standard gate
+  const flat = run(rec({ text: 'Brian', letterHeight: 1 }));
+  const lineT = flat.report?.stats.targets?.find((t) => t.name.startsWith('line'));
+  const built = flat.preview?.built?.find((x) => x.op.id === 'line');
+  if (flat.ok && lineT?.depthViolations === 0 && built?.r.cutter?.type === 'flat') {
+    pass(`flat-bit single-line nameplate verified (${lineT.samples} samples, ${flat.report.stats.cutLength}" of line)`);
+  } else fail(`flat line_text failed: ok=${flat.ok} ${flat.errors?.join(' | ')}`);
+
+  // strokes are PEN PATHS, not outlines: 'I' in the simplex face is one
+  // straight stroke — its cut length is the letter height plus nothing
+  const bare = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [{ id: 'line', strategy: 'line_text', params: { text: 'I', letterHeight: 1 } }],
+  });
+  // cut length = the 1" stroke + one plunge from safeZ 0.5 to -0.03
+  if (bare.ok && Math.abs(bare.report.stats.cutLength - 1.53) < 0.06) {
+    pass(`"I" is one traced stroke: ${bare.report.stats.cutLength}" of cut = 1" letter + one plunge (an outline would trace both sides)`);
+  } else fail(`stroke trace wrong: ok=${bare.ok} cutLength=${bare.report?.stats.cutLength}`);
+
+  // vee hairline variant + script face
+  const vee = run(rec({ text: 'Brian', letterHeight: 1, font: 'line-script', toolDiameter: 0 }));
+  const veeBuilt = vee.preview?.built?.find((x) => x.op.id === 'line');
+  if (vee.ok && veeBuilt?.r.cutter?.type === 'vee') pass('script face + vee hairline verified');
+  else fail(`vee line_text failed: ok=${vee.ok} ${vee.errors?.join(' | ')}`);
+
+  // posX moves the block (the 2D drag rides this param)
+  const moved = run(rec({ text: 'Brian', letterHeight: 1, posX: 0.8, posY: 0.001 }));
+  const mb = moved.preview?.built?.find((x) => x.op.id === 'line')?.r.bbox;
+  if (moved.ok && Math.abs((mb.minX + mb.maxX) / 2 - 0.8) < 0.01) pass('posX places the stroke block (draggable like the other text verbs)');
+  else fail(`posX wrong: ok=${moved.ok} bbox=${JSON.stringify(mb)}`);
+
+  // an outline-shelf id here is an honest refusal naming both shelves
+  const wrongShelf = run(rec({ text: 'Brian', letterHeight: 1, font: 'bold-sans' }));
+  if (!wrongShelf.ok && wrongShelf.errors[0]?.includes("can't single-line")) {
+    pass(`outline face refused: "${wrongShelf.errors[0].slice(0, 70)}..."`);
+  } else fail(`wrong shelf leaked: ok=${wrongShelf.ok} ${JSON.stringify(wrongShelf.errors)}`);
+
+  // blank bound text skips the op like every other text verb
+  const blank = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'line', strategy: 'line_text', params: { text: '  ' } },
+      { id: 'disc', strategy: 'disc_cutout', params: { diameter: 3 } },
+    ],
+  });
+  if (blank.ok && blank.warnings.some((w) => w.includes('skipped'))) pass('blank text skips, the disc still cuts');
+  else fail(`blank skip wrong: ok=${blank.ok} ${JSON.stringify(blank.warnings)}`);
+}
+
+// ---------------- around + contain sizing: the badge-window contract ----------------
+// Field report (2026-07-28): default badges were huge — the fit-derived
+// tag scaled the whole drawing up to hold the name. The contract now:
+// the sketch scales down EVENLY into a maxWidth×maxHeight window
+// (aspect kept), the letters NEVER scale, and a name the outline can't
+// hold carries its own rounded rect (around) into the cutout via union —
+// the rect is swallowed whenever the outline already contains the text.
+
+console.log('--- around + maxWidth/maxHeight: fixed-size outline, fixed-size name ---');
+{
+  const ringBBoxOf = (r, id) => {
+    const ring = r.preview?.built?.find((x) => x.op.id === id)?.r.previewRing;
+    if (!ring) return null;
+    return ring.reduce((a, q) => ({
+      minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+      maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+    }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  };
+  const dims = (b) => b && { w: b.maxX - b.minX, h: b.maxY - b.minY };
+
+  // contain: a 2:1 artwork into a 3.5×2.5 window binds on WIDTH → 3.5×1.75
+  const wide = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.25 },
+    assets: [{ id: 'art', name: 'art', kind: 'svg', data: '<svg viewBox="0 0 200 100"><rect width="200" height="100"/></svg>' }],
+    shapes: [{ id: 'card', asset: { of: 'art', maxWidth: 3.5, maxHeight: 2.5 } }],
+    pipeline: [{ id: 'cut', strategy: 'shape_cutout', params: { shape: 'card' } }],
+  });
+  const wd = dims(ringBBoxOf(wide, 'cut'));
+  if (wide.ok && wd && Math.abs(wd.w - 3.5) < 0.02 && Math.abs(wd.h - 1.75) < 0.02) {
+    pass(`maxWidth binds a wide artwork: ${wd.w.toFixed(2)}" × ${wd.h.toFixed(2)}" (aspect kept)`);
+  } else fail(`wide contain wrong: ok=${wide.ok} dims=${JSON.stringify(wd)}`);
+
+  // ...and a 1:2 artwork into the same window binds on HEIGHT → 1.25×2.5
+  const tall = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.25 },
+    assets: [{ id: 'art', name: 'art', kind: 'svg', data: '<svg viewBox="0 0 100 200"><rect width="100" height="200"/></svg>' }],
+    shapes: [{ id: 'card', asset: { of: 'art', maxWidth: 3.5, maxHeight: 2.5 } }],
+    pipeline: [{ id: 'cut', strategy: 'shape_cutout', params: { shape: 'card' } }],
+  });
+  const td = dims(ringBBoxOf(tall, 'cut'));
+  if (tall.ok && td && Math.abs(td.w - 1.25) < 0.02 && Math.abs(td.h - 2.5) < 0.02) {
+    pass(`maxHeight binds a tall artwork: ${td.w.toFixed(2)}" × ${td.h.toFixed(2)}"`);
+  } else fail(`tall contain wrong: ok=${tall.ok} dims=${JSON.stringify(td)}`);
+
+  // the noodle case: a 6×0.5 bar can never hold 0.9" letters — the union
+  // with the around-rect grows ONLY where the name pokes out, and the
+  // bar keeps its authored 6" span (nothing scaled)
+  const noodle = (shapes, letterHeight = 0.9) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.25 },
+    shapes,
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brianna', letterHeight } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'tag' } },
+    ],
+  });
+  const bar = { id: 'bar', path: 'M -3 -0.25 L 3 -0.25 L 3 0.25 L -3 0.25 Z' };
+  const poked = run(noodle([
+    bar,
+    { id: 'nameRect', around: { margin: 0.3, cornerRadius: 0.4 } },
+    { id: 'tag', union: ['bar', 'nameRect'] },
+  ]));
+  const pd = dims(ringBBoxOf(poked, 'cut'));
+  if (poked.ok && pd && Math.abs(pd.w - 6) < 0.02 && Math.abs(pd.h - 1.5) < 0.1) {
+    pass(`name outgrows the bar → its own tab: union ${pd.w.toFixed(2)}" × ${pd.h.toFixed(2)}" (bar span kept, rect = letters + margins)`);
+  } else fail(`noodle union wrong: ok=${poked.ok} dims=${JSON.stringify(pd)} ${poked.errors?.join(' | ') ?? ''}`);
+
+  // ...while the bar WITHOUT the rect honestly REFUSES the identical text
+  // (this is the failure mode around+union exists to absorb; the poke
+  // must clear shape_cutout's 0.1" edge grace to count)
+  const bare = run(noodle([bar, { id: 'tag', union: ['bar', 'bar'] }]));
+  if (!bare.ok && bare.errors[0]?.includes('pokes outside')) {
+    pass('the bar alone refuses the oversized name (fit check held)');
+  } else fail(`bare noodle wrong: ok=${bare.ok} ${JSON.stringify(bare.errors)}`);
+
+  // swallowed: an outline that already holds the name is unchanged by
+  // the union — the around-rect is strictly inside it
+  const roomy = run(noodle([
+    { id: 'bar', path: 'M -2 -1.5 L 2 -1.5 L 2 1.5 L -2 1.5 Z' },
+    { id: 'nameRect', around: { margin: 0.3, cornerRadius: 0.4 } },
+    { id: 'tag', union: ['bar', 'nameRect'] },
+  ], 0.6));
+  const rd = dims(ringBBoxOf(roomy, 'cut'));
+  if (roomy.ok && rd && Math.abs(rd.w - 4) < 0.02 && Math.abs(rd.h - 3) < 0.02) {
+    pass(`roomy outline swallows the rect: ${rd.w.toFixed(2)}" × ${rd.h.toFixed(2)}" (authored size, no growth)`);
+  } else fail(`swallow wrong: ok=${roomy.ok} dims=${JSON.stringify(rd)}`);
+
+  // around with nothing before it is an honest authoring error
+  const early = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.25 },
+    shapes: [{ id: 'nameRect', around: { margin: 0.3 } }],
+    pipeline: [{ id: 'cut', strategy: 'shape_cutout', params: { shape: 'nameRect' } }],
+  });
+  if (!early.ok && early.errors[0]?.includes('nothing to wrap')) {
+    pass('around before any content refused with the fix named');
+  } else fail(`early around wrong: ok=${early.ok} ${JSON.stringify(early.errors)}`);
+}
+
+// ---------------- vcarve depth cap is stock-aware ----------------
+// Field report (2026-07-28): engraving 1/16" material REJECTED with
+// "cuts through stock bottom" — the vee's 0.2" default cap was three
+// times the board. The cap now defaults to AUTO (0.2" or half the
+// stock, whichever is shallower); strokes wider than the capped vee
+// reaches bottom out flat and pocket-clear, exactly like a thick-stock
+// carve that hits 0.2".
+
+console.log('--- vcarve maxDepth: auto-caps to half of thin stock ---');
+{
+  const rec = (thickness, params = {}) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness },
+    pipeline: [
+      { id: 'engrave', strategy: 'vcarve_text', params: { text: 'Brian', letterHeight: 1, ...params } },
+      { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4 } },
+    ],
+  });
+  const minZOf = (r) => {
+    const mv = r.preview?.built?.find((x) => x.op.id === 'engrave')?.r.moves ?? [];
+    return mv.reduce((m, q) => (q.z !== undefined ? Math.min(m, q.z) : m), 0);
+  };
+
+  // 1/16" ply: auto cap = 0.03125, verified instead of refused
+  const thin = run(rec(0.0625));
+  const tz = minZOf(thin);
+  if (thin.ok && Math.abs(tz + 0.03125) < 1e-6) {
+    pass(`1/16" stock engraves at the half-thickness cap (deepest Z ${tz}")`);
+  } else fail(`thin stock: ok=${thin.ok} minZ=${tz} ${thin.errors?.join(' | ') ?? ''}`);
+
+  // ...and the wide strokes that USED to over-cut now flat-clear
+  const engr = thin.preview?.built?.find((x) => x.op.id === 'engrave')?.r;
+  if (engr?.target.depth === 0.03125) pass('target declares the capped depth');
+  else fail(`target depth ${engr?.target.depth}`);
+
+  // an explicit cap past the stock bottom clamps with the numbers named
+  const forced = run(rec(0.0625, { maxDepth: 0.2 }));
+  if (forced.ok && forced.warnings.some((w) => w.includes('capped at 0.03125'))) {
+    pass('explicit 0.2" cap on 1/16" stock: capped + warned, still verified');
+  } else fail(`forced: ok=${forced.ok} warnings=${JSON.stringify(forced.warnings)}`);
+
+  // thick stock: auto stays the classic 0.2" — no behavior change
+  const thick = run(rec(0.75));
+  const kd = thick.preview?.built?.find((x) => x.op.id === 'engrave')?.r.target.depth;
+  if (thick.ok && kd === 0.2) pass('3/4" stock keeps the 0.2" cap (auto = min(0.2, half))');
+  else fail(`thick: ok=${thick.ok} target depth=${kd}`);
+}
+
+// ---------------- pocket_text narrow strokes: honest declarations survive ----------------
+// Field report (2026-07-28): "engrave bulk (pocket_text) gouges outside its
+// declared region: 4/857 samples" on ordinary text. Two kernel defects, both
+// in the DECLARATION (the motion was fine): (1) CleanPolygons folded a
+// hair-thin level-0 sliver into a self-crossing bow-tie, and offsetting that
+// dropped a lobe of the declared sweep — cleaned() now simplifies to keep
+// the "rings are simple" promise; (2) the declared polygon under-approximated
+// the true circular sweep (inscribed tessellation), eating the verifier's
+// gouge budget at sharp serif corners — the sweep now declares with outward
+// slack. These weaves exercise the fonts/sizes that failed.
+
+console.log('--- pocket_text: skinny-stroke declarations verify ---');
+{
+  const cases = [
+    ['slab', 1, 'Brian'],        // tolerance stack at serif corners
+    ['condensed', 0.8, 'Brian'], // bow-tie level-0 sliver
+    ['script', 0.8, 'Millie'],   // 28-sample slot-fit case
+    ['slab', 0.6, 'WELCOME'],    // 181-sample worst case
+  ];
+  for (const [font, letterHeight, text] of cases) {
+    const r = run({
+      ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.75 },
+      pipeline: [
+        { id: 'engrave', strategy: 'pocket_text', params: { text, letterHeight, font, depth: 0.2 } },
+        { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.4 } },
+      ],
+    });
+    if (r.ok) pass(`${font} ${letterHeight}" "${text}" pockets + verifies`);
+    else fail(`${font} ${letterHeight}" "${text}": ${r.errors?.join(' | ')}`);
+  }
 }
 
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);

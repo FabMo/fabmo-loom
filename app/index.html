@@ -550,7 +550,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.73</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.74</span></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -712,7 +712,10 @@
   </main>
   <footer>
     FabMo Loom — from the makers of <a href="https://www.shopbottools.com">ShopBot</a> ·
-    <a href="https://github.com/FabMo/fabmo-loom">github.com/FabMo/fabmo-loom</a>
+    <a href="https://github.com/FabMo/fabmo-loom">github.com/FabMo/fabmo-loom</a> ·
+    the open-source toolpath toolbox it weaves from:
+    <a href="https://github.com/ShopBotTools/shopbot-toolpaths">ShopBotTools/shopbot-toolpaths</a> ·
+    comments &amp; questions: <a href="mailto:brian.owen@shopbottools.com">Brian Owen</a>
   </footer>
   <script type="importmap">
 {
@@ -788,6 +791,13 @@
         </div>
         <div class="keynote">Examples, sliders, drawing, and exports all work with no AI key.
           The recipe is a document — “Save recipe” keeps any state you like.</div>
+        <div class="keynote" style="border-top:1px solid var(--border); padding-top:10px">
+          The AI doesn’t invent toolpaths — it composes them from an <b>open-source
+          toolbox</b> of verified CNC strategies (pockets, V-carves, profiles, the
+          verifier itself):
+          <a href="https://github.com/ShopBotTools/shopbot-toolpaths">github.com/ShopBotTools/shopbot-toolpaths</a>.
+          Comments and questions are welcome —
+          <a href="mailto:brian.owen@shopbottools.com">Brian Owen, brian.owen@shopbottools.com</a>.</div>
       </div>
     </div>
   </div>
@@ -886,6 +896,9 @@
             <button id="fabmoScan" class="small">Scan network</button>
             <span id="fabmoScanNote" class="keynote"></span>
           </div>
+          <div id="fmaGet" class="keynote" style="margin-top:6px">Or skip the network walls entirely:
+            <a href="/apps/fabmo-loom/fabmo.fma">install Loom on the tool itself (.fma)</a> — it then runs at the
+            tool's own address, same-origin, on any browser (iPad included).</div>
           <div class="keynote" style="margin-top:6px">"Send to FabMo" queues the job on the tool — you still press run
             there. "Send &amp; run" starts it only when the machine is idle and yours is the only queued job; check the
             bit, Z zero, and that the deck is clear before using it.<span id="fabmoHttpsHint"> Over https your browser

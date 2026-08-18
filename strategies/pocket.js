@@ -85,9 +85,21 @@ export function regionToPaths(region) {
 }
 
 // drop collinear/near-duplicate vertices at the arc-tolerance scale —
-// keeps ring point counts (and posted file sizes) sane
+// keeps ring point counts (and posted file sizes) sane. CleanPolygons
+// alone does NOT guarantee simple output: on a hair-thin sliver (a
+// skinny letter stroke inset to near-nothing) its vertex removal can
+// fold a ring into a BOW-TIE. Field report 2026-07-28: a 5-vertex
+// self-crossing level-0 ring — the toolpath traced it fine, but
+// ClipperOffset on self-intersecting input resolved the crossing
+// arbitrarily, the declared sweep lost a lobe, and the verifier
+// (correctly) refused the motion as outside its declaration. Simplify
+// AFTER Clean restores the header's "output rings are guaranteed
+// simple" promise.
 const cleaned = out =>
-  ClipperLib.Clipper.CleanPolygons(out, ARC_TOL).filter(p => p.length >= 3);
+  ClipperLib.Clipper.SimplifyPolygons(
+    ClipperLib.Clipper.CleanPolygons(out, ARC_TOL),
+    ClipperLib.PolyFillType.pftNonZero,
+  ).filter(p => p.length >= 3);
 
 // Inset a region by distance d (in region units). Returns clipper Paths —
 // possibly several disjoint outers, each possibly with holes (islands).
@@ -275,14 +287,36 @@ const closestVertexIndex = (ring, x, y) => {
 };
 
 // Can the tool travel a->b at depth without leaving the cleared envelope?
-// Measured: sample the segment against the level-0 inset (the full region
-// the tool center may ever occupy). Anything outside would gouge a wall.
+// Two tests, both required. (1) Sampled point-in-paths along the segment —
+// catches links whose midsection wanders far outside. (2) EXACT proper-
+// crossing against every envelope edge — field report 2026-07-28: a
+// 0.23" link chord across a shallow concavity bowed only 0.003" outside,
+// slid between the ~0.02"-spaced samples, and the verifier (correctly)
+// refused the job. Envelope paths are integer clipper coordinates, so
+// the orientation predicate is exact; an endpoint ON the boundary (every
+// contour vertex is) or a collinear ride ALONG a straight edge is not a
+// proper crossing and stays legal — only a true transversal exit rejects.
+function properCrossing(a, b, p, q) {
+  const o = (u, v, w) => Math.sign((v.X - u.X) * (w.Y - u.Y) - (v.Y - u.Y) * (w.X - u.X));
+  const d1 = o(a, b, p), d2 = o(a, b, q);
+  if (d1 === 0 || d2 === 0 || d1 === d2) return false;
+  const d3 = o(p, q, a), d4 = o(p, q, b);
+  if (d3 === 0 || d4 === 0 || d3 === d4) return false;
+  return true;
+}
 function segmentInside(a, b, paths, step) {
   const len = Math.hypot(b.x - a.x, b.y - a.y);
   const nSamples = Math.min(32, Math.max(2, Math.ceil(len / step) + 1));
   for (let i = 0; i <= nSamples; i++) {
     const t = i / nSamples;
     if (!pointInPaths(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), paths)) return false;
+  }
+  const A = { X: Math.round(a.x * SCALE), Y: Math.round(a.y * SCALE) };
+  const B = { X: Math.round(b.x * SCALE), Y: Math.round(b.y * SCALE) };
+  for (const ring of paths) {
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      if (properCrossing(A, B, ring[j], ring[i])) return false;
+    }
   }
   return true;
 }
@@ -467,10 +501,23 @@ export function generatePocket(region, tool, params) {
   // the raster. Deliberately NOT clipped to the region: a slot-fit pass
   // really does graze up to SLOT_GRAZE into the walls, and hiding that
   // from the declaration would just make the verifier's inset degenerate.
+  //
+  // DECLARE_SLACK — the polygon we declare must err OUTSIDE the true
+  // circular sweep, never inside. The true footprint is exactly
+  // dilate(centers, R); jtRound tessellation is inscribed (up to ARC_TOL
+  // inside the true arc), CleanPolygons accumulates ~2× its distance, and
+  // the verifier's own erode tessellates again — measured 2.7 thou of
+  // stacked inward error at a slab serif's sharp corner (field report
+  // 2026-07-28: "gouges outside its declared region, 4/857 samples" on a
+  // center riding exactly ON the level-0 contour). That out-eats the
+  // verifier's 2-thou gouge budget and honest motion gets refused. +2
+  // thou of dilation flips every approximation error to the safe side;
+  // the over-bound is far below any physical kerf effect.
+  const DECLARE_SLACK = 0.002;
   const sweep = new ClipperLib.ClipperOffset(MITER, ARC_TOL);
   sweep.AddPaths(level0Paths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
   const swept = new ClipperLib.Paths();
-  sweep.Execute(swept, bitRadius * SCALE);
+  sweep.Execute(swept, (bitRadius + DECLARE_SLACK) * SCALE);
   const target = {
     type: 'region',
     rings: ClipperLib.Clipper.CleanPolygons(swept, ARC_TOL)

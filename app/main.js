@@ -18,7 +18,7 @@ import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { FONTS } from './fonts.mjs';
-import { probe, machineName, machineStatus, scanSubnet, submitJob, submitAndRun } from './fabmo.mjs';
+import { probe, machineName, machineStatus, scanSubnet, submitJob, submitAndRun, lanDiagnosis } from './fabmo.mjs';
 import { EXAMPLES } from './examples.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -37,6 +37,7 @@ let lastTerrains = {};   // last resolved terrains, reused for sheet-positioned 
 let result = null;
 let lastSim = null;      // the worker's simulateJob output for `result` (3D surface)
 let busy = false;
+let modelChips = [];     // suggested next prompts from the last intent turn (ephemeral)
 
 const quiet = (fn) => {
   const orig = console.log;
@@ -116,6 +117,16 @@ function updateSheetChip(st) {
   if (st && st.w > 0 && st.h > 0) {
     fits = !!placeOnSheet(sheet, st.w, st.h);
     text += fits ? ' · this design fits ✓' : ' · won’t fit ✗';
+  }
+  // a board BIGGER than the declared material sheet is a trap: designs
+  // still nest to the ⚙ Material sheet limit, and "I set the sheet to
+  // 96×48" (the board) reads as ignored. Say so where the user looks.
+  if (shop.materialW > 0 && shop.materialH > 0) {
+    const [bl, bs] = [Math.max(sheet.w, sheet.h), Math.min(sheet.w, sheet.h)];
+    const [ml, ms] = [Math.max(shop.materialW, shop.materialH), Math.min(shop.materialW, shop.materialH)];
+    if (bl > ml + 1e-9 || bs > ms + 1e-9) {
+      text += ` · designs still nest to the ${shop.materialW}×${shop.materialH} Material sheet (⚙) — update it if this board is your stock`;
+    }
   }
   chip.textContent = text;
   rec.disabled = !(fits && result?.ok);
@@ -523,6 +534,64 @@ function measurementsHtml(targets) {
   return `<details><summary>the measurements — ${targets.length} target${targets.length > 1 ? 's' : ''} · ${totalSamples.toLocaleString()} samples</summary>${groups.map(line).join('<br>')}</details>`;
 }
 
+// The decision record, folded like the measurements: why each bit, rpm,
+// and feed is what it is. The runtime accumulates the evidence
+// (result.rationale — auto-tool coverage curves, chipload derivations
+// with their binding constraint, rack matches) and this renders it
+// verbatim. Written to be read over a student's shoulder: every number
+// shown is the number in the exported file, derived by code — the one
+// model-narrated line is the recipe's own summary, labeled as such.
+const FEED_BINDING_TEXT = {
+  'preferred-rpm': 'rpm at the 18,000 wood-cutting sweet spot',
+  'material-rpm-cap': 'rpm capped for this material (it melts or chatters at higher speed)',
+  'machine-rpm-cap': "rpm at the spindle's top speed",
+  'feed-cap': "the machine's feed cap bound first, so rpm came DOWN to keep the chipload — a rubbing bit dulls faster than a cutting one",
+};
+
+function whyToolLine(t, ra) {
+  const bits = [`<b>tool ${t.number}</b> — <i>${escapeHtml(t.name)}</i>`];
+  if (t.rackMatch) bits.push(`your rack's &amp;Tool ${t.number}`);
+  if (t.synthetic) bits.push('not in your rack — synthetic number, load this bit before running');
+  const f = t.feeds;
+  if (f) {
+    bits.push(`${f.rpm.toLocaleString()} rpm · feed ${f.feedRate} in/min · plunge ${f.plungeRate} in/min`);
+    bits.push(`feed = rpm × ${f.flutes} flutes × ${f.chipload}"/tooth chipload in ${escapeHtml(ra.materialLabel ?? ra.material)}; ${FEED_BINDING_TEXT[f.binding] ?? escapeHtml(f.binding)}`);
+  }
+  return bits.join(' · ');
+}
+
+function whyCurveLine(curve) {
+  const cell = (e) => e.excluded
+    ? `${e.label} (${e.excluded === 'depth' ? 'flutes too short for this depth' : e.excluded})`
+    : `${e.label} ${e.pct}%${e.picked ? ' ✓' : ''}`;
+  return `coverage over the drawer: ${curve.map(cell).join(' · ')} — ✓ marks the knee, where a smaller bit stops earning its toolchange`;
+}
+
+function whyHtml(r) {
+  const ra = r.rationale;
+  if (!ra?.ops?.length) return '';
+  const lines = [];
+  if (recipe.about) lines.push(`<i>${escapeHtml(recipe.about)}</i> <small>(the design plan, in the model's words — everything below is measured, not narrated)</small>`);
+  for (const t of ra.tools) lines.push(whyToolLine(t, ra));
+  if (!ra.material) lines.push('feeds are each strategy\'s stock numbers — declare a material in ⚙ Machine &amp; tools to derive them from chipload');
+  // ops fold like the measurements: a pattern's instances ("squares bulk
+  // 7/32") collapse to one line, why-strings unioned across the group
+  const groups = new Map();
+  for (const o of ra.ops) {
+    const base = o.name.replace(/\s+\d+\/\d+(?=\s|$)/, '');
+    let g = groups.get(base);
+    if (!g) groups.set(base, g = { name: base, tool: o.tool, why: new Set(), curve: null });
+    for (const w of o.why) g.why.add(w);
+    if (o.toolCurve) g.curve ??= o.toolCurve;
+  }
+  for (const g of groups.values()) {
+    const why = [...g.why].map(w => `<br>&nbsp;&nbsp;· ${escapeHtml(w)}`).join('');
+    const curve = g.curve ? `<br>&nbsp;&nbsp;· ${escapeHtml(whyCurveLine(g.curve))}` : '';
+    lines.push(`<i>${escapeHtml(g.name)}</i> — tool ${g.tool}${why}${curve}`);
+  }
+  return `<details><summary>why these choices — ${ra.tools.length} tool${ra.tools.length > 1 ? 's' : ''} · ${groups.size} cut${groups.size > 1 ? 's' : ''}</summary>${lines.join('<br>')}</details>`;
+}
+
 function render() {
   const r = result;
   const measurements = measurementsHtml(r.report?.stats.targets ?? []);
@@ -536,7 +605,7 @@ function render() {
     const runTxt = runMin >= 90 ? `${(runMin / 60).toFixed(1)} hr` : `${Math.max(1, Math.round(runMin))} min`;
     $('verdictText').textContent = `this exact motion was measured, not assumed · ≈ ${runTxt} on the machine`;
     $('numbers').innerHTML = `<b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
-      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '') + measurements;
+      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '') + measurements + whyHtml(r);
     const st = r.preview?.stock;
     // sheet-fit tag: the user's declared material wins; 4×8 (96×48, the
     // standard full-size sheet) is the fallback once the board outgrows
@@ -557,7 +626,8 @@ function render() {
     const nothingYet = r.preview?.empty && r.errors[0]?.includes('no operations');
     setBadge('bad', nothingYet ? 'EMPTY' : 'REJECTED');
     $('verdictText').textContent = nothingYet ? 'describe an app to begin' : 'the verifier refused this state';
-    $('numbers').innerHTML = measurements;
+    // a refused job's decision record still teaches — show it when built
+    $('numbers').innerHTML = measurements + whyHtml(r);
     $('minStock').textContent = '';
   }
   $('errors').textContent = (r.preview?.empty && r.errors[0]?.includes('no operations')) ? '' : r.errors.join('\n');
@@ -865,6 +935,12 @@ const endDrag = (commit) => (e) => {
   for (const w of recipe.pipeline.slice(idx + 1)) {
     const entry = CATALOG[w.strategy];
     if (!entry?.wrapsContent || w.frame) continue;
+    // a shapes-section REFERENCE is anchored — it holds still by
+    // construction, so it needs no pin. And a content-derived one (an
+    // around-rect unioned with a drawn badge) must keep FOLLOWING the
+    // name it wraps: pinning it would recenter the outline off the text
+    // and turn the next edit into a false "pokes outside" refusal
+    if (w.params?.shape) continue;
     const unset = (k) => { const v = w.params?.[k]; return v === undefined || v === null || v === 0 || v === ''; };
     if (!unset('posX') || !unset('posY')) continue;   // already pinned or authored
     const bb = builtRingBBox(w.id);
@@ -1151,6 +1227,11 @@ async function generate() {
 
     const out = applyActions(recipe, toolUse.input);
     recipe = out.recipe;
+    modelChips = out.suggest;   // this turn's targeted chips (renderControls → renderChips shows them)
+    // the model's own account of what it built rides on the recipe (not
+    // just the chat log) — the why-these-choices panel opens with it as
+    // the one narrated line above the deterministic decision record
+    if (out.summary?.trim()) recipe.about = out.summary.trim();
     controlValues = { ...controlDefaults(recipe), ...pickExisting(controlValues, recipe) };
     persist();
     renderControls();
@@ -1165,7 +1246,7 @@ async function generate() {
       body: JSON.stringify({
         app: 'loom',
         utterance,
-        intent: { summary: out.summary, actions: toolUse.input.actions ?? [], declined: out.declined },
+        intent: { summary: out.summary, actions: toolUse.input.actions ?? [], declined: out.declined, suggest: out.suggest },
         usage: { input: data.usage?.input_tokens, output: data.usage?.output_tokens },
         context: parseContext,
       }),
@@ -1215,8 +1296,13 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;',
 // the user completes — clicking never submits, so the last step of every
 // chip is typing. Empty recipe → one chip per kind of thing you can SAY
 // (create / style / material constraint / ask for a slider); once the
-// pipeline has ops → refinements aimed at THIS recipe, picked rule-based
-// from its strategies. No LLM call is involved in suggesting.
+// pipeline has ops → refinements aimed at THIS recipe. Targeted chips
+// come from the intent turn itself (the model returns `suggest` alongside
+// its actions — same call, no extra request; it knows what it just built,
+// including design moves the user didn't ask for, which MUST surface here
+// as an adjust-or-remove chip). Rule-based strategy chips fill the
+// remaining slots so there is always something sensible with or without
+// a model turn.
 
 const BLANK = '___';
 
@@ -1247,7 +1333,10 @@ function refinementChips(rec) {
 function renderChips() {
   const host = $('chips');
   host.innerHTML = '';
-  const list = (recipe.pipeline ?? []).length ? refinementChips(recipe) : STARTER_CHIPS;
+  const base = (recipe.pipeline ?? []).length ? refinementChips(recipe) : STARTER_CHIPS;
+  const list = [...modelChips, ...base]
+    .filter((t, i, a) => a.indexOf(t) === i)
+    .slice(0, 4);
   for (const text of list) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1302,6 +1391,7 @@ $('btn3d').addEventListener('click', () => { viewMode = '3d'; localStorage.setIt
 $('btn2d').addEventListener('click', () => { viewMode = '2d'; localStorage.setItem('loom:view', '2d'); refreshPreview(); });
 $('reset').addEventListener('click', () => {
   recipe = structuredClone(EMPTY_RECIPE);
+  modelChips = [];
   controlValues = controlDefaults(recipe);
   persist();
   $('history').innerHTML = '';
@@ -1362,6 +1452,7 @@ $('openFile').addEventListener('change', async () => {
   if (!f) return;
   try {
     recipe = migrateRecipe(JSON.parse(await f.text()));
+    modelChips = [];
     controlValues = controlDefaults(recipe);
     persist();
     renderControls();
@@ -1490,6 +1581,7 @@ function closeIntro() {
 
 function loadExample(ex) {
   recipe = migrateRecipe(structuredClone(ex.recipe));
+  modelChips = [];
   controlValues = controlDefaults(recipe);
   persist();
   renderControls();
@@ -1605,9 +1697,19 @@ async function adoptFabmo(hit) {
   pollFabmo();
 }
 
-const fabmoHttpsHint = () => (location.protocol === 'https:'
-  ? " — if the tool is on and reachable, the browser's local-network permission is the first thing to check"
-  : '');
+// a failed probe on an https page: say WHICH wall was hit and its fix,
+// not just "no answer" — a browser block and a dark address need
+// opposite moves (see lanDiagnosis in app/fabmo.mjs)
+async function fabmoFailNote(addr) {
+  const d = await lanDiagnosis(addr);
+  if (d?.kind === 'permission') {
+    return `${addr} refused instantly — if the tool is on at that address, the browser is blocking it: allow "Local network access" for this site (the icon by the address bar, or Site settings → Local network access), then retry`;
+  }
+  if (d?.kind === 'mixed-content') {
+    return `${addr} refused instantly — if the tool is on at that address, this browser is the wall: Safari/iPad cannot reach a plain-http machine from an https page (no exemption exists) — use Chrome on a computer, or open Loom over http for shop use`;
+  }
+  return `no FabMo answered at ${addr}`;
+}
 
 $('fabmoConnect').addEventListener('click', async () => {
   const note = $('fabmoScanNote');
@@ -1615,7 +1717,7 @@ $('fabmoConnect').addEventListener('click', async () => {
   if (!addr) { note.textContent = 'enter the machine address first'; return; }
   note.textContent = `looking for a FabMo at ${addr}…`;
   const hit = await probe(addr, { timeoutMs: 3000 });
-  if (!hit) { note.textContent = `no FabMo answered at ${addr}${fabmoHttpsHint()}`; return; }
+  if (!hit) { note.textContent = await fabmoFailNote(addr); return; }
   await adoptFabmo(hit);
   note.textContent = `connected — ${fabmoLabel(fabmoSelected())}`;
 });
@@ -1639,7 +1741,7 @@ $('fabmoScan').addEventListener('click', async () => {
     });
     note.textContent = found.length
       ? `found ${found.length} machine${found.length > 1 ? 's' : ''}`
-      : `no FabMo found on ${base}.0/24${fabmoHttpsHint()}`;
+      : (await fabmoFailNote(`${base}.1`)).replace(`no FabMo answered at ${base}.1`, `no FabMo found on ${base}.0/24`);
   } catch (e) {
     note.textContent = e.message;
   }
@@ -1760,6 +1862,20 @@ if (location.protocol !== 'https:') $('fabmoHttpsHint').style.display = 'none';
 renderFabmoMachines();
 updateFabmoSend();
 pollFabmo();
+
+// Running ON the tool (an .fma install, or any same-origin serve): the
+// page's own host IS a FabMo — adopt it without asking. Same-origin
+// fetches cross no browser wall, so this is the zero-config path every
+// device (iPad included) can take. http-only: on https labs the origin
+// is the labs server, never a machine.
+if (location.protocol === 'http:') {
+  probe(location.host).then((hit) => {
+    if (!hit) return;
+    adoptFabmo(hit);
+    // already ON the tool — the install link would be pointing at itself
+    $('fmaGet').style.display = 'none';
+  });
+}
 
 // material select: '' = keep each strategy's own feeds (the pre-rack behavior)
 {
@@ -1920,10 +2036,16 @@ $('themeToggle').addEventListener('click', () => {
 // clones the import 404s and the built-in light/dark toggle above stays
 // the only theming (theme-bridge.css is inert without a theme class).
 (async () => {
-  try {
-    const { initThemePicker } = await import('../../ui_testbed/themes/theme-picker.js');
-    initThemePicker(() => syncView3dTheme());
-  } catch { /* themes not deployed here — native toggle stands alone */ }
+  // labs serves the shared themes alongside (../..); an .fma install
+  // bundles a copy at ../ui/ (see fma-manifest.json) — try both
+  for (const url of ['../../ui_testbed/themes/theme-picker.js', '../ui/themes/theme-picker.js']) {
+    try {
+      const { initThemePicker } = await import(url);
+      initThemePicker(() => syncView3dTheme());
+      return;
+    } catch { /* not deployed at this path — try the next */ }
+  }
+  /* themes not deployed here — native toggle stands alone */
 })();
 
 // Guest apps: an optional, uncommitted guests.local.mjs lists module

@@ -16,8 +16,8 @@ export const EXAMPLES = [
   {
     id: 'name_badge',
     title: 'Name badge',
-    blurb: 'Draw the outline by hand, type a name, cut it out — the shape self-sizes around the name.',
-    next: 'Step 1: hit “✏ Draw” and sketch a badge outline (the design waits for it). Then type a name and watch it re-weave.',
+    blurb: 'Draw the outline by hand, type a name, cut it out — the sketch scales to card size, the letters keep theirs.',
+    next: 'Step 1: hit “✏ Draw” and sketch a badge outline (the design waits for it). Then type a name — the sketch holds its 3.5×2.5 card size, and a name too big for it earns its own rounded tab.',
     recipe: {
       version: 2,
       name: 'Name badges',
@@ -28,9 +28,13 @@ export const EXAMPLES = [
         { id: 'letterH', type: 'number', label: 'Letter height', default: 0.6, min: 0.3, max: 1.2, step: 0.05 },
       ],
       derived: [],
+      // the sketch scales down evenly into a 3.5×2.5 card window and the
+      // letters NEVER scale: a name the sketch can't hold carries its own
+      // rounded rect into the cutout (union), instead of growing the badge
       shapes: [
-        { id: 'profile', draw: { of: 'profile', width: '3.5' } },
-        { id: 'tag', fit: { of: 'profile', margin: 0.3 } },
+        { id: 'profile', draw: { of: 'profile', maxWidth: 3.5, maxHeight: 2.5 } },
+        { id: 'nameRect', around: { margin: 0.125, cornerRadius: 0.4 } },
+        { id: 'tag', union: ['profile', 'nameRect'] },
       ],
       assets: [],
       terrains: [],

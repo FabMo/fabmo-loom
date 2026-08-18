@@ -121,8 +121,17 @@ function chiploadFor(material, diameter) {
 
 /**
  * recommendFeeds(tool, materialKey, machine?) →
- *   { rpm, feedRate, plungeRate, depthPerPass, chipload } (rates in in/min)
+ *   { rpm, feedRate, plungeRate, depthPerPass, chipload,
+ *     flutes, effectiveDiameter, binding } (rates in in/min)
  * or null when the material is unknown (caller keeps its manual feeds).
+ *
+ * `binding` names which constraint actually set the rpm — the derivation
+ * is deterministic, so the recommendation can EXPLAIN itself (the
+ * why-these-choices panel reads it): 'preferred-rpm' (nothing bound; the
+ * wood-cutting sweet spot), 'material-rpm-cap' (plastics melt / aluminum
+ * chatters), 'machine-rpm-cap' (spindle tops out below the sweet spot),
+ * or 'feed-cap' (chipload × rpm outran the machine's feed — rpm was shed
+ * to keep the chipload instead of letting the bit rub).
  *
  * V-bits engage far less diameter than they measure (the cut happens near
  * the tip), so they read the table at 1/8" regardless of shank size —
@@ -140,8 +149,12 @@ export function recommendFeeds(tool, materialKey, machine = DEFAULT_MACHINE) {
   const rpmTop = Math.min(machine.maxRPM, mat.rpmCap ?? Infinity);
   let rpm = Math.max(machine.minRPM, Math.min(PREFERRED_RPM, rpmTop));
   let feed = rpm * flutes * ipt;
+  let binding = rpmTop >= PREFERRED_RPM ? 'preferred-rpm'
+    : (mat.rpmCap ?? Infinity) < machine.maxRPM ? 'material-rpm-cap'
+    : 'machine-rpm-cap';
   if (feed > machine.maxFeed) {
     // keep the chipload, shed rpm — rubbing dulls bits faster than cutting
+    binding = 'feed-cap';
     rpm = Math.max(machine.minRPM, machine.maxFeed / (flutes * ipt));
     feed = Math.min(machine.maxFeed, rpm * flutes * ipt);
   }
@@ -153,5 +166,8 @@ export function recommendFeeds(tool, materialKey, machine = DEFAULT_MACHINE) {
     plungeRate: Math.max(1, Math.round(feed * mat.plungeFactor)),
     depthPerPass: Math.max(0.01, +(mat.depthFactor * tool.diameter).toFixed(3)),
     chipload: +ipt.toFixed(4),
+    flutes,
+    effectiveDiameter: effDia,
+    binding,
   };
 }

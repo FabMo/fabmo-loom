@@ -12,7 +12,7 @@
 // field even though they'd pass a same-origin test.
 
 import http from 'http';
-import { probe, machineName, machineStatus, jobQueue, scanSubnet, metadataBody, submitJob, runNextJob, submitAndRun } from '../app/fabmo.mjs';
+import { probe, machineName, machineStatus, jobQueue, scanSubnet, metadataBody, submitJob, runNextJob, submitAndRun, lanDiagnosis } from '../app/fabmo.mjs';
 
 let failures = 0;
 function check(label, got, want) {
@@ -255,6 +255,14 @@ console.log('queue readback');
 const q = await jobQueue(HOST);
 check('pending count', q.pending.length, 1);   // r3's job queued; r2's cleared with the stale job
 check('total preflight violations across gauntlet', state.preflightViolations.join('; '), '');
+
+console.log('lan diagnosis (browser-block classifier)');
+// in Node there is no https page and nothing browser-side to block —
+// the classifier must stand aside (null) so callers fall back to the
+// plain "no FabMo answered" note. The kind classification itself is
+// browser-behavior (Chrome LNA permission vs WebKit mixed-content) and
+// is exercised by hand in the shop, not mockable here honestly.
+check('lanDiagnosis stands aside off-https', await lanDiagnosis('192.0.2.1'), null);
 
 server.close();
 decoy.close();

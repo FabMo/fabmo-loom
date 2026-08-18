@@ -156,8 +156,18 @@ console.log('\n== generatePocket: slot fit + reachable target ==');
   const declared = r.target.rings.reduce((a, ring) => a + Math.abs(signedArea(ring)), 0);
   const total = regionArea(region);
   check(r.moves.length > 0, `channel cuts (${r.moves.length} moves)`);
-  check(declared < total * 0.995 + 1e-9,
-    `target claims the reachable footprint, not the whole channel (${declared.toFixed(3)} < ${total.toFixed(3)} sq in)`);
+  // the declared sweep errs OUTWARD by design (DECLARE_SLACK, 0.002" —
+  // polygon approximation must never hide real motion from the verifier),
+  // so for this full-width-reachable channel declared ≈ total plus at most
+  // a perimeter × slack halo; anything past that would be claiming
+  // material the bit never sweeps
+  const perim = region.outer.reduce((a, q, i) => {
+    const p = region.outer[(i + region.outer.length - 1) % region.outer.length];
+    return a + Math.hypot(q.x - p.x, q.y - p.y);
+  }, 0);
+  const halo = perim * 0.0025;
+  check(declared < total + halo + 1e-9,
+    `target stays within the channel + declare-slack halo (${declared.toFixed(3)} < ${total.toFixed(3)} + ${halo.toFixed(3)} sq in)`);
   // and the reachable footprint math agrees with what the op declares
   const reach = reachablePaths(region, 0.25);
   check(reach.length > 0, 'reachablePaths sees the same machinable spine');

@@ -71,6 +71,35 @@ async function getJson(host, path, { timeoutMs = DEFAULT_TIMEOUT, fetchFn } = {}
   return res.json();
 }
 
+// Why did a LAN probe fail from an https page? A TIMEOUT means nothing
+// answered (wrong address, tool off). An INSTANT failure means the
+// BROWSER refused to ask: Chrome's Local Network Access permission was
+// never granted (or was denied), or the browser is WebKit (Safari/iPad
+// — every iOS browser), whose mixed-content block on https→http has NO
+// exemption mechanism at all. The two need opposite fixes, so classify
+// instead of shrugging "no FabMo answered". Returns null when the page
+// is http (nothing browser-side to block) or the host actually answers.
+export async function lanDiagnosis(host, { fetchFn } = {}) {
+  if (typeof location === 'undefined' || location.protocol !== 'https:') return null;
+  const { url } = hostUrl(host, '/version');
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const t0 = now();
+  try {
+    await timedFetch(url, { method: 'GET' }, 1500, fetchFn);
+    return null;   // reachable — whatever failed before, it wasn't a block
+  } catch (e) {
+    const ms = now() - t0;
+    if (e?.name === 'AbortError' || ms > 1200) return { kind: 'timeout', ms: Math.round(ms) };
+    // Chrome VALIDATES the targetAddressSpace enum (throws on a bogus
+    // value) — that's the browser with the permission model. A browser
+    // that silently ignores the option has no way to exempt the request.
+    let validated = false;
+    try { new Request('http://192.0.2.1/', { targetAddressSpace: 'nonsense-value' }); }
+    catch { validated = true; }
+    return { kind: validated ? 'permission' : 'mixed-content', ms: Math.round(ms) };
+  }
+}
+
 // ---------------------------------------------------------------- discovery
 
 // Is there a FabMo at this address? Resolves {host, version} or null —

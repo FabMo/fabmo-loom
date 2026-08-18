@@ -1,0 +1,33 @@
+{
+  "//": "FabMo .fma packaging manifest — what an installable on-tool build of Loom contains. A packager (ShopBot Labs serves one live at /apps/fabmo-loom/fabmo.fma) zips exactly these paths, rewrites the entry's ui_testbed theme links to the bundled ui/ copies, and writes a FabMo package.json pointing at `main`. Anything matching *.local.* (per-deployment guest mounts, funnel data) is excluded unconditionally by the packager, on top of the excludes here.",
+  "id": "fabmo-loom",
+  "name": "FabMo Loom",
+  "description": "Speak a shop app into existence — verified CNC toolpaths from a prompt, a sketch, and a slider.",
+  "color": "#6b4fd8",
+  "main": "app/index.html",
+  "include": [
+    "app",
+    "adapters",
+    "ir",
+    "strategies",
+    "vendor",
+    "assets",
+    "examples/engraver",
+    "node_modules/three/build/three.module.js",
+    "node_modules/three/examples/jsm/controls/OrbitControls.js",
+    "node_modules/d3-delaunay",
+    "node_modules/delaunator",
+    "node_modules/robust-predicates",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "exclude": [
+    "app/test.mjs",
+    "app/test-live.mjs",
+    "examples/engraver/test.mjs",
+    "examples/engraver/index.html",
+    "examples/engraver/app.js"
+  ],
+  "theme": "ui"
+}
