@@ -255,8 +255,29 @@ CURRENT RECIPE:
 ${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 }
 
-export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8', shop = {} } = {}) {
+// Forced tool choice ({type:'tool'} / {type:'any'}) returns a 400 on the
+// Claude 5 top models (Fable 5.1, Mythos 5.1, Opus 5.5); the documented
+// replacement is tool_choice 'auto' + an explicit instruction naming the
+// tool. Those models also always think, so the same budget has to cover
+// reasoning AND the action list. Unknown models get the forced form and a
+// one-shot fallback to 'auto' in runIntentLoop when the API says no.
+export const FORCED_TOOL_CHOICE_UNSUPPORTED = /fable|mythos|opus-5-5/i;
+const CALL_TOOL_RULE = `- RESPOND ONLY BY CALLING apply_recipe_actions, exactly once, every time — even to decline (empty actions + declined) or to answer a question (empty actions + the answer in summary). Never reply in plain text.`;
+
+export function withAutoToolChoice(req) {
+  if (req.tool_choice?.type === 'auto') return req;
+  const sys = typeof req.system === 'string' ? req.system : req.system?.[0]?.text ?? '';
+  const patched = sys.includes(CALL_TOOL_RULE) ? sys : sys.replace('\n\nCURRENT RECIPE:', `\n${CALL_TOOL_RULE}\n\nCURRENT RECIPE:`);
   return {
+    ...req,
+    system: typeof req.system === 'string' ? patched : [{ ...req.system[0], text: patched }, ...req.system.slice(1)],
+    tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+    max_tokens: Math.max(req.max_tokens ?? 0, 16000),
+  };
+}
+
+export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8', shop = {} } = {}) {
+  const req = {
     model,
     // generous: geometry-heavy builds (multi-shape recipes, big edits)
     // were hitting 2000 and truncating mid-action-list, which reads as a
@@ -267,6 +288,7 @@ export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8'
     tools: [ACTION_TOOL],
     tool_choice: { type: 'tool', name: 'apply_recipe_actions' },
   };
+  return FORCED_TOOL_CHOICE_UNSUPPORTED.test(model) ? withAutoToolChoice(req) : req;
 }
 
 // ------------------------------------------------------------------ apply
@@ -548,7 +570,13 @@ export function applyActions(recipe, payload) {
   //      survivors' reasons are reported.
   // Operations are NOT retried: pipeline position is machining order,
   // and their shape/control references are checked here in full.
-  const actions = (payload.actions ?? []).filter(a => a && typeof a === 'object');
+  // actions must be an array; a model has sent an object keyed 0..n and a
+  // bare string — data, not trusted shape (crashed a whole turn, 2026-09-26)
+  const rawActions = Array.isArray(payload.actions) ? payload.actions
+    : payload.actions && typeof payload.actions === 'object' ? Object.values(payload.actions)
+    : [];
+  if (payload.actions !== undefined && !Array.isArray(payload.actions)) skipped.push('actions: expected an array of action objects');
+  const actions = rawActions.filter(a => a && typeof a === 'object');
   const ordered = [
     ...actions.filter(a => a.kind === 'add_control'),
     ...actions.filter(a => a.kind !== 'add_control'),
@@ -702,6 +730,17 @@ export class IntentError extends Error {
   constructor(message, { retryable = true } = {}) { super(message); this.retryable = retryable; }
 }
 
+// A weave that THROWS (a strategy bug on unusual input) is still an
+// observation: the model gets the error text and can route around it,
+// instead of the whole turn dying. The app's own render path reports the
+// same failure on its next weave.
+async function safeWeave(weave, recipe) {
+  try { return await weave(recipe); }
+  catch (e) {
+    return { ok: false, errors: [`the weave crashed: ${e?.message ?? e} (a strategy bug on this input — try different parameters or a different strategy, and say so in the summary)`], warnings: [], preview: { empty: true } };
+  }
+}
+
 const dedupeDeclined = (list) => {
   const seen = new Set(), out = [];
   for (const d of list) {
@@ -734,10 +773,29 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   let cur = recipe;
   const cap = mode === 'off' ? 1 : Math.max(1, maxTurns);
   for (let t = 0; t < cap; t++) {
-    const data = await call(req);
+    let data;
+    try {
+      data = await call(req);
+    } catch (e) {
+      // a model we did not know rejects forced tool choice: switch this
+      // conversation to 'auto' + the call-the-tool rule and try once more
+      if (t === 0 && req.tool_choice?.type !== 'auto' && /tool_choice/.test(e?.message ?? '')) {
+        req = withAutoToolChoice(req);
+        data = await call(req);
+      } else throw e;
+    }
     usage.calls++;
     for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) usage[k] += data?.usage?.[k] ?? 0;
-    const toolUse = data?.content?.find(b => b.type === 'tool_use');
+    let toolUse = data?.content?.find(b => b.type === 'tool_use');
+    // under tool_choice 'auto' a model may answer in prose instead of calling
+    // the tool (Fable 5.1, 1 of 25 probe rows): nudge once, same conversation
+    if (!toolUse && t === 0 && req.tool_choice?.type === 'auto' && Array.isArray(data?.content)) {
+      req = { ...req, messages: [...req.messages, { role: 'assistant', content: data.content }, { role: 'user', content: 'Call apply_recipe_actions now with what you just described (or an empty actions list plus declined entries). Do not answer in text.' }] };
+      data = await call(req);
+      usage.calls++;
+      for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) usage[k] += data?.usage?.[k] ?? 0;
+      toolUse = data?.content?.find(b => b.type === 'tool_use');
+    }
     if (!toolUse) {
       if (t === 0) throw new IntentError('the model returned no actions');
       break;   // a revise turn that produced nothing: keep the state we have
@@ -750,7 +808,8 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       break;
     }
     const p0 = toolUse.input ?? {};
-    if (t === 0 && !p0.actions?.length && !p0.declined?.length && !p0.summary?.trim()) {
+    const p0Actions = Array.isArray(p0.actions) ? p0.actions : p0.actions && typeof p0.actions === 'object' ? Object.values(p0.actions) : [];
+    if (t === 0 && !p0Actions.length && !p0.declined?.length && !(typeof p0.summary === 'string' && p0.summary.trim())) {
       throw new IntentError('the model came back empty-handed — nothing was applied; hit Generate again');
     }
     const out = applyActions(cur, p0);
@@ -760,19 +819,37 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       summary: out.summary, suggest: out.suggest, usage: data.usage ?? null, observation: null,
     };
     turns.push(turn);
-    const hadActions = (p0.actions ?? []).filter(a => a && typeof a === 'object').length > 0;
+    const hadActions = p0Actions.filter(a => a && typeof a === 'object').length > 0;
     // nothing changed → nothing new to look at: a pure decline on turn 0,
     // or a revise turn that wrote its summary with the state already in view
     if (!hadActions) break;
     if (t === cap - 1) break;
-    const result = weave ? await weave(cur) : null;
+    const result = weave ? await safeWeave(weave, cur) : null;
     turn.observation = buildObservation(out, result, cur);
     if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
     req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2 });
   }
   const first = turns[0], last = turns[turns.length - 1];
   const suggest = last.suggest?.length ? last.suggest : first.suggest;
-  let summary = (last.summary ?? '').trim() || (first.summary ?? '');
+  let summary = (typeof last.summary === 'string' ? last.summary : '').trim();
+  // never fall back to the FIRST summary once a look has happened — that
+  // one was written blind, which is the whole problem
+  if (!summary && turns.length === 1) summary = (typeof first.summary === 'string' ? first.summary : '').trim();
+  // A blank summary leaves the user with only the verdict badge (Sonnet 5
+  // returned empty summaries on 5 of 25 probe rows, including a failing
+  // build). Say the deterministic minimum from what the app knows.
+  if (!summary) {
+    const obs = [...turns].reverse().find(x => x.observation)?.observation ?? null;
+    const declined = dedupeDeclined(turns.flatMap(x => x.declined ?? []));
+    const bits = [];
+    if (obs?.ok) bits.push('Built and verified.');
+    else if (obs && !obs.pipeline.length) bits.push('Nothing was built.');
+    else if (obs) bits.push(`The build does not verify yet${obs.errors[0] ? `: ${obs.errors[0]}` : '.'}`);
+    else if (!cur.pipeline.length) bits.push('Nothing was built.');
+    if (declined.length) bits.push(`Declined: ${declined.map(d => d.what).join('; ')}.`);
+    summary = bits.join(' ') || 'No summary was given.';
+    last.synthesizedSummary = true;
+  }
   // The last allowed call was told "no actions", but a model that still
   // sees a fix will sometimes emit it anyway (seen live: ornament-shape-set
   // fixed itself on the final call and then described the OLD state, since
@@ -781,7 +858,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   // model was shown, say so in one deterministic sentence.
   const lastHadActions = (last.payload.actions ?? []).filter(a => a && typeof a === 'object').length > 0;
   if (lastHadActions && turns.length > 1 && weave && last.applied.length) {
-    const result = await weave(cur);
+    const result = await safeWeave(weave, cur);
     last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur);
     const shown = turns[turns.length - 2].observation;
     const before = shown ? shown.ok : null, after = last.observation.ok;

@@ -289,6 +289,71 @@ console.log('--- applyActions: flattened control/operation payloads ---');
   else fail(`skip reasons: ${JSON.stringify(bad.skipped)}`);
 }
 
+console.log('--- robustness: shapes the model has actually sent ---');
+{
+  // actions as an object keyed 0..n / as a string — must not crash the turn
+  const obj = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: { 0: { kind: 'set_name', name: 'A' }, 1: { kind: 'set_thickness', thickness: 0.5 } }, declined: [] });
+  if (obj.recipe.name === 'A' && obj.skipped.some(m => /expected an array/.test(m))) pass('actions as an object: values applied, shape noted'); else fail(`actions-object: ${JSON.stringify(obj.skipped)} ${obj.recipe.name}`);
+  const str = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: 'set_name A', declined: [] });
+  if (str.applied.length === 0 && str.skipped.length === 1) pass('actions as a string: nothing applied, one reason'); else fail(`actions-string: ${JSON.stringify(str)}`);
+  // a numeric text param (advent drawer number 24) engraves "24" instead of crashing text layout
+  let rec = structuredClone(EMPTY_RECIPE);
+  rec = applyActions(rec, { summary: 'x', actions: [
+    { kind: 'add_operation', operation: { id: 'n', strategy: 'vcarve_text', params: { text: 24, letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 't', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+  ], declined: [] }).recipe;
+  const rn = run(rec);
+  if (rn.ok) pass('numeric text param is stringified and verifies'); else fail(`numeric text: ${rn.errors?.[0]}`);
+  rec = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'add_operation', operation: { id: 'n', strategy: 'vcarve_text', params: { text: { value: 'x' }, letterHeight: 1 } } },
+  ], declined: [] }).recipe;
+  const ro = run(rec);
+  if (!ro.ok && /must be text, not an object/.test(ro.errors?.[0] ?? '')) pass('object text param → clear error, no crash'); else fail(`object text: ${ro.errors?.[0]}`);
+  // a weave that THROWS becomes an observation the model can act on
+  let calls = 0;
+  const seenObs = [];
+  const boom = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', maxTurns: 2,
+    call: async (r) => { calls++; if (r.messages.length > 1) seenObs.push(r.messages[2].content[0].content); return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: calls === 1 ? { summary: 's', actions: [{ kind: 'set_name', name: 'B' }], declined: [] } : { summary: 'crashed, sorry', actions: [], declined: [] } }] }; },
+    weave: async () => { throw new Error('kaboom in a strategy'); } });
+  if (calls === 2 && /WEAVE: FAILED/.test(seenObs[0]) && /the weave crashed: kaboom/.test(seenObs[0]) && boom.summary === 'crashed, sorry') pass('throwing weave → failing observation, turn survives'); else fail(`weave crash: calls ${calls} obs ${seenObs[0]?.slice(0, 200)}`);
+}
+
+console.log('--- tool choice per model ---');
+{
+  const forced = buildParseRequest(structuredClone(EMPTY_RECIPE), 'a sign', { model: 'claude-opus-4-8' });
+  const auto = buildParseRequest(structuredClone(EMPTY_RECIPE), 'a sign', { model: 'claude-fable-5-1' });
+  if (forced.tool_choice.type === 'tool' && forced.max_tokens === 8000 && !/RESPOND ONLY BY CALLING/.test(forced.system)) pass('Opus 4.8: forced tool choice, unchanged prompt');
+  else fail('forced request changed');
+  if (auto.tool_choice.type === 'auto' && auto.tool_choice.disable_parallel_tool_use && auto.max_tokens === 16000 && /RESPOND ONLY BY CALLING apply_recipe_actions/.test(auto.system) && /\n\nCURRENT RECIPE:/.test(auto.system))
+    pass('Fable 5.1: auto + call-the-tool rule ahead of CURRENT RECIPE, thinking-sized budget');
+  else fail(`auto request: ${JSON.stringify(auto.tool_choice)} ${auto.max_tokens}`);
+  // unknown model: the API says no once → the loop flips to auto and retries
+  let calls = 0; const seenChoices = [];
+  const out = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', model: 'claude-future-9',
+    call: async (r) => {
+      calls++; seenChoices.push(r.tool_choice.type);
+      if (r.tool_choice.type !== 'auto') throw new Error('API error 400: {"type":"error","error":{"type":"invalid_request_error","message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}');
+      return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { summary: 'no', actions: [], declined: [{ what: 'x', why: 'y' }] } }] };
+    } });
+  if (calls === 2 && seenChoices.join(',') === 'tool,auto' && out.declined.length === 1) pass('unknown model rejecting forced choice → one retry on auto, same conversation');
+  else fail(`fallback: calls ${calls} ${seenChoices}`);
+  // under 'auto' a prose answer gets one nudge to call the tool
+  calls = 0; let nudged = null;
+  const prose = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', model: 'claude-fable-5-1',
+    call: async (r) => {
+      calls++;
+      if (calls === 1) return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: 'I would make a sign with...' }] };
+      nudged = r.messages;
+      return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { summary: 'ok', actions: [], declined: [{ what: 'x', why: 'y' }] } }] };
+    } });
+  if (calls === 2 && nudged?.length === 3 && nudged[1].role === 'assistant' && /Call apply_recipe_actions now/.test(nudged[2].content) && prose.declined.length === 1) pass("'auto': prose answer → one nudge, tool call accepted");
+  else fail(`prose nudge: calls ${calls} msgs ${nudged?.length}`);
+  calls = 0; let err2 = null;
+  try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', model: 'claude-fable-5-1', call: async () => { calls++; return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: 'still prose' }] }; } }); }
+  catch (e) { err2 = e; }
+  if (calls === 2 && err2 instanceof IntentError) pass("'auto': prose twice → the old 'no actions' error, no infinite nudging"); else fail(`prose twice: calls ${calls} ${err2?.message}`);
+}
+
 console.log('--- intent loop: observation ---');
 {
   const rec0 = structuredClone(EMPTY_RECIPE);
@@ -423,6 +488,14 @@ console.log('--- intent loop: stop conditions ---');
   const late2 = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? broken : calls === 2 ? badBefore : lateNoHelp)(r); }, weave: async (r) => run(r) });
   if (!run(late2.recipe).ok && !/Update:/.test(late2.summary)) pass('late action with an unchanged (still failing) verdict adds no postscript');
   else fail(`late no-help: ok ${run(late2.recipe).ok}, summary "${late2.summary}"`);
+
+  // a blank summary (seen from Sonnet 5) gets a deterministic minimum
+  calls = 0;
+  const blankDecl = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', call: async () => ({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { summary: '', actions: [], declined: [{ what: 'a 3D roller', why: 'flat stock' }] } }] }), weave: async (r) => run(r) });
+  if (blankDecl.summary === 'Nothing was built. Declined: a 3D roller.') pass('blank summary on a decline → synthesized'); else fail(`blank decline summary: "${blankDecl.summary}"`);
+  calls = 0;
+  const blankFail = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 2, call: async () => { calls++; return mk(calls === 1 ? broken : { summary: '', actions: [], declined: [] })(); }, weave: async (r) => run(r) });
+  if (/^The build does not verify yet: op "tag"/.test(blankFail.summary)) pass('blank summary on a failing build → names the first error'); else fail(`blank fail summary: "${blankFail.summary}"`);
 
   // first-turn failures throw the same messages the app always showed
   let err = null;

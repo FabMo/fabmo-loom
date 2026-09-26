@@ -69,6 +69,12 @@ non-flat-stock objects; textile looms.
 | empty payload as silent success | **FIXED v0.67** — surfaced as retryable |
 | stale single-font arg in app/test-live.mjs | open (test cannot pass) |
 | flattened add_control / add_operation payloads ({kind, id, type…} with no control:/operation: object) → "bad control" / unknown strategy "undefined", a reason too vague for the second look to fix | **FIXED v0.76 2026-09-26** — applyActions normalizes the flattened form + specific skip reasons; corpus replay: 19 rows improved (12 now verify, incl. 2 real funnel rows), 0 regressions; birdhouse live retest → verified |
+| tag_cutout with explicit width/height larger than the content → cutout leaves the auto-sized stock envelope (stock sizes from content, not the pinned tag) | open — found by the model A/B (toggle-switch-panel ×3 models, pumpkin-porch-sign, reserved-parking-sign); runtime fix: size stock from the largest explicit cutout |
+| `payload.actions` not an array (object keyed 0..n / string) → applyActions TypeError killed the turn | **FIXED v0.77** — coerced, shape noted in skipped |
+| numeric `text` param (advent number 24) → text layout "not iterable" crash | **FIXED v0.77** — string params stringify numbers/booleans, reject objects with a reason |
+| weave THROWS inside the loop → whole turn ERROR | **FIXED v0.77** — safeWeave turns it into a failing observation the model can route around |
+| blank final summary (Sonnet 5, 5/25 incl. a failing build) → user sees only the badge | **FIXED v0.77** — deterministic minimum synthesized from the observation + declines; never falls back to the blind first summary after a look |
+| `auto` tool choice: prose answer instead of a tool call (Fable 5.1, 1/25) | **FIXED v0.77** — one nudge on the same conversation, then the old 'no actions' error |
 | final call emits fixes despite "no actions" → applied unseen, summary describes the OLD state (ornament-shape-set recheck: job verified, summary said "does NOT yet post") | **FIXED v0.76** — runIntentLoop re-weaves after a late fix and appends a deterministic "(Update: … verifies / still fails — <error>)" when the verdict changed |
 
 ## Closed-loop A/B (2026-09-26)
@@ -99,6 +105,68 @@ robustness row below). The semantic classes (same-face-flip,
 bathymetry-claim, phantom-plug) are untouched by design: the observation
 cannot see them either.
 
+## Model-generation A/B — priors written BEFORE the run (2026-09-26)
+
+Same 25 prompts (2026-08-10 set), v0.76 loop on, four models:
+claude-opus-4-8 (the incumbent, re-run on v0.76), claude-sonnet-5,
+claude-opus-5-5, claude-fable-5-1. Predictions on record:
+
+1. Authoring slips (bore-vs-pocket, content-vs-fixed-disc, overlapping
+   pockets, envelope overflow, math-fn misuse) DROP on the Claude 5 models
+   → more rows verified on the FIRST turn, fewer corrections needed.
+2. Confident-on-failure stays at ~0 for all four — the loop, not the
+   model, owns that number now.
+3. Semantic overclaims (same-face flip, bathymetry, phantom plug) do NOT
+   move with model generation: no observation exposes them.
+4. Sonnet 5 lands close to Opus 4.8 on verified-rate at a fraction of the
+   tokens; Fable 5.1 and Opus 5.5 lead on verified-first-turn and on
+   honest declines of by-design asks (rotary, raised bosses, likenesses).
+5. Risk to watch: a stronger model authoring MORE (bigger pipelines,
+   more shapes) trips more verifier gates, so verified-rate could dip
+   even as quality rises — read the failing rows, not just the tally.
+
+## Model-generation A/B — RESULTS (2026-09-26, same day as the priors)
+
+25 prompts × 4 models, v0.76+ loop on, one run each (n=25: read as
+direction, not decimals). Fable 5.1 / Opus 5.5 reject forced tool_choice →
+`auto` + a call-the-tool rule (intent.mjs `withAutoToolChoice`).
+
+| | Opus 4.8 | Sonnet 5 | Opus 5.5 | Fable 5.1 |
+|---|---|---|---|---|
+| verified (final) | 13 | 10 | **20** | **20** |
+| verified on the FIRST turn (before any look) | 9/22 | 10/22 | **17/25** | 17/24 |
+| first-turn actions skipped by the validator | 7 | 7 | **0** | **0** |
+| empty pipeline | 3 | 4 | 0 | 1 (prose instead of a tool call) |
+| confident-on-failure (by eye) | 0 | 0 (but 5 BLANK summaries) | 0 | 0 |
+| corrections the loop applied | 57 | 70 | **29** | 61 |
+| output tokens | 41k | 45k | 109k | 174k |
+| median wall time / prompt | 21 s | 23 s | 44 s | **95 s (max 287 s)** |
+| cost of the 25-prompt run (first-party rates) | ~$2.5 | ~$1.1 | ~$3.4 | ~$12 |
+
+Priors vs actuals: (1) authoring slips DROP on Claude 5 — held hard
+(0 validator skips, 17 first-turn verifies vs 9); (2) confident-on-failure
+~0 everywhere — held (the loop owns it); (3) semantic overclaims unmoved —
+held, none of the three classes is even exercised by this set; (4) Sonnet 5
+≈ Opus 4.8 — WRONG: Sonnet 5 is below Opus 4.8 here (10 vs 13 verified,
+blank summaries on 5 rows → deterministic fallback shipped); Fable/Opus 5.5
+lead — held; (5) stronger model trips more gates — did not show: Opus 5.5
+authored more AND verified more. Unpredicted: Fable 5.1 is 4.5× slower, ~4× the output tokens and ~5× the
+cost of Opus 4.8 for the same verified count as Opus 5.5;
+under `auto` it answered one prompt in prose (nudge-once shipped).
+
+Recommendation: **Opus 5.5 as Loom's default model** (same verified rate
+as Fable 5.1 at ~60% of its output tokens, half its wall time and ~30% of its cost; a
+better first draft than Opus 4.8 by 8 verified rows; fewest corrections
+needed). Fable 5.1 for an "expert" toggle, not the default. Sonnet 5 not
+for authoring.
+
+Model-independent bug this surfaced (3 of 4 models on toggle-switch-panel,
+2 on pumpkin-porch-sign, reserved-parking): **a tag_cutout with EXPLICIT
+width/height larger than the content runs outside the auto-sized stock
+envelope** — the stock sizes from content, not from the pinned tag. Runtime
+fix wanted (size stock from the largest explicit cutout), top of the
+robustness backlog.
+
 ## Run log
 
 (One line per nightly run, appended by the probe agent: date,
@@ -125,3 +193,4 @@ prompts probed, outcomes, new classes, evidence increments, cost.)
 - 2026-08-10 — nightly: 7 FULFILLED_UNVERIFIED, 3 DECLINED, 7 PARTIAL, 8 FULFILLED; evidence: empty-payload-as-fulfilled +3, working-as-intended +6, bore-vs-pocket +1, content-vs-fixed-disc +3, envelope-overflow-verify +2, drawer-doors +1, beveled-panels +1, curved-text +1; OVERCLAIMS: toggle-switch-panel, reserved-parking-sign, fraction-circle-set, pi-hat-enclosure, number-line-ruler, cafe-menu-slot-board; funnel +0 (0 declined); $4.20; Electronics/education batch: four empty/failed pipelines summarized as built plus recurring bore-vs-pocket, content-vs-disc and envelope-overflow slips; all declines (arduino, diffuser, stake, bat, wedge) working-as-intended and no new classes.
 - 2026-09-26 — manual A/B (not a nightly; nightlies were dead Aug 11–Sep 26 on an invalid key, rotated today): 25 prompts × {one-shot, loop}; loop: 24/25 took a second look, 59 corrections, 24 summaries revised; confident-on-failure 10 → 0, verified 11 → 13, empty pipeline 7 → 3; 2 rows worse (ornament, birdhouse); ~$12 total. See "Closed-loop A/B" above.
 - 2026-09-26 — recheck after the flattened-payload fix (2 prompts, loop): birdhouse-flatpack → FULFILLED (first-turn skips 0); ornament-shape-set → FULFILLED with 8 fixes but a stale final summary (fixed itself on the last call, never saw the result) → the postscript rule above.
+- 2026-09-26 — model A/B (manual): 25 prompts × {opus-4-8, sonnet-5, opus-5-5, fable-5-1}, loop on; verified 13/10/20/20; first-turn verified 9/10/17/17; validator skips 7/7/0/0; ~$2.5/$1.1/$3.4/$12; median 21/23/44/95 s per prompt. See "Model-generation A/B — RESULTS". Recommendation: Opus 5.5 default.

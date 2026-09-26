@@ -599,6 +599,13 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
     if (spec.type === 'boolean') {
       v = v === true || v === 'true' || v === 'yes';
     }
+    // string params take what the model sent as text: a number ("text": 24
+    // for a numbered drawer front) or a boolean is stringified, anything
+    // structured is an error instead of a crash deep in a strategy
+    if (spec.type === 'string' && v !== undefined && v !== null && typeof v !== 'string') {
+      if (typeof v === 'number' || typeof v === 'boolean') v = String(v);
+      else { errors.push(`op "${opId}": param ${key} must be text, not ${Array.isArray(v) ? 'a list' : 'an object'}`); continue; }
+    }
     if (spec.type === 'number') {
       // template number params also take BARE expressions — models write
       // posX: "length/2 - inset" as readily as "{length/2 - inset}", and
