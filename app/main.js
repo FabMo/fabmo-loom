@@ -9,7 +9,7 @@ import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { openDraw, initDraw } from './draw.mjs';
 import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
-import { buildParseRequest, applyActions, promptRecipeView } from './intent.mjs';
+import { runIntentLoop, promptRecipeView } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
@@ -439,7 +439,7 @@ function initWeaveWorker(guestUrls) {
   };
   w.postMessage({ kind: 'init', fonts: LOADED_FONTS, guestUrls });
   weaveWorker = w;
-  window.loomWeave = { workerActive: () => !!weaveWorker };   // test/debug handle
+  window.loomWeave = { workerActive: () => !!weaveWorker, pending: () => weavePending.size };   // test/debug handle
 }
 
 // weave a recipe state → Promise<{ result, sim }>, wherever it runs
@@ -1204,28 +1204,33 @@ async function generate() {
   $('generate').textContent = 'weaving…';
   const stopWeave = startWeave($('appPanel'));
   try {
-    const req = buildParseRequest(recipe, utterance, { shop });
-    // what the model SAW — captured before applyActions mutates the recipe
+    // what the model SAW — captured before the loop mutates the recipe
     // (cloned: with no assets promptRecipeView returns the live object).
     // Rides along to the funnel so intent/replay.mjs can reproduce the parse.
     const parseContext = structuredClone(promptRecipeView(recipe));
     // own key wins when both exist: unlimited beats metered
-    const data = key ? await parseDirect(req, key) : await parseViaGuestPass(req, invite);
-    const toolUse = data.content?.find(b => b.type === 'tool_use');
-    if (!toolUse) throw new Error('the model returned no actions');
-    // a response cut off at the token ceiling arrives as a PARTIAL action
-    // list that would half-build silently — refuse the whole thing instead
-    if (data.stop_reason === 'max_tokens') {
-      throw new Error('that answer overran its budget mid-build, so nothing was applied — ask for it in smaller pieces (and describe repeated layouts as a pattern rather than listing every piece)');
-    }
-    // an empty payload (no actions, no declines, no summary) is a stall,
-    // not a result — surface it as retryable rather than a blank turn
-    const p0 = toolUse.input ?? {};
-    if (!p0.actions?.length && !p0.declined?.length && !p0.summary?.trim()) {
-      throw new Error('the model came back empty-handed — nothing was applied; hit Generate again');
-    }
+    const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
+    let calls = 0;
+    // The closed loop: parse → apply → weave → the model sees the result
+    // and corrects / writes the final summary (see intent.mjs). The weave
+    // callback is the app's own weave path (worker + resolved terrains),
+    // so what the model is told is exactly what the user would see.
+    const out = await runIntentLoop({
+      recipe, utterance, shop,
+      call: (req) => { if (calls++ > 0) stopWeave.setLabel?.(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
+      weave: async (rec) => {
+        stopWeave.setLabel?.('weaving…');
+        const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
+        let terrains = {};
+        if (rec.terrains?.length) {
+          try { terrains = await resolveTerrains(rec, () => {}); }
+          catch (e) { return { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } }; }
+        }
+        const w = await weave({ recipe: rec, values, terrains, shop: shopForRun() });
+        return w.result;
+      },
+    });
 
-    const out = applyActions(recipe, toolUse.input);
     recipe = out.recipe;
     modelChips = out.suggest;   // this turn's targeted chips (renderControls → renderChips shows them)
     // the model's own account of what it built rides on the recipe (not
@@ -1240,22 +1245,36 @@ async function generate() {
     // the funnel / gap report — declines are the catalog's backlog and
     // parses its pricing data. Fire-and-forget: the weave never depends
     // on logging, and a checkout without the endpoint just no-ops.
+    // `loop` records what the second look changed: the summary before the
+    // model saw the weave, and any corrective actions it emitted after.
+    const firstTurn = out.turns[0];
     const logPromise = fetch('/api/intent/log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(invite ? { 'x-loom-invite': invite } : {}) },
       body: JSON.stringify({
         app: 'loom',
         utterance,
-        intent: { summary: out.summary, actions: toolUse.input.actions ?? [], declined: out.declined, suggest: out.suggest },
-        usage: { input: data.usage?.input_tokens, output: data.usage?.output_tokens },
+        intent: {
+          summary: out.summary, actions: firstTurn.payload.actions ?? [], declined: out.declined, suggest: out.suggest,
+          loop: {
+            turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary,
+            revisedActions: out.turns.slice(1).flatMap(t => t.payload.actions ?? []),
+            observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped.length, errors: t.observation.errors.slice(0, 3) } : null),
+          },
+        },
+        usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
         context: parseContext,
       }),
     });
 
+    const lastTurn = out.turns[out.turns.length - 1];
+    const loopNote = out.revised
+      ? `<div class="declined">↻ checked against the weave${out.fixes ? ` — ${out.fixes} correction${out.fixes === 1 ? '' : 's'} applied` : ''}${out.summary.trim() !== out.firstSummary.trim() ? ', summary revised' : ''}</div>`
+      : '';
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
-    const skipped = out.skipped.length ? `<div class="declined">skipped: ${out.skipped.map(escapeHtml).join('; ')}</div>` : '';
-    const turnEl = addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}`);
+    const skipped = lastTurn.skipped.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';
+    const turnEl = addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}`);
 
     // the funnel's query id, pinned to the turn: "quote this when something
     // came out wrong" — replayable server-side with intent/replay.mjs

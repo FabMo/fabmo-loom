@@ -56,6 +56,9 @@ for (const [idx, raw] of rows.entries()) {
     context,
     payload: { summary: raw.summary ?? '', actions, declined: raw.declined ?? [] },
     recordedAt: raw.ts ?? new Date().toISOString().slice(0, 10),
+    // the closed loop's record rides along for measurement (replay stays
+    // turn-1 only — corrections came from a live model and aren't replayed)
+    ...(raw.loop ? { loop: raw.loop, firstSummary: raw.firstSummary, revisedActions: raw.revisedActions ?? [] } : {}),
   };
   if (usesGuestStrategy(row, env) && !env.guestsLoaded) { guestless++; continue; }
   row.blessed = blessOf(replayRow(row, env));

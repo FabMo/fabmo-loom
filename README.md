@@ -65,7 +65,7 @@ agent's — on a real spindle.
 | `strategies/surface-raster.js` | Catch-all 3D strategy: ballnose-compensated raster over any heightmap source, with depth passes, masks, ridge-safe links, and run economy. |
 | `strategies/bore.js` / `strategies/chamfer.js` | Helical bore entry; vee/ball edge-break with verifier-visible imprinted intent. |
 | `adapters/terrain.js` | Reference lowering adapter (pass-structured relief JSON → moves). |
-| `intent/` | The **only LLM touchpoint** in the platform: schema-constrained natural-language → app-action parsing (structured outputs, open intake / narrow fulfillment with an explicit `declined` channel), a thin server proxy, and a bring-your-own-key browser path. The LLM stays above the top rail; everything below it is deterministic, verified code. |
+| `intent/` | The **only LLM touchpoint** in the platform: schema-constrained natural-language → app-action parsing (structured outputs, open intake / narrow fulfillment with an explicit `declined` channel), a thin server proxy, and a bring-your-own-key browser path. The LLM stays above the top rail; everything below it is deterministic, verified code. In the Loom app the parse is a **closed loop** (`app/intent.mjs` `runIntentLoop`): act → the app applies, weaves and verifies → the model sees that report as a tool result → it corrects what the catalog can and writes the summary the user reads *with the built thing in view*. Seventeen nightly probes had shown 4–11 of 25 one-shot summaries confidently describing builds the pipeline had refused; the loop exists to close that blind spot without moving the boundary (the model still emits only recipe actions). |
 | `vendor/clipper.js` | clipper-lib 6.4.2 wrapped as ESM — no build step, runs in Node and the browser. |
 
 ## Tests

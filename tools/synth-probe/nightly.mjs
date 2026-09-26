@@ -119,16 +119,18 @@ priorMisses = results.filter(r =>
 const compact = results.map(r => ({
   id: r.id, prior: r.prior, outcome: r.outcome, verified: r.verified,
   prompt: r.prompt, summary: (r.summary ?? '').slice(0, 300),
+  firstSummary: r.firstSummary && r.firstSummary !== r.summary ? r.firstSummary.slice(0, 300) : undefined,
+  loop: r.loop ? { turns: r.loop.turns, fixes: r.loop.fixes } : undefined,
   pipeline: r.pipeline, skipped: (r.skipped ?? []).slice(0, 4),
   weaveErrors: (r.weaveErrors ?? []).slice(0, 3),
   declined: (r.declined ?? []).map(d => ({ what: d.what, why: (d.why ?? '').slice(0, 200) })),
 }));
 log('triaging…');
 const triText = await llm(
-  `You triage probe results for the Loom improvement loop against its failure-class ledger. Rules: classify every non-clean row (declines, verify failures, skips, crashes) to an existing ledger class id when one fits; propose a NEW class only when nothing fits. Separately flag OVERCLAIMS: rows whose summary confidently claims something their pipeline/actions cannot deliver (the verifier cannot catch these — judge summary against pipeline). By-design declines that declined correctly are "working-as-intended", not findings. Output ONLY JSON, no fences: {"classified":[{"id","class","evidence":"one line"}], "newClasses":[{"id","section":"capability|authoring|overclaim|robustness","description","examples":["prompt-id"]}], "overclaims":[{"id","claim","reality"}], "shippedRegressions":[{"id","class"}], "runNote":"one sentence"}`,
+  `You triage probe results for the Loom improvement loop against its failure-class ledger. Rules: classify every non-clean row (declines, verify failures, skips, crashes) to an existing ledger class id when one fits; propose a NEW class only when nothing fits. Separately flag OVERCLAIMS: rows whose FINAL summary confidently claims something their pipeline/actions cannot deliver (the verifier cannot catch these — judge summary against pipeline). Rows may also carry firstSummary — what the model said BEFORE it saw the weave result; when firstSummary overclaimed and the final summary is honest, list the row under caughtByLoop instead of overclaims. By-design declines that declined correctly are "working-as-intended", not findings. Output ONLY JSON, no fences: {"classified":[{"id","class","evidence":"one line"}], "newClasses":[{"id","section":"capability|authoring|overclaim|robustness","description","examples":["prompt-id"]}], "overclaims":[{"id","claim","reality"}], "caughtByLoop":[{"id","claim"}], "shippedRegressions":[{"id","class"}], "runNote":"one sentence"}`,
   `LEDGER:\n${ledger}\n\nTONIGHT'S RESULTS (${results.length} rows):\n${JSON.stringify(compact, null, 1)}\n\nNEW FUNNEL DECLINES (real users — priority):\n${JSON.stringify(funnelDeclines.map(r => ({ id: r.id, utterance: (r.utterance ?? '').slice(0, 200), declined: r.declined })), null, 1)}`,
   4000);
-tri = { classified: [], newClasses: [], overclaims: [], shippedRegressions: [], runNote: 'triage unparseable' };
+tri = { classified: [], newClasses: [], overclaims: [], caughtByLoop: [], shippedRegressions: [], runNote: 'triage unparseable' };
 try { tri = { ...tri, ...parseJson(triText) }; }
 catch { attention.push('triage output unparseable — raw saved to runs/'); writeFileSync(`${RUNS}${DAY}-triage-raw.txt`, triText); }
 writeFileSync(`${RUNS}${DAY}-triage.json`, JSON.stringify(tri, null, 1));
@@ -153,8 +155,12 @@ function finish(note) {
     : '';
   const misses = priorMisses.length ? `; ${priorMisses.length} prior-miss (${priorMisses.map(r => r.id).join(', ')})` : '';
   const over = tri?.overclaims?.length ? `; OVERCLAIMS: ${tri.overclaims.map(o => o.id).join(', ')}` : '';
+  const looped = results.filter(r => r.loop);
+  const loopLine = looped.length
+    ? `; loop: ${looped.filter(r => r.loop.turns > 1).length}/${looped.length} took a second look, ${looped.reduce((n, r) => n + (r.loop.fixes || 0), 0)} corrections, ${looped.filter(r => r.loop.summaryChanged).length} summaries revised${tri?.caughtByLoop?.length ? `, ${tri.caughtByLoop.length} overclaim${tri.caughtByLoop.length === 1 ? '' : 's'} caught by the loop` : ''}`
+    : '';
   appendFileSync(`${HERE}ledger.md`,
-    `- ${DAY} — nightly: ${outcomes}${misses}${evidence}${over}; funnel +${funnelRows.length} (${funnelDeclines.length} declined); $${cost}; ${note}${attention.length ? ' ⚠ SEE ATTENTION FILE' : ''}\n`);
+    `- ${DAY} — nightly: ${outcomes}${misses}${evidence}${over}${loopLine}; funnel +${funnelRows.length} (${funnelDeclines.length} declined); $${cost}; ${note}${attention.length ? ' ⚠ SEE ATTENTION FILE' : ''}\n`);
   if (attention.length) {
     writeFileSync(`${RUNS}ATTENTION-${DAY}.md`, `# Probe attention — ${DAY}\n\n${attention.map(a => `- ${a}`).join('\n\n')}\n`);
     log(`ATTENTION → runs/ATTENTION-${DAY}.md`);

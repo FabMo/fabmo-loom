@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes } from './runtime.mjs';
-import { applyActions, buildParseRequest } from './intent.mjs';
+import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
 import { pathToRegions, expandTemplate } from './shape.mjs';
@@ -252,6 +252,140 @@ console.log('--- buildParseRequest ---');
       && req.system.includes('AUTO-SIZED') && req.system.includes(String(recipe.stock.thickness))) {
     pass('request carries catalog doc + auto-size rule + thickness + forced tool choice');
   } else fail('parse request malformed');
+}
+
+// ---------------- 8b. the closed loop: act → observe → revise ----------------
+// The model's second look is driven by a scripted fake `call`, so the
+// whole act/observe/revise choreography tests offline: what the model is
+// shown, how the conversation is threaded, when the loop stops, and that
+// the summary the user reads is the one written with the weave in view.
+
+console.log('--- intent loop: observation ---');
+{
+  const rec0 = structuredClone(EMPTY_RECIPE);
+  const applyOut = applyActions(rec0, {
+    summary: 'Built a sign with a rabbet.',
+    actions: [
+      { kind: 'add_control', control: { id: 'word', type: 'text', label: 'Word', default: 'Hi' } },
+      { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'word' }, letterHeight: 1 } } },
+      { kind: 'add_operation', operation: { id: 'bogus', strategy: 'vcarve_text', params: { text: 'x', roundover: 0.25 } } },
+    ],
+    declined: [],
+  });
+  const r = run(applyOut.recipe);
+  const obs = buildObservation(applyOut, r, applyOut.recipe);
+  const txt = observationText(obs);
+  if (obs.applied.length === 2 && obs.skipped.length === 1 && /unknown param "roundover"/.test(obs.skipped[0])) pass('observation carries applied + skipped with reasons');
+  else fail(`observation apply bookkeeping: ${JSON.stringify({ a: obs.applied, s: obs.skipped })}`);
+  if (obs.ok === true && obs.pipeline.length === 1 && obs.pipeline[0].id === 'engrave' && obs.stock?.w > 0) pass('observation carries verify verdict, pipeline, auto-sized board');
+  else fail(`observation weave fields: ${JSON.stringify({ ok: obs.ok, p: obs.pipeline, st: obs.stock })}`);
+  if (/SKIPPED \(1\) — these did NOT happen/.test(txt) && /PIPELINE \(machining order\): engrave \(vcarve_text\)/.test(txt) && /WEAVE: VERIFIED/.test(txt) && /board \d/.test(txt)) pass('observation text: skips flagged as not-happened, pipeline, verdict, board');
+  else fail(`observation text:\n${txt}`);
+  if (observationTroubled(obs)) pass('a skip counts as trouble'); else fail('skip not troubled');
+  const clean = buildObservation({ applied: ['x'], skipped: [], recipe: applyOut.recipe }, r, applyOut.recipe);
+  if (!observationTroubled(clean)) pass('clean verified weave is not trouble'); else fail('clean weave flagged as trouble');
+  const empty = buildObservation({ applied: [], skipped: [], recipe: rec0 }, run(rec0), rec0);
+  if (observationTroubled(empty) && /PIPELINE: EMPTY/.test(observationText(empty))) pass('empty pipeline is trouble and says so'); else fail('empty pipeline observation');
+  const nowe = buildObservation(applyOut, null, applyOut.recipe);
+  if (nowe.ok === null && /WEAVE: not run/.test(observationText(nowe))) pass('no weave → observation says so'); else fail('no-weave observation');
+}
+
+console.log('--- intent loop: revise request threading ---');
+{
+  const req = buildParseRequest(structuredClone(EMPTY_RECIPE), 'a sign');
+  const content = [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 'tu_1', name: 'apply_recipe_actions', input: { summary: 's', actions: [] } }];
+  const obs = buildObservation({ applied: [], skipped: [], recipe: EMPTY_RECIPE }, null, EMPTY_RECIPE);
+  const r2 = buildReviseRequest(req, content, 'tu_1', obs);
+  const m = r2.messages;
+  if (m.length === 3 && m[1].role === 'assistant' && m[1].content === content && m[2].role === 'user'
+      && m[2].content[0].type === 'tool_result' && m[2].content[0].tool_use_id === 'tu_1' && /Look before you speak/.test(m[2].content[1].text)
+      && r2.system === req.system && r2.tool_choice.name === 'apply_recipe_actions') pass('revise request threads assistant + tool_result on the same system/tools');
+  else fail(`revise request shape: ${JSON.stringify(m.map(x => x.role))}`);
+  const r3 = buildReviseRequest(r2, content, 'tu_2', obs, { final: true });
+  if (r3.messages.length === 5 && /LAST call: emit NO actions/.test(r3.messages[4].content[1].text)) pass('final turn asks for no actions');
+  else fail('final revise request');
+}
+
+console.log('--- intent loop: act → observe → fix → final ---');
+{
+  const recipe = structuredClone(EMPTY_RECIPE);
+  const seen = [];   // what the fake model was shown each call
+  const script = [
+    // turn 0: overclaims a cutout it never authored, and one param is bogus
+    { summary: 'Built a nameplate with a v-carved name and a rounded tag cutout.', actions: [
+      { kind: 'set_name', name: 'Nameplate' },
+      { kind: 'add_control', control: { id: 'word', type: 'text', label: 'Name', default: 'Ada' } },
+      { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'word' }, letterHeight: 1, roundover: 1 } } },
+    ], declined: [], suggest: ['make the letters taller', 'add a border'] },
+    // turn 1: sees the skip + missing cutout, fixes both, rewrites summary
+    { summary: 'Built a nameplate: the name v-carved, cut out as a rounded tag.', actions: [
+      { kind: 'add_operation', operation: { id: 'engrave', strategy: 'vcarve_text', params: { text: { ctrl: 'word' }, letterHeight: 1 } } },
+      { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+    ], declined: [], suggest: ['make the tag buffer bigger'] },
+    // turn 2 (final): no actions, honest summary
+    { summary: 'Nameplate: v-carved name on a rounded tag, verified.', actions: [], declined: [], suggest: ['make the letters taller ___'] },
+  ];
+  let call = 0;
+  const fake = async (req) => {
+    seen.push(req);
+    const p = script[call++];
+    return { stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 10 }, content: [{ type: 'tool_use', id: `tu_${call}`, name: 'apply_recipe_actions', input: p }] };
+  };
+  const out = await runIntentLoop({ recipe, utterance: 'a nameplate for Ada, cut out as a tag', call: fake, weave: async (r) => run(r) });
+  if (out.turns.length === 3 && out.usage.calls === 3) pass('three calls: act, fix, final'); else fail(`turn count ${out.turns.length}, calls ${out.usage.calls}`);
+  if (out.summary === script[2].summary && out.firstSummary === script[0].summary) pass('user reads the FINAL summary; first is kept for measurement'); else fail(`summaries: ${out.summary} / ${out.firstSummary}`);
+  if (out.fixes === 2 && out.revised && out.recipe.pipeline.map(o => o.id).join(',') === 'engrave,tag') pass('corrections applied on top: engrave re-added clean, tag added'); else fail(`fixes ${out.fixes}, pipeline ${out.recipe.pipeline.map(o => o.id)}`);
+  const shown1 = seen[1].messages[2].content[0].content;
+  if (/SKIPPED \(1\)/.test(shown1) && /roundover/.test(shown1) && /PIPELINE: EMPTY/.test(shown1)) pass('turn 1 was shown the skip and the empty pipeline'); else fail(`turn-1 observation:\n${shown1}`);
+  const shown2 = seen[2].messages[4].content[0].content;
+  if (/WEAVE: VERIFIED/.test(shown2) && /engrave \(vcarve_text\) → tag \(tag_cutout\)/.test(shown2) && /LAST call/.test(seen[2].messages[4].content[1].text)) pass('turn 2 was shown the verified pipeline and told it is the last call'); else fail(`turn-2 observation:\n${shown2}`);
+  if (out.suggest[0] === 'make the letters taller ___') pass('chips come from the final turn'); else fail(`suggest ${out.suggest}`);
+  if (out.usage.input_tokens === 300 && out.usage.output_tokens === 30) pass('usage summed across calls'); else fail(`usage ${JSON.stringify(out.usage)}`);
+  if (run(out.recipe).ok) pass('final recipe verifies'); else fail('final recipe does not verify');
+}
+
+console.log('--- intent loop: stop conditions ---');
+{
+  const mk = (payload) => async () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 'tu', name: 'apply_recipe_actions', input: payload }] });
+  // a pure decline never gets a second call — nothing to look at
+  let calls = 0;
+  const decl = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'carve my dog',
+    call: async (r) => { calls++; return mk({ summary: 'no', actions: [], declined: [{ what: 'a dog likeness', why: 'blob' }] })(r); }, weave: async (r) => run(r) });
+  if (calls === 1 && decl.declined.length === 1 && !decl.revised) pass('pure decline: one call'); else fail(`decline calls ${calls}`);
+  // a clean turn 0 still gets ONE look in 'always' mode; the look with no actions ends it
+  calls = 0;
+  const good = { summary: 'Sign built.', actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'text', label: 'W', default: 'Hi' } },
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: { ctrl: 'w' }, letterHeight: 1 } } },
+  ], declined: [] };
+  const conf = { summary: 'Sign built and verified: Hi v-carved.', actions: [], declined: [] };
+  const two = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', call: async (r) => { calls++; return mk(calls === 1 ? good : conf)(r); }, weave: async (r) => run(r) });
+  if (calls === 2 && two.summary === conf.summary && two.fixes === 0) pass("'always': clean build → one confirming look, summary from it"); else fail(`always calls ${calls}`);
+  // 'trouble' mode skips the look when the weave is clean
+  calls = 0;
+  const tr = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', mode: 'trouble', call: async (r) => { calls++; return mk(good)(r); }, weave: async (r) => run(r) });
+  if (calls === 1 && tr.summary === good.summary) pass("'trouble': clean build → no second call"); else fail(`trouble calls ${calls}`);
+  // 'off' is the one-shot
+  calls = 0;
+  const off = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', mode: 'off', call: async (r) => { calls++; return mk(good)(r); }, weave: async (r) => run(r) });
+  if (calls === 1 && !off.revised) pass("'off': one call, no observation"); else fail(`off calls ${calls}`);
+  // cap: a model that keeps emitting actions is cut off at maxTurns, last actions still applied
+  calls = 0;
+  const forever = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? good : { summary: `again ${calls}`, actions: [{ kind: 'set_name', name: `n${calls}` }], declined: [] })(r); }, weave: async (r) => run(r) });
+  if (calls === 3 && forever.recipe.name === 'n3' && forever.summary === 'again 3') pass('cap at maxTurns; final actions applied'); else fail(`cap calls ${calls}, name ${forever.recipe.name}`);
+  // first-turn failures throw the same messages the app always showed
+  let err = null;
+  try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', call: async () => ({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { actions: [{ kind: 'set_name', name: 'partial' }] } }] }) }); }
+  catch (e) { err = e; }
+  if (err instanceof IntentError && /overran its budget/.test(err.message)) pass('truncated first turn refused whole'); else fail(`truncation: ${err?.message}`);
+  err = null;
+  try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', call: async () => ({ stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: {} }] }) }); }
+  catch (e) { err = e; }
+  if (err instanceof IntentError && /empty-handed/.test(err.message)) pass('empty first turn surfaced as retryable'); else fail(`empty: ${err?.message}`);
+  // a truncated REVISE turn keeps the applied state and the first summary
+  calls = 0;
+  const trunc = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', call: async (r) => { calls++; return calls === 1 ? mk(good)(r) : { stop_reason: 'max_tokens', content: [{ type: 'tool_use', id: 't2', name: 'apply_recipe_actions', input: { actions: [{ kind: 'remove_operation', id: 'e' }] } }] }; }, weave: async (r) => run(r) });
+  if (trunc.recipe.pipeline.length === 1 && trunc.summary === good.summary && !trunc.revised) pass('truncated revise turn: state kept, nothing half-applied'); else fail(`trunc revise: ${trunc.recipe.pipeline.length} ops, revised ${trunc.revised}`);
 }
 
 // ---------------- 9. pocket_text: paint-fill pockets + rest corners ----------------

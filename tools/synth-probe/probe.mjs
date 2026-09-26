@@ -20,7 +20,11 @@ const PROMPTS = promptsPath.endsWith('.json')
 
 const LOOM = '/var/opt/apps/contributors/brian.o/fabmo-loom';
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
-const { buildParseRequest, applyActions } = await import(`${LOOM}/app/intent.mjs`);
+const { runIntentLoop } = await import(`${LOOM}/app/intent.mjs`);
+// LOOP=always|trouble|off — the closed loop is the default; 'off' is the
+// pre-loop one-shot behavior, kept so the two can be measured side by side
+const LOOP_MODE = ['always', 'trouble', 'off'].includes(process.env.LOOP) ? process.env.LOOP : 'always';
+const MODEL = process.env.MODEL || undefined;
 const { registerCatalogEntries } = await import(`${LOOM}/app/catalog.mjs`);
 
 // mount the same guests the deployment mounts (guests.local.mjs URLs → paths)
@@ -60,11 +64,13 @@ function baseRecipe(p) {
   return r;
 }
 
-async function callModel(recipe, utterance) {
-  const req = buildParseRequest(recipe, utterance);
+async function callModel(req0) {
   // prompt caching: the system prompt is identical for every EMPTY_RECIPE
-  // call — cache it so 50 probes cost like a handful
-  req.system = [{ type: 'text', text: req.system, cache_control: { type: 'ephemeral' } }];
+  // call — cache it so 50 probes cost like a handful (and the loop's
+  // revise calls reuse the same prefix)
+  const req = typeof req0.system === 'string'
+    ? { ...req0, system: [{ type: 'text', text: req0.system, cache_control: { type: 'ephemeral' } }] }
+    : req0;
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -100,30 +106,52 @@ async function probe(p) {
   rec.context = structuredClone(recipe);   // the starting document — makes the row a self-contained corpus candidate
   try {
     const t0 = Date.now();
-    const data = await callModel(recipe, p.prompt);
-    rec.ms = Date.now() - t0;
-    rec.stop_reason = data.stop_reason;
-    rec.usage = data.usage;
-    const toolUse = data.content?.find(b => b.type === 'tool_use');
-    if (!toolUse) { rec.outcome = 'NO_TOOL_USE'; return rec; }
-    const payload = toolUse.input;
-    rec.summary = payload.summary;
-    rec.declined = payload.declined ?? [];
-    rec.actionKinds = (payload.actions ?? []).map(a => a.kind + (a.operation?.strategy ? `:${a.operation.strategy}` : ''));
-    rec.rawActions = payload.actions ?? [];
-
+    const weaveRec = (r) => quiet(() => runRecipe(r, controlDefaults(r), FONT_SHELF, syntheticGrids(r)));
     let out;
-    try { out = applyActions(recipe, payload); }
-    catch (e) { rec.outcome = 'APPLY_CRASH'; rec.error = String(e?.stack ?? e); return rec; }
-    rec.applied = out.applied;
-    rec.skipped = out.skipped;
+    try {
+      out = await runIntentLoop({
+        recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE,
+        call: callModel,
+        weave: async (r) => weaveRec(r),
+      });
+    } catch (e) {
+      if (e?.name === 'IntentError' || e?.retryable !== undefined) {
+        rec.ms = Date.now() - t0;
+        rec.outcome = /no actions/.test(e.message) ? 'NO_TOOL_USE' : /overran/.test(e.message) ? 'TRUNCATED' : 'EMPTY';
+        rec.error = e.message;
+        return rec;
+      }
+      throw e;
+    }
+    rec.ms = Date.now() - t0;
+    rec.usage = out.usage;
+    const first = out.turns[0];
+    rec.stop_reason = null;
+    // summary = what the user READS (final); firstSummary = what the model
+    // said before it saw the weave — the pair is the overclaim measurement
+    rec.summary = out.summary;
+    rec.firstSummary = out.firstSummary;
+    rec.declined = out.declined;
+    rec.actionKinds = (first.payload.actions ?? []).map(a => a.kind + (a.operation?.strategy ? `:${a.operation.strategy}` : ''));
+    rec.rawActions = first.payload.actions ?? [];
+    rec.revisedActions = out.turns.slice(1).flatMap(t => t.payload.actions ?? []);
+    rec.loop = {
+      mode: LOOP_MODE, turns: out.turns.length, fixes: out.fixes,
+      summaryChanged: out.revised && out.summary.trim() !== out.firstSummary.trim(),
+      perTurn: out.turns.map(t => ({
+        actions: (t.payload.actions ?? []).length, applied: t.applied.length, skipped: t.skipped.length,
+        ok: t.observation ? t.observation.ok : null, pipeline: t.observation ? t.observation.pipeline.length : null,
+      })),
+    };
+    rec.applied = out.turns.flatMap(t => t.applied);
+    rec.skipped = out.turns[out.turns.length - 1].skipped;
+    rec.firstSkipped = first.skipped;
 
     const drawShapes = (out.recipe.shapes ?? []).filter(s => s.draw).map(s => s.id);
     if (drawShapes.length) rec.awaitingDraw = drawShapes;
 
     try {
-      const grids = syntheticGrids(out.recipe);
-      const r = quiet(() => runRecipe(out.recipe, controlDefaults(out.recipe), FONT_SHELF, grids));
+      const r = weaveRec(out.recipe);
       rec.verified = !!r.ok;
       rec.weaveErrors = r.errors ?? [];
       rec.weaveWarnings = (r.warnings ?? []).slice(0, 6);
@@ -147,7 +175,7 @@ async function probe(p) {
 
 const start = parseInt(process.argv[4] ?? '0', 10);
 const todo = PROMPTS.slice(start);
-console.log(`probing ${todo.length} prompts → ${OUT}`);
+console.log(`probing ${todo.length} prompts → ${OUT} (loop: ${LOOP_MODE}${MODEL ? `, model ${MODEL}` : ''})`);
 
 // warmup call first so the cached system prompt is written once
 const CONCURRENCY = 4;
@@ -157,7 +185,8 @@ const record = (r) => {
   done++;
   const flag = r.prior === 'covered' && /DECLINED|PARTIAL|ALL_SKIPPED|CRASH|ERROR/.test(r.outcome) ? ' ⚠ prior-miss'
     : r.prior === 'decline' && r.outcome === 'FULFILLED' ? ' ✓ better-than-expected' : '';
-  console.log(`[${done}/${todo.length}] ${r.id}: ${r.outcome}${r.verified === false ? ' (verify FAIL)' : ''}${flag}`);
+  const loop = r.loop ? ` [${r.loop.turns} call${r.loop.turns === 1 ? '' : 's'}${r.loop.fixes ? `, ${r.loop.fixes} fixes` : ''}${r.loop.summaryChanged ? ', summary revised' : ''}]` : '';
+  console.log(`[${done}/${todo.length}] ${r.id}: ${r.outcome}${r.verified === false ? ' (verify FAIL)' : ''}${flag}${loop}`);
 };
 
 record(await probe(todo[0]));

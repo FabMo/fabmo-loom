@@ -81,6 +81,17 @@ function appendFunnel(entry) {
       summary: clip(entry.intent?.summary, 500),
       actions: (entry.intent?.actions ?? []).slice(0, 50),
       declined: (entry.intent?.declined ?? []).slice(0, 20),
+      // the closed loop's record (Loom): what the model said before it saw
+      // the weave vs. after, and the corrections its second look emitted
+      ...(entry.intent?.loop && typeof entry.intent.loop === 'object' ? {
+        loop: {
+          turns: Number(entry.intent.loop.turns) || 1,
+          fixes: Number(entry.intent.loop.fixes) || 0,
+          firstSummary: clip(entry.intent.loop.firstSummary, 500),
+          revisedActions: (Array.isArray(entry.intent.loop.revisedActions) ? entry.intent.loop.revisedActions : []).slice(0, 50),
+          observed: (Array.isArray(entry.intent.loop.observed) ? entry.intent.loop.observed : []).slice(0, 4),
+        },
+      } : {}),
       usage: entry.usage ?? null,
       invite: clip(entry.invite, 100),            // guest-pass holder, if any
       context,

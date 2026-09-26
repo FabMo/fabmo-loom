@@ -31,7 +31,9 @@ export function startWeave(panel, label = 'weaving…') {
   if (reduced) {
     overlay.append(note);
     panel.append(overlay);
-    return () => overlay.remove();
+    const stopStatic = () => overlay.remove();
+    stopStatic.setLabel = (s) => { note.textContent = s; };
+    return stopStatic;
   }
 
   const W = 420, H = 250;
@@ -194,8 +196,11 @@ export function startWeave(panel, label = 'weaving…') {
   }
   raf = requestAnimationFrame(frame);
 
-  return () => {
+  const stop = () => {
     cancelAnimationFrame(raf);
     overlay.remove();
   };
+  // the loop relabels the same overlay between calls ("checking the weave…")
+  stop.setLabel = (s) => { note.textContent = s; };
+  return stop;
 }

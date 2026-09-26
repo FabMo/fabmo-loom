@@ -111,3 +111,23 @@ do not manufacture significance.
   instrument that sees it.
 - **Re-blessing:** `node test-corpus.mjs --bless` after reviewing
   IMPROVED lines (deliberate improvements only).
+
+
+## The closed loop (2026-09-26)
+
+`probe.mjs` drives `runIntentLoop` — the same act → observe → revise path
+the browser takes — so every row now records both `firstSummary` (what
+the model said before it saw the weave) and `summary` (what the user
+reads, written after), plus `loop.{turns, fixes, summaryChanged,
+perTurn}` and `revisedActions`. Triage judges OVERCLAIMS on the final
+summary only and lists rows whose first summary overclaimed but whose
+final one is honest under `caughtByLoop`; the run-log line carries the
+loop tallies.
+
+`LOOP=off node probe.mjs …` reproduces the one-shot behavior on the same
+prompt set — run both on one night's prompts to measure the loop
+(`LOOP=trouble` is the cheaper variant: a second call only when the
+observation has skips, failures, or an empty pipeline). `MODEL=<id>`
+overrides the model for the same purpose across model generations.
+Corpus rows keep replaying turn-1 payloads (zero API cost); the loop's
+corrections are recorded, not replayed.

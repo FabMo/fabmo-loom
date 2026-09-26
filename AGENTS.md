@@ -66,7 +66,11 @@ machine with a real spindle. These rules are not style preferences.
 - `intent/` — schema-constrained NL→actions parsing. The ONLY place an
   LLM output touches the pipeline, and it emits *parameters*, never
   motion. Keep that boundary: LLM above the top rail, deterministic code
-  below.
+  below. The Loom app runs it as a closed loop (`app/intent.mjs`
+  `runIntentLoop`): parse → apply → weave → the model reads the app's
+  own report (`buildObservation` / `observationText`) as a tool_result
+  → corrects and writes the final summary. The observation is data the
+  app computed; never let the model author what it then "observes".
 
 ## Adding a strategy
 

@@ -247,6 +247,7 @@ RULES:
 - Operations have NO enable/disable param — never invent one. Text ops skip themselves when their bound text is BLANK, so bound text is already optional: "make the caption optional" needs no actions — answer (in summary) that clearing the text field omits it. An optional NON-text feature is a decline (what: an on/off toggle for that op); remove_operation when the user says to drop it.
 - CUTTING MANY PARTS FROM ONE SHEET, and tracking what's already been cut, is NOT a decline — but it takes NO actions, because it is an app SETTING, not part of the recipe: the Current board tracker (inside "Board & material" at the top of the app panel) holds one physical board's size plus every footprint already committed to it, nests each new design into the free space, and reports what's left. Answer it in the SUMMARY: enter the board's W × H under "Current board" (in "Board & material"), then hit "Add to board" after each verified design — the next part nests into the remainder, and the chip shows the % free. It persists across designs and re-weaves, so a run of many one-at-a-time parts (nametags, tags, coasters) is exactly what it's for. Do NOT try to model the sheet, the nesting, or the run history as controls or ops — one recipe still describes ONE part, and that part is what the ledger places. (Only furniture_design nests many panels WITHIN a single design.)
 - If the recipe is empty and the user asks for an app, also set_name it.
+- YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -554,4 +555,205 @@ export function applyActions(recipe, payload) {
     .filter(s => s.length <= 160)
     .slice(0, 3);
   return { recipe: next, applied, skipped, declined: payload.declined ?? [], summary: payload.summary ?? '', suggest };
+}
+
+
+// ------------------------------------------------------------------ the loop
+//
+// One-shot parsing left the author blind: the model wrote its user-facing
+// summary in the same breath as its actions — before the app applied them,
+// before the weave ran, before the verifier spoke. Seventeen nightly probes
+// put the cost at 4–11 of 25 prompts whose summary confidently described a
+// build the pipeline had refused, emptied, or never contained. The loop
+// closes that gap the way a sighted author works: act, look at what
+// happened, then say what was built — and fix it when the catalog can.
+//
+// The boundary does not move. The model still emits only recipe actions;
+// what it sees between turns is the app's own deterministic report
+// (applyActions' skips, the pipeline, the verifier's numbers), never a
+// place to write motion. The observation is a tool_result on the same
+// conversation, so the system prompt stays byte-identical across turns
+// and prompt caching keeps a revise call cheap.
+
+const MAX_OBS_ITEMS = 8;
+const clip = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n - 1) + '…' : s);
+
+// What the app did with a turn's actions, as data. weaveResult is a
+// runRecipe() result or null (no weave available / not run).
+export function buildObservation(applyOut, weaveResult, recipe) {
+  const rec = recipe ?? applyOut.recipe;
+  const r = weaveResult;
+  const stats = r?.report?.stats;
+  const targets = (stats?.targets ?? []).map(t => ({
+    name: t.name, type: t.type,
+    gouges: t.gouges ?? 0, depthViolations: t.depthViolations ?? 0,
+    maskViolations: t.maskViolations ?? 0, intrusionArea: t.intrusionArea ?? 0,
+  }));
+  const awaitingDraw = (rec.shapes ?? []).filter(sh => sh.draw).map(sh => sh.draw.of ?? sh.id);
+  return {
+    applied: applyOut.applied ?? [],
+    skipped: applyOut.skipped ?? [],
+    controls: (rec.controls ?? []).map(c => c.id),
+    derived: (rec.derived ?? []).map(d => d.id),
+    shapes: (rec.shapes ?? []).map(sh => sh.id),
+    pipeline: (rec.pipeline ?? []).map(o => ({ id: o.id, strategy: o.strategy, ...(o.frame ? { frame: o.frame } : {}) })),
+    weaved: !!r,
+    ok: r ? !!r.ok : null,
+    errors: (r?.errors ?? []).map(e => clip(String(e), 300)),
+    warnings: (r?.warnings ?? []).map(w => clip(String(w), 300)),
+    stock: r?.preview?.stock ? { w: r.preview.stock.w, h: r.preview.stock.h, thickness: r.preview.stock.thickness, pinned: !!r.preview.stock.pinned } : null,
+    runTimeMin: stats?.estRunTimeMin ?? null,
+    targets,
+    awaitingDraw,
+  };
+}
+
+// Anything here that a second look could improve?
+export function observationTroubled(obs) {
+  return !!(obs.skipped.length || obs.ok === false || !obs.pipeline.length || obs.errors.length);
+}
+
+// The observation as the model reads it — terse, numbers first.
+export function observationText(obs) {
+  const lines = [];
+  const list = (arr) => arr.slice(0, MAX_OBS_ITEMS).map(x => `  - ${x}`).join('\n') + (arr.length > MAX_OBS_ITEMS ? `\n  - …and ${arr.length - MAX_OBS_ITEMS} more` : '');
+  lines.push(`APPLIED (${obs.applied.length}):${obs.applied.length ? '\n' + list(obs.applied) : ' nothing'}`);
+  if (obs.skipped.length) lines.push(`SKIPPED (${obs.skipped.length}) — these did NOT happen:\n${list(obs.skipped)}`);
+  lines.push(`RECIPE NOW: controls [${obs.controls.join(', ')}]${obs.derived.length ? `; derived [${obs.derived.join(', ')}]` : ''}${obs.shapes.length ? `; shapes [${obs.shapes.join(', ')}]` : ''}`);
+  lines.push(obs.pipeline.length
+    ? `PIPELINE (machining order): ${obs.pipeline.map(o => `${o.id} (${o.strategy}${o.frame ? ` in frame ${o.frame}` : ''})`).join(' → ')}`
+    : 'PIPELINE: EMPTY — nothing will be machined');
+  if (!obs.weaved) lines.push('WEAVE: not run');
+  else if (obs.ok) {
+    const bits = ['WEAVE: VERIFIED — the job posts'];
+    if (obs.stock) bits.push(`board ${obs.stock.w}" × ${obs.stock.h}" × ${obs.stock.thickness}"${obs.stock.pinned ? ' (pinned blank)' : ' (auto-sized)'}`);
+    if (obs.runTimeMin != null) bits.push(`about ${Math.max(1, Math.round(obs.runTimeMin))} min of machine time`);
+    lines.push(bits.join('; '));
+    const bad = obs.targets.filter(t => t.gouges || t.depthViolations || t.maskViolations || t.intrusionArea);
+    if (obs.targets.length) lines.push(`VERIFIER TARGETS: ${obs.targets.length} checked${bad.length ? `; flagged: ${bad.map(t => t.name).join(', ')}` : ', all clean'}`);
+  } else {
+    lines.push(`WEAVE: FAILED — the job will NOT post. Errors:\n${list(obs.errors.length ? obs.errors : ['(no error text)'])}`);
+  }
+  if (obs.warnings.length) lines.push(`WARNINGS:\n${list(obs.warnings)}`);
+  if (obs.awaitingDraw.length) lines.push(`AWAITING THE USER'S DRAWING: ${obs.awaitingDraw.join(', ')} (ops using these skip until drawn — that is expected, not a failure)`);
+  return lines.join('\n');
+}
+
+const REVISE_TEXT = `That is what the app did with your actions: the recipe as it stands and the weave/verify result. Look before you speak:
+1. If something was SKIPPED, the weave FAILED, or a thing the user asked for is missing from the pipeline — and the catalog can express it — emit corrective actions now. They apply ON TOP of the current recipe: set_operation / set_shape / set_control to change what exists, add_operation only for what is missing, remove_operation for what should go. Never re-add what is already there.
+2. If it cannot be built, put it on declined (what + why). Do not leave it implied as done.
+3. Rewrite summary FROM SCRATCH to describe only what is built and verified NOW — or, if it still fails, say plainly what failed. Never describe an intention as a result.
+4. Keep 2–3 suggest chips.
+An empty actions list is the right answer when nothing needs to change.`;
+
+const FINAL_TEXT = `That is the result after your corrections. This is the LAST call: emit NO actions. Give only the honest summary of the state shown (built and verified, or what still fails and why), the declined list, and 2–3 suggest chips.`;
+
+// The next request in the same conversation: the model's previous content
+// (with its tool_use) as the assistant turn, then our observation as the
+// tool_result plus the instruction. System, tools, and tool_choice are
+// unchanged so the cached prefix is reused.
+export function buildReviseRequest(prevReq, assistantContent, toolUseId, observation, { final = false } = {}) {
+  return {
+    ...prevReq,
+    messages: [
+      ...prevReq.messages,
+      { role: 'assistant', content: assistantContent },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: toolUseId, content: observationText(observation) },
+          { type: 'text', text: final ? FINAL_TEXT : REVISE_TEXT },
+        ],
+      },
+    ],
+  };
+}
+
+// Errors the app shows verbatim (kept here so every caller says the same
+// thing). `retryable` tells the UI nothing was applied.
+export class IntentError extends Error {
+  constructor(message, { retryable = true } = {}) { super(message); this.retryable = retryable; }
+}
+
+const dedupeDeclined = (list) => {
+  const seen = new Set(), out = [];
+  for (const d of list) {
+    if (!d || typeof d !== 'object') continue;
+    const k = String(d.what ?? '').trim().toLowerCase();
+    if (!k || seen.has(k)) continue;
+    seen.add(k); out.push(d);
+  }
+  return out;
+};
+
+// Drive a full intent turn: parse → apply → weave → (revise → apply →
+// weave)* until the model has nothing left to change, up to maxTurns
+// model calls. The last summary is written with the final state in view.
+//
+//   call(req)   → Promise<Anthropic messages response JSON>
+//   weave(rec)  → Promise<runRecipe result> (or omit: apply-only observations)
+//   mode        'always' (default) — every action-bearing turn gets a look;
+//               'trouble' — only when the observation has skips/failures;
+//               'off' — the old one-shot behavior.
+//
+// Returns { recipe, turns, summary, firstSummary, declined, suggest, usage,
+//           revised, fixes } — turns[i] carries payload/applied/skipped/
+//           observation for logging and measurement.
+export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always' }) {
+  const turns = [];
+  // Anthropic's usage fields, summed across calls (the probe prices from them)
+  const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop });
+  let cur = recipe;
+  const cap = mode === 'off' ? 1 : Math.max(1, maxTurns);
+  for (let t = 0; t < cap; t++) {
+    const data = await call(req);
+    usage.calls++;
+    for (const k of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) usage[k] += data?.usage?.[k] ?? 0;
+    const toolUse = data?.content?.find(b => b.type === 'tool_use');
+    if (!toolUse) {
+      if (t === 0) throw new IntentError('the model returned no actions');
+      break;   // a revise turn that produced nothing: keep the state we have
+    }
+    // a response cut off at the token ceiling arrives as a PARTIAL action
+    // list that would half-build silently — refuse the whole first turn;
+    // on a later turn keep the previous state and stop
+    if (data.stop_reason === 'max_tokens') {
+      if (t === 0) throw new IntentError('that answer overran its budget mid-build, so nothing was applied — ask for it in smaller pieces (and describe repeated layouts as a pattern rather than listing every piece)');
+      break;
+    }
+    const p0 = toolUse.input ?? {};
+    if (t === 0 && !p0.actions?.length && !p0.declined?.length && !p0.summary?.trim()) {
+      throw new IntentError('the model came back empty-handed — nothing was applied; hit Generate again');
+    }
+    const out = applyActions(cur, p0);
+    cur = out.recipe;
+    const turn = {
+      payload: p0, applied: out.applied, skipped: out.skipped, declined: out.declined,
+      summary: out.summary, suggest: out.suggest, usage: data.usage ?? null, observation: null,
+    };
+    turns.push(turn);
+    const hadActions = (p0.actions ?? []).filter(a => a && typeof a === 'object').length > 0;
+    // nothing changed → nothing new to look at: a pure decline on turn 0,
+    // or a revise turn that wrote its summary with the state already in view
+    if (!hadActions) break;
+    if (t === cap - 1) break;
+    const result = weave ? await weave(cur) : null;
+    turn.observation = buildObservation(out, result, cur);
+    if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
+    req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2 });
+  }
+  const first = turns[0], last = turns[turns.length - 1];
+  const suggest = last.suggest?.length ? last.suggest : first.suggest;
+  return {
+    recipe: cur,
+    turns,
+    summary: (last.summary ?? '').trim() || (first.summary ?? ''),
+    firstSummary: first.summary ?? '',
+    declined: dedupeDeclined(turns.flatMap(x => x.declined ?? [])),
+    suggest,
+    usage,
+    revised: turns.length > 1,
+    fixes: turns.slice(1).reduce((n, x) => n + x.applied.length, 0),
+  };
 }
