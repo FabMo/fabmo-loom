@@ -262,6 +262,19 @@ ${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 // reasoning AND the action list. Unknown models get the forced form and a
 // one-shot fallback to 'auto' in runIntentLoop when the API says no.
 export const FORCED_TOOL_CHOICE_UNSUPPORTED = /fable|mythos|opus-5-5/i;
+
+// The models Loom offers, measured 2026-09-26 on the same 25 prompts with
+// the loop on (ledger.md, "Model-generation A/B"): Opus 5.5 verified 20/25
+// (17 on the first turn) at ~$3.40 a run; Fable 5.1 the same 20/25 at ~$12
+// and twice the wall time; Opus 4.8 13/25; Sonnet 5 10/25 with blank
+// summaries — not offered for authoring.
+export const MODELS = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5 — default', note: 'best first draft per dollar in the A/B' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1 — expert', note: 'same verified rate, ~4× the cost, ~2× slower' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8 — previous default', note: 'cheaper, more corrections needed' },
+];
+export const DEFAULT_MODEL = MODELS[0].id;
+export const isKnownModel = (id) => MODELS.some(m => m.id === id);
 const CALL_TOOL_RULE = `- RESPOND ONLY BY CALLING apply_recipe_actions, exactly once, every time — even to decline (empty actions + declined) or to answer a question (empty actions + the answer in summary). Never reply in plain text.`;
 
 export function withAutoToolChoice(req) {
@@ -276,7 +289,7 @@ export function withAutoToolChoice(req) {
   };
 }
 
-export function buildParseRequest(recipe, utterance, { model = 'claude-opus-4-8', shop = {} } = {}) {
+export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {} } = {}) {
   const req = {
     model,
     // generous: geometry-heavy builds (multi-shape recipes, big edits)

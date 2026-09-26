@@ -33,7 +33,7 @@ const FUNNEL_FILE = '/var/opt/apps/.intent-funnel.jsonl';
 const MAX_UTTERANCE = 2000;       // chars; a shop request is a sentence or two
 const MAX_CONTEXT_BYTES = 64 * 1024;
 const RATE_LIMIT = { windowMs: 60_000, max: 12 };  // per IP
-const RELAY_MAX_TOKENS = 4000;    // ceiling on what a relayed request may ask for
+const RELAY_MAX_TOKENS = 16000;   // ceiling on what a relayed request may ask for (thinking models spend part of it reasoning)
 
 function readKey() {
   try {

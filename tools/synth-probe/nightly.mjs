@@ -37,6 +37,9 @@ async function llm(system, user, maxTokens = 4000) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      // the META model (prompt generation + triage) stays on Opus 4.8 so the
+      // nightly series keeps one judge; the intent layer under test uses the
+      // app's own default (intent.mjs DEFAULT_MODEL, Opus 5.5 since v0.78)
       body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
     });
     if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 3000 * (attempt + 1))); continue; }
@@ -146,8 +149,10 @@ finish(tri.runNote);
 
 // ---- 7+8. run log + attention ---------------------------------------------
 function finish(note) {
-  const cost = (spendIn * 15e-6 + spendOut * 75e-6
-    + (results ?? []).reduce((s, r) => s + (r.usage?.input_tokens ?? 0) * 15e-6 + (r.usage?.output_tokens ?? 0) * 75e-6 + (r.usage?.cache_read_input_tokens ?? 0) * 1.5e-6 + (r.usage?.cache_creation_input_tokens ?? 0) * 18.75e-6, 0)).toFixed(2);
+  // meta calls at Opus 4.8 rates ($5/$25 per MTok); probe rows at the app
+  // default's rates (Opus 5.5: $4 / $20, cache read $0.20, cache write $5)
+  const cost = (spendIn * 5e-6 + spendOut * 25e-6
+    + (results ?? []).reduce((s, r) => s + (r.usage?.input_tokens ?? 0) * 4e-6 + (r.usage?.output_tokens ?? 0) * 20e-6 + (r.usage?.cache_read_input_tokens ?? 0) * 0.2e-6 + (r.usage?.cache_creation_input_tokens ?? 0) * 5e-6, 0)).toFixed(2);
   const outcomes = Object.keys(tally).length
     ? Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ') : 'no probes';
   const evidence = tri?.classified?.length

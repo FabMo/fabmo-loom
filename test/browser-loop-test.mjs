@@ -110,6 +110,12 @@ try {
     pass('third call saw the verified pipeline (the page\'s own weave) and the final-turn instruction');
   else fail(`third call shape: ${JSON.stringify(m3.map(m => m.role))} ${String(obs2?.content).slice(0, 300)}`);
   if (modelCalls[1].system === modelCalls[0].system) pass('system prompt byte-identical across turns (cacheable)'); else fail('system prompt changed between turns');
+  // default model + the request shape the Claude 5 models need
+  if (modelCalls[0].model === 'claude-opus-5-5' && modelCalls[0].tool_choice?.type === 'auto' && modelCalls[0].max_tokens === 16000) pass('default model Opus 5.5 with auto tool choice and a thinking-sized budget');
+  else fail(`default request: ${modelCalls[0].model} ${JSON.stringify(modelCalls[0].tool_choice)} ${modelCalls[0].max_tokens}`);
+  const pick = await page.evaluate(() => ({ value: document.getElementById('modelPick')?.value, options: [...document.querySelectorAll('#modelPick option')].map(o => o.value), note: document.getElementById('modelNote')?.textContent }));
+  if (pick.value === 'claude-opus-5-5' && pick.options.includes('claude-fable-5-1') && /per dollar/.test(pick.note ?? '')) pass('model picker: Opus 5.5 selected, Fable 5.1 offered, note shown');
+  else fail(`model picker: ${JSON.stringify(pick)}`);
 
   await page.waitForFunction(() => document.getElementById('badge')?.textContent === 'VERIFIED', { timeout: 30000 });
   pass('final recipe weaves to VERIFIED in the page');

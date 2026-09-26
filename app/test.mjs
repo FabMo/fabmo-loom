@@ -250,8 +250,10 @@ console.log('--- buildParseRequest ---');
   const req = buildParseRequest(recipe, 'make the letters taller');
   if (req.tools?.[0]?.name === 'apply_recipe_actions' && req.system.includes('vcarve_text')
       && req.system.includes('AUTO-SIZED') && req.system.includes(String(recipe.stock.thickness))) {
-    pass('request carries catalog doc + auto-size rule + thickness + forced tool choice');
+    pass('request carries catalog doc + auto-size rule + thickness');
   } else fail('parse request malformed');
+  if (req.model === 'claude-opus-5-5' && req.tool_choice.type === 'auto' && /RESPOND ONLY BY CALLING/.test(req.system)) pass('default model is Opus 5.5 with the auto tool-choice shape');
+  else fail(`default model/request: ${req.model} ${JSON.stringify(req.tool_choice)}`);
 }
 
 // ---------------- 8b. the closed loop: act → observe → revise ----------------

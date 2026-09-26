@@ -9,7 +9,7 @@ import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { openDraw, initDraw } from './draw.mjs';
 import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
-import { runIntentLoop, promptRecipeView } from './intent.mjs';
+import { runIntentLoop, promptRecipeView, MODELS, DEFAULT_MODEL, isKnownModel } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
@@ -1216,7 +1216,7 @@ async function generate() {
     // callback is the app's own weave path (worker + resolved terrains),
     // so what the model is told is exactly what the user would see.
     const out = await runIntentLoop({
-      recipe, utterance, shop,
+      recipe, utterance, shop, model: currentModel(),
       call: (req) => { if (calls++ > 0) stopWeave.setLabel?.(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
         stopWeave.setLabel?.('weaving…');
@@ -1417,6 +1417,26 @@ $('reset').addEventListener('click', () => {
   renderControls();
   runAndRender();
 });
+// ---- model choice (persisted per browser; unknown/stale values fall back)
+function currentModel() {
+  const v = localStorage.getItem('loom:model');
+  return isKnownModel(v) ? v : DEFAULT_MODEL;
+}
+function renderModelPick() {
+  const sel = $('modelPick');
+  if (!sel) return;
+  sel.innerHTML = MODELS.map(m => `<option value="${m.id}">${escapeHtml(m.label)}</option>`).join('');
+  sel.value = currentModel();
+  $('modelNote').textContent = MODELS.find(m => m.id === sel.value)?.note ?? '';
+}
+$('modelPick')?.addEventListener('change', (e) => {
+  const id = isKnownModel(e.target.value) ? e.target.value : DEFAULT_MODEL;
+  localStorage.setItem('loom:model', id);
+  renderModelPick();
+  addTurn(`Prompts now weave with ${escapeHtml(MODELS.find(m => m.id === id).label.split(' — ')[0])}.`);
+});
+renderModelPick();
+
 $('saveKey').addEventListener('click', () => {
   const v = $('apiKey').value.trim();
   if (v) { localStorage.setItem('loom:apiKey', v); addTurn('Key saved to this browser.'); }

@@ -550,7 +550,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.77</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.78</span></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -581,8 +581,14 @@
           <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
           <button id="saveKey" class="small">Save</button>
         </div>
+        <div class="keyrow" style="margin-top:6px; align-items:center; gap:8px">
+          <label for="modelPick" style="margin:0; white-space:nowrap">Model</label>
+          <select id="modelPick" title="Which Claude weaves your prompts"></select>
+          <span id="modelNote" style="color:var(--mut); font-size:.85rem"></span>
+        </div>
         <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the
-          key never touches our server. Without a key (or a guest-pass link), the controls on the right still work;
+          key never touches our server. The default model is the one that verified the most builds per dollar in our
+          probe; the expert model matches it at several times the cost and time. Without a key (or a guest-pass link), the controls on the right still work;
           prompting is disabled.</div>
       </details>
     </section>
