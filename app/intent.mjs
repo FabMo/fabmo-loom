@@ -839,6 +839,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     if (t === cap - 1) break;
     const result = weave ? await safeWeave(weave, cur) : null;
     turn.observation = buildObservation(out, result, cur);
+    turn.recipe = cur;   // the state this observation describes (applyActions never mutates it later)
     if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
     req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2 });
   }
@@ -873,6 +874,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   if (lastHadActions && turns.length > 1 && weave && last.applied.length) {
     const result = await safeWeave(weave, cur);
     last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur);
+    last.recipe = cur;
     const shown = turns[turns.length - 2].observation;
     const before = shown ? shown.ok : null, after = last.observation.ok;
     if (after !== before) {
@@ -881,6 +883,29 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
         ? ' (Update: after those last corrections the weave verifies and the job posts.)'
         : ` (Update: after those last corrections the weave still fails${firstErr ? ` — ${firstErr}` : ''}.)`;
       last.postscript = true;
+    }
+  }
+
+  // Rollback guard: a second look must never leave the user worse off than
+  // a state that already verified. The final state is the last OBSERVED one
+  // (the last turn's own, when it acted; otherwise the state it was shown).
+  // If that fails and an earlier turn verified, that earlier recipe is what
+  // the user gets — with the failure named — instead of a broken "fix"
+  // (pumpkin-porch-sign, 2026-09-26: turn 1 verified, the second look nudged
+  // the text out of the pinned tag).
+  let rolledBack = null;
+  const finalIdx = last.observation ? turns.length - 1 : turns.length - 2;
+  const finalObs = finalIdx >= 0 ? turns[finalIdx].observation : null;
+  if (finalObs && finalObs.ok === false) {
+    for (let j = finalIdx - 1; j >= 0; j--) {
+      if (turns[j].observation?.ok === true && turns[j].recipe) {
+        cur = turns[j].recipe;
+        const firstErr = finalObs.errors[0];
+        rolledBack = { fromTurn: finalIdx, toTurn: j, error: firstErr ?? null };
+        const kept = (typeof turns[j].summary === 'string' ? turns[j].summary : '').trim();
+        summary = `${kept ? kept + ' ' : ''}(A later correction broke verification${firstErr ? ` — ${firstErr}` : ''} — so it was undone; this earlier version, which verifies, is what you have.)`;
+        break;
+      }
     }
   }
   return {
@@ -893,5 +918,6 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     usage,
     revised: turns.length > 1,
     fixes: turns.slice(1).reduce((n, x) => n + x.applied.length, 0),
+    rolledBack,
   };
 }

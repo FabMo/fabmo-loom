@@ -136,7 +136,7 @@ async function probe(p) {
     rec.rawActions = first.payload.actions ?? [];
     rec.revisedActions = out.turns.slice(1).flatMap(t => t.payload.actions ?? []);
     rec.loop = {
-      mode: LOOP_MODE, turns: out.turns.length, fixes: out.fixes,
+      mode: LOOP_MODE, turns: out.turns.length, fixes: out.fixes, rolledBack: out.rolledBack ?? null,
       summaryChanged: out.revised && out.summary.trim() !== out.firstSummary.trim(),
       perTurn: out.turns.map(t => ({
         actions: (t.payload.actions ?? []).length, applied: t.applied.length, skipped: t.skipped.length,

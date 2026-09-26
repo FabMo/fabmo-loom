@@ -123,7 +123,7 @@ const compact = results.map(r => ({
   id: r.id, prior: r.prior, outcome: r.outcome, verified: r.verified,
   prompt: r.prompt, summary: (r.summary ?? '').slice(0, 300),
   firstSummary: r.firstSummary && r.firstSummary !== r.summary ? r.firstSummary.slice(0, 300) : undefined,
-  loop: r.loop ? { turns: r.loop.turns, fixes: r.loop.fixes } : undefined,
+  loop: r.loop ? { turns: r.loop.turns, fixes: r.loop.fixes, rolledBack: r.loop.rolledBack ? `to turn ${r.loop.rolledBack.toTurn}: ${(r.loop.rolledBack.error ?? '').slice(0, 120)}` : undefined } : undefined,
   pipeline: r.pipeline, skipped: (r.skipped ?? []).slice(0, 4),
   weaveErrors: (r.weaveErrors ?? []).slice(0, 3),
   declined: (r.declined ?? []).map(d => ({ what: d.what, why: (d.why ?? '').slice(0, 200) })),
@@ -162,7 +162,7 @@ function finish(note) {
   const over = tri?.overclaims?.length ? `; OVERCLAIMS: ${tri.overclaims.map(o => o.id).join(', ')}` : '';
   const looped = results.filter(r => r.loop);
   const loopLine = looped.length
-    ? `; loop: ${looped.filter(r => r.loop.turns > 1).length}/${looped.length} took a second look, ${looped.reduce((n, r) => n + (r.loop.fixes || 0), 0)} corrections, ${looped.filter(r => r.loop.summaryChanged).length} summaries revised${tri?.caughtByLoop?.length ? `, ${tri.caughtByLoop.length} overclaim${tri.caughtByLoop.length === 1 ? '' : 's'} caught by the loop` : ''}`
+    ? `; loop: ${looped.filter(r => r.loop.turns > 1).length}/${looped.length} took a second look, ${looped.reduce((n, r) => n + (r.loop.fixes || 0), 0)} corrections, ${looped.filter(r => r.loop.summaryChanged).length} summaries revised${looped.some(r => r.loop.rolledBack) ? `, ${looped.filter(r => r.loop.rolledBack).length} rolled back to a verified turn` : ''}${tri?.caughtByLoop?.length ? `, ${tri.caughtByLoop.length} overclaim${tri.caughtByLoop.length === 1 ? '' : 's'} caught by the loop` : ''}`
     : '';
   appendFileSync(`${HERE}ledger.md`,
     `- ${DAY} — nightly: ${outcomes}${misses}${evidence}${over}${loopLine}; funnel +${funnelRows.length} (${funnelDeclines.length} declined); $${cost}; ${note}${attention.length ? ' ⚠ SEE ATTENTION FILE' : ''}\n`);

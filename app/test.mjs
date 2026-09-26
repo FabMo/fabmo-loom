@@ -520,6 +520,37 @@ console.log('--- intent loop: stop conditions ---');
   const blankFail = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 2, call: async () => { calls++; return mk(calls === 1 ? broken : { summary: '', actions: [], declined: [] })(); }, weave: async (r) => run(r) });
   if (/^The build does not verify yet: op "tag"/.test(blankFail.summary)) pass('blank summary on a failing build → names the first error'); else fail(`blank fail summary: "${blankFail.summary}"`);
 
+  // rollback guard: a later "correction" that breaks a verified build is undone
+  calls = 0;
+  const built = { summary: 'Built a WELCOME sign on a self-sized tag.', actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'text', label: 'W', default: 'WELCOME' } },
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: { ctrl: 'w' }, letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+  ], declined: [] };
+  const breakIt = { summary: 'Tightened the tag to 1×1.', actions: [{ kind: 'set_operation', operation: { id: 'tag', params: { width: 1, height: 1, posX: 0.01, posY: 0.01 } } }], declined: [] };
+  const admit = { summary: 'The sign will not export now — the tag no longer contains the text.', actions: [], declined: [] };
+  const rb = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? built : calls === 2 ? breakIt : admit)(r); }, weave: async (r) => run(r) });
+  const tagOp = rb.recipe.pipeline.find(o => o.id === 'tag');
+  if (calls === 3 && rb.rolledBack?.toTurn === 0 && rb.rolledBack.fromTurn === 1 && run(rb.recipe).ok && !tagOp.params.width && /^Built a WELCOME sign on a self-sized tag\. \(A later correction broke verification — op "tag".*undone; this earlier version, which verifies, is what you have\.\)$/.test(rb.summary))
+    pass('final state fails, turn 0 verified → recipe reverted to turn 0, summary says so');
+  else fail(`rollback: calls ${calls} rb=${JSON.stringify(rb.rolledBack)} ok=${run(rb.recipe).ok} width=${tagOp?.params.width} summary="${rb.summary}"`);
+  // the breaking action on the FINAL call (told not to act) is also undone
+  calls = 0;
+  const rb2 = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 2, call: async (r) => { calls++; return mk(calls === 1 ? built : breakIt)(r); }, weave: async (r) => run(r) });
+  if (calls === 2 && rb2.rolledBack?.toTurn === 0 && run(rb2.recipe).ok && !rb2.recipe.pipeline.find(o => o.id === 'tag').params.width) pass('late breaking action on the last call → reverted too');
+  else fail(`late rollback: rb=${JSON.stringify(rb2.rolledBack)} ok=${run(rb2.recipe).ok}`);
+  // no verified turn to fall back to → no rollback, honest failure stands
+  calls = 0;
+  const rb3 = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? broken : calls === 2 ? stillBroken : admit)(r); }, weave: async (r) => run(r) });
+  if (!rb3.rolledBack && !run(rb3.recipe).ok && rb3.summary === admit.summary) pass('never verified → nothing to roll back to, model\'s honest summary stands');
+  else fail(`no-rollback: rb=${JSON.stringify(rb3.rolledBack)} summary="${rb3.summary}"`);
+  // a correction that keeps it verified is kept (no false rollback)
+  calls = 0;
+  const improve = { summary: 'Taller letters.', actions: [{ kind: 'set_operation', operation: { id: 'e', params: { letterHeight: 1.5 } } }], declined: [] };
+  const rb4 = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? built : calls === 2 ? improve : { summary: 'Done, taller.', actions: [], declined: [] })(r); }, weave: async (r) => run(r) });
+  if (!rb4.rolledBack && rb4.recipe.pipeline.find(o => o.id === 'e').params.letterHeight === 1.5 && rb4.summary === 'Done, taller.') pass('verified → verified correction kept');
+  else fail(`false rollback: rb=${JSON.stringify(rb4.rolledBack)} lh=${rb4.recipe.pipeline.find(o => o.id === 'e')?.params.letterHeight}`);
+
   // first-turn failures throw the same messages the app always showed
   let err = null;
   try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', call: async () => ({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { actions: [{ kind: 'set_name', name: 'partial' }] } }] }) }); }

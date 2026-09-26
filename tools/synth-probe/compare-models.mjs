@@ -30,6 +30,7 @@ function tally(rows) {
     t.fixes += r.loop?.fixes || 0;
     if ((r.loop?.turns ?? 1) > 1) t.looks++;
     if (r.loop?.summaryChanged) t.revised++;
+    if (r.loop?.rolledBack) t.rolledBack = (t.rolledBack ?? 0) + 1;
     t.firstSkips += (r.firstSkipped ?? r.skipped ?? []).length;
     t.calls += r.usage?.calls ?? 1;
     t.inTok += r.usage?.input_tokens ?? 0;
@@ -53,6 +54,7 @@ const rows = [
   ['covered-prior misses', pct('priorMiss')],
   ['first-turn skipped actions', raw('firstSkips')],
   ['second looks / corrections', T.map(({ t }) => `${t.looks} / ${t.fixes}`)],
+  ['rolled back to a verified turn', raw('rolledBack', (x) => String(x ?? 0))],
   ['errors / crashes', raw('errors')],
   ['model calls', raw('calls')],
   ['uncached input tokens', raw('inTok', (x) => x.toLocaleString())],
