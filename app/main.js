@@ -1258,6 +1258,7 @@ async function generate() {
           summary: out.summary, actions: firstTurn.payload.actions ?? [], declined: out.declined, suggest: out.suggest,
           loop: {
             turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack,
+            claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
             revisedActions: out.turns.slice(1).flatMap(t => t.payload.actions ?? []),
             observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped.length, errors: t.observation.errors.slice(0, 3) } : null),
           },
@@ -1268,11 +1269,14 @@ async function generate() {
     });
 
     const lastTurn = out.turns[out.turns.length - 1];
-    const loopNote = out.rolledBack
+    const claimNote = out.claimIssues?.length
+      ? `<div class="declined">✎ ${out.claimIssues.length === 1 ? 'a claim' : `${out.claimIssues.length} claims`} the recipe could not back ${out.claimIssues.length === 1 ? 'was' : 'were'} corrected in the summary and declined</div>`
+      : '';
+    const loopNote = (out.rolledBack
       ? `<div class="declined">↺ a later correction broke verification — kept the earlier version that passed</div>`
       : out.revised
         ? `<div class="declined">↻ checked against the weave${out.fixes ? ` — ${out.fixes} correction${out.fixes === 1 ? '' : 's'} applied` : ''}${out.summary.trim() !== out.firstSummary.trim() ? ', summary revised' : ''}</div>`
-        : '';
+        : '') + claimNote;
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
     const skipped = lastTurn.skipped.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';

@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes } from './runtime.mjs';
-import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError } from './intent.mjs';
+import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError, checkClaims, claimCorrections } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
 import { pathToRegions, expandTemplate } from './shape.mjs';
@@ -339,6 +339,59 @@ console.log('--- robustness: shapes the model has actually sent ---');
     call: async (r) => { calls++; if (r.messages.length > 1) seenObs.push(r.messages[2].content[0].content); return { stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: calls === 1 ? { summary: 's', actions: [{ kind: 'set_name', name: 'B' }], declined: [] } : { summary: 'crashed, sorry', actions: [], declined: [] } }] }; },
     weave: async () => { throw new Error('kaboom in a strategy'); } });
   if (calls === 2 && /WEAVE: FAILED/.test(seenObs[0]) && /the weave crashed: kaboom/.test(seenObs[0]) && boom.summary === 'crashed, sorry') pass('throwing weave → failing observation, turn survives'); else fail(`weave crash: calls ${calls} obs ${seenObs[0]?.slice(0, 200)}`);
+}
+
+console.log('--- claims channel: declared claims vs the recipe ---');
+{
+  const mkRec = (ops) => applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: ops.map((o, i) => ({ kind: 'add_operation', operation: { id: o.id ?? `op${i}`, strategy: o.strategy, params: o.params ?? {} } })), declined: [] }).recipe;
+  const sign = mkRec([{ id: 'open', strategy: 'vcarve_text', params: { text: 'OPEN', letterHeight: 1 } }, { id: 'closed', strategy: 'vcarve_text', params: { text: 'CLOSED', letterHeight: 1, place: 'below' } }, { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } }]);
+  const flip = checkClaims(null, sign, 'Built a flip-over OPEN sign with OPEN and CLOSED below it on the same board — flip the board to show either word.', []);
+  if (flip.issues.length === 1 && flip.issues[0].code === 'faces-text' && /other side/.test(flip.issues[0].autoDecline.what)) pass('same-face flip: summary lint refuses, auto-decline names the other side'); else fail(`flip: ${JSON.stringify(flip.issues)}`);
+  const terr = mkRec([{ id: 'relief', strategy: 'terrain_relief', params: { terrain: 't', width: 8 } }, { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } }]);
+  const bathy = checkClaims(null, terr, 'Built a Lake Tahoe relief that carves the real bathymetry (underwater depth).', []);
+  if (bathy.issues.length === 1 && bathy.issues[0].code === 'bathymetry') pass('bathymetry promise on a terrain relief refused'); else fail(`bathy: ${JSON.stringify(bathy.issues)}`);
+  const inlay = mkRec([{ id: 'pocket', strategy: 'pocket_text', params: { text: 'KJM', letterHeight: 1.5 } }, { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } }]);
+  const plug = checkClaims(null, inlay, 'Built a two-part inlay: a pocket plus a matching walnut plug that fills it.', []);
+  if (plug.issues.length === 1 && plug.issues[0].code === 'phantom-plug') pass('phantom plug refused (one cutout, no plug op)'); else fail(`plug: ${JSON.stringify(plug.issues)}`);
+  const ok1 = checkClaims({ faces: 'top', pieces: 1, dataSource: 'none' }, sign, 'Both words are on one face; declined the other side.', [{ what: 'the other side of the board', why: 'one face per job' }]);
+  const ok2 = checkClaims({ faces: 'top', dataSource: 'land-elevation' }, terr, 'Land relief around the lake; declined underwater depth.', [{ what: 'underwater depth (bathymetry)', why: 'land tiles only' }]);
+  const ok3 = checkClaims({ faces: 'top', pieces: 1, parts: [{ name: 'board', opId: 'tag' }] }, inlay, 'Pocketed KJM; declined the plug.', [{ what: 'the matching walnut plug', why: 'no mating parts' }]);
+  if (!ok1.issues.length && !ok2.issues.length && !ok3.issues.length && ok1.declared) pass('declined + consistent claims → no issues'); else fail(`honest: ${JSON.stringify([ok1.issues, ok2.issues, ok3.issues])}`);
+  const both = checkClaims({ faces: 'both' }, sign, 'Sign.', []);
+  const phantom = checkClaims({ parts: [{ name: 'plug', opId: 'pocket' }, { name: 'ghost', opId: 'nope' }] }, inlay, 'Sign.', []);
+  const many = checkClaims({ pieces: 24 }, sign, 'Sign.', []);
+  const mate = checkClaims({ mating: true }, inlay, 'Sign.', []);
+  if (both.issues[0]?.code === 'faces' && phantom.issues.length === 2 && phantom.issues.every(i => i.code === 'phantom-part') && many.issues[0]?.code === 'pieces' && /at most 1/.test(many.issues[0].message) && mate.issues[0]?.code === 'mating')
+    pass('faces both / phantom parts / too many pieces / mating without furniture all refused'); else fail(`declared: ${JSON.stringify({ both: both.issues, phantom: phantom.issues, many: many.issues, mate: mate.issues })}`);
+  const corr = claimCorrections([...flip.issues, ...bathy.issues]);
+  if (corr.declines.length === 2 && /Checked against the recipe:/.test(corr.postscript) && !/Decline the/.test(corr.postscript)) pass('corrections: two auto-declines, postscript without the instruction tail'); else fail(`corrections: ${JSON.stringify(corr)}`);
+  const furn = { version: 2, name: 'x', stock: { thickness: 0.5 }, margin: 0.375, controls: [], derived: [], shapes: [], assets: [], terrains: [], pipeline: [{ id: 'build', strategy: 'furniture_design', params: {} }] };
+  const fclaims = checkClaims({ pieces: 6, mating: true, parts: [{ name: 'panel', opId: 'build' }] }, furn, 'Six panels that slot together.', []);
+  if (!fclaims.issues.length) pass('furniture_design: pieces/mating/parts claims allowed'); else fail(`furniture claims: ${JSON.stringify(fclaims.issues)}`);
+}
+
+console.log('--- claims channel: in the loop ---');
+{
+  const mkResp = (payload) => async () => ({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: payload }] });
+  const build = { summary: 'Built a flip-over OPEN/CLOSED sign — flip the board to show either word.', claims: { faces: 'both', pieces: 1 }, actions: [
+    { kind: 'add_operation', operation: { id: 'open', strategy: 'vcarve_text', params: { text: 'OPEN', letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 'closed', strategy: 'vcarve_text', params: { text: 'CLOSED', letterHeight: 1, place: 'below' } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+  ], declined: [] };
+  let calls = 0; const shown = [];
+  const heed = { summary: 'Built an OPEN/CLOSED sign with both words on one face; the other side is declined.', claims: { faces: 'top', pieces: 1 }, actions: [], declined: [{ what: 'the other side of the board', why: 'one face per job' }] };
+  const good = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'open/closed sign', call: async (r) => { calls++; if (r.messages.length > 1) shown.push(r.messages[2].content[0].content); return mkResp(calls === 1 ? build : heed)(); }, weave: async (r) => run(r) });
+  if (/CLAIMS CHECK — REFUSED/.test(shown[0]) && /claims\.faces "both"/.test(shown[0]) && good.summary === heed.summary && !good.claimIssues.length && good.claimsCaught && good.declined.length === 1)
+    pass('refused claim shown on the second look; model fixes it; claimsCaught recorded'); else fail(`heed: shown=${shown[0]?.slice(0, 300)} out=${JSON.stringify({ s: good.summary, ci: good.claimIssues, caught: good.claimsCaught })}`);
+  calls = 0;
+  const stubborn = { summary: 'Built a flip-over OPEN/CLOSED sign — flip the board to show either word.', claims: { faces: 'both' }, actions: [], declined: [] };
+  const bad = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'open/closed sign', call: async () => { calls++; return mkResp(calls === 1 ? build : stubborn)(); }, weave: async (r) => run(r) });
+  if (bad.claimIssues.length >= 1 && /\(Checked against the recipe: .*ONE face/.test(bad.summary) && bad.declined.some(d => /back face|other side/.test(d.what)) && !bad.claimsCaught)
+    pass('ignored refusal → summary postscript + auto-decline for the back face'); else fail(`stubborn: ${JSON.stringify({ s: bad.summary, ci: bad.claimIssues.map(i => i.code), d: bad.declined })}`);
+  calls = 0; const shown2 = [];
+  const noclaims = { ...build, claims: undefined, summary: 'Built an OPEN sign.' };
+  await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'sign', call: async (r) => { calls++; if (r.messages.length > 1) shown2.push(r.messages[2].content[0].content); return mkResp(calls === 1 ? noclaims : { summary: 'ok', actions: [], declined: [] })(); }, weave: async (r) => run(r) });
+  if (/CLAIMS: none declared/.test(shown2[0])) pass('no claims → asked to declare next call'); else fail(`noclaims obs: ${shown2[0]?.slice(-200)}`);
 }
 
 console.log('--- tool choice per model ---');

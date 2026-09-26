@@ -131,3 +131,14 @@ observation has skips, failures, or an empty pipeline). `MODEL=<id>`
 overrides the model for the same purpose across model generations.
 Corpus rows keep replaying turn-1 payloads (zero API cost); the loop's
 corrections are recorded, not replayed.
+
+## The claims channel (2026-09-26)
+
+Rows now carry `loop.claimsRefusedDuring` (claim codes the app refused on
+any turn), `loop.claimIssues` (codes still standing at the end — corrected
+deterministically in the final summary and declines) and
+`loop.claimsCaught` (refused mid-loop, fixed by the model). Triage lists
+rows with claimIssues under `caughtByClaims`, not `overclaims`. Codes:
+faces, faces-text, dataSource, bathymetry, phantom-part, phantom-plug,
+pieces, mating. A NEW confident-but-false promise class = a new check in
+`checkClaims`, with a corpus sweep for precision before it ships.

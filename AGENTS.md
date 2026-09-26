@@ -71,6 +71,11 @@ machine with a real spindle. These rules are not style preferences.
   own report (`buildObservation` / `observationText`) as a tool_result
   → corrects and writes the final summary. The observation is data the
   app computed; never let the model author what it then "observes".
+  `checkClaims` is the semantic gate above it: the model's `claims`
+  (faces / pieces / parts / dataSource / mating) and its summary are
+  checked against the recipe, never against its own words — add a check
+  there when a new class of confident-but-false promise shows up in the
+  ledger, and keep the summary lint precise (it runs on every turn).
 
 ## Adding a strategy
 

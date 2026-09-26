@@ -51,13 +51,24 @@ non-flat-stock objects; textile looms.
 | texture-under-kerf — texture_field extends under a later cutout | 1 | herringbone-bg | open |
 | bore-vs-pocket — holes >3× bit authored as bore_hole | 1 | serving-tray | open |
 
-## Semantic overclaims (decline rules needed — verifier CANNOT catch these)
+## Semantic overclaims (the CLAIMS CHANNEL, v0.81 — verifier cannot catch these)
+
+`checkClaims` (app/intent.mjs): the model declares `claims {faces, pieces,
+parts, dataSource, mating}`; each is checked against the recipe, and the
+summary is linted for the same promises when claims are silent. Refusals
+are shown on the second look; anything left standing on the last call is
+corrected deterministically in the user's text and auto-declined. Sweep of
+all 571 recorded rows with the lint alone: 7 flagged, all 7 genuine (the
+three below plus tahoe-depth-map, rune-inlay-amulet, two Monterey Bay
+re-asks), 0 false positives.
 
 | class | evidence | examples | status |
 |---|---|---|---|
-| same-face-flip — two-sided ask fulfilled on one face | 1 | open-closed-flip | open |
-| bathymetry-claim — "underwater depth" promised from land-elevation tiles | 1 | tahoe-bathymetry | open |
-| phantom-plug — inlay plug promised, no plug op exists | 1 | monogram-inlay | open |
+| same-face-flip — two-sided ask fulfilled on one face | 1 | open-closed-flip | **CAUGHT v0.81** (`faces` claim + summary lint → auto-decline "the other side") |
+| bathymetry-claim — "underwater depth" promised from land-elevation tiles | 4 | tahoe-bathymetry, tahoe-depth-map, coastline-bathymetry-reask ×2 | **CAUGHT v0.81** (`dataSource` enum has no bathymetry + summary lint on terrain jobs) |
+| phantom-plug — inlay plug promised, no plug op exists | 2 | monogram-inlay, rune-inlay-amulet | **CAUGHT v0.81** (`parts` must name a cutout op; summary lint when < 2 cutouts) |
+| pieces-per-run — "cuts all 24" with one cutout op | — | (declared-claims check `pieces` ≤ cutouts; no summary lint, too noisy) | guarded v0.81 |
+| mating-parts — hand-authored parts claimed to fit each other | — | (`mating` allowed only with furniture_design) | guarded v0.81 |
 
 ## Robustness (validator/app fixes)
 
@@ -198,3 +209,4 @@ prompts probed, outcomes, new classes, evidence increments, cost.)
 - 2026-09-26 — DEFAULT MODEL SWITCHED to claude-opus-5-5 (v0.78) per the A/B; Fable 5.1 offered as the expert pick in the AI-account box; Opus 4.8 kept as a fallback option. Nightly meta model (generation/triage) stays Opus 4.8 so the series keeps one judge; probe rows now run on the new default — expect the verified tally to step up and the cost column to be priced at Opus 5.5 rates from tonight.
 - 2026-09-26 — tag_cutout explicit-size bbox fix (v0.79): 24×6 tag over WELCOME now → 25×7 board, verifies (was 17×4 + envelope error); corpus: 20 rows improved (all 'now verifies'), 0 regressions, re-blessed; live re-probe of toggle-switch-panel / pumpkin-porch-sign / reserved-parking-sign on the new default recorded in runs/tagfix-opus55.jsonl.
 - 2026-09-26 — rollback guard (v0.80): never end worse than the best verified turn; live recheck of pumpkin-porch-sign + ornament-shape-set in runs/rollback-opus55.jsonl.
+- 2026-09-26 — claims channel (v0.81): declared claims + summary lint vs the recipe; corpus sweep 7/571 flagged, 0 false positives; live recheck of open-closed-flip / tahoe-bathymetry / monogram-inlay (Opus 5.5, loop on): all three DECLINED the impossible part on the FIRST call (the other side / the walnut plug / the lake bed) and built the honest remainder, verified — the claims rule in the prompt moved the behavior; checkClaims stayed the backstop (0 refusals needed). runs/claims-opus55.jsonl.

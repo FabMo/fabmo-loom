@@ -23,6 +23,20 @@ export const ACTION_TOOL = {
     type: 'object',
     properties: {
       summary: { type: 'string', description: 'One sentence, user-facing, of what was done (and what was declined).' },
+      claims: {
+        type: 'object',
+        description: 'What this job PHYSICALLY delivers — the app checks every field against the recipe and refuses what it cannot substantiate (the verifier cannot see these). Fill it on every call that builds.',
+        properties: {
+          faces: { type: 'string', enum: ['top', 'both'], description: '"top" = one face, one setup — every Loom job. "both" claims the back face is machined too: there is no flip or second setup in the catalog, so it is refused — decline back-face work instead.' },
+          pieces: { type: 'integer', description: 'how many separate finished pieces ONE run of this job frees from the board — each needs its own cutout op (furniture_design counts its panels). 0 = engraving only, nothing cut free. A run never yields more than its cutouts: "24 numbered fronts" is 1 piece per run, re-run with the control.' },
+          parts: {
+            type: 'array', description: 'each distinct KIND of piece by name with the cutout op that frees it — a "plug"/"insert"/"mating part" named here without such an op is refused',
+            items: { type: 'object', properties: { name: { type: 'string' }, opId: { type: 'string' } }, required: ['name', 'opId'] },
+          },
+          dataSource: { type: 'string', enum: ['none', 'land-elevation', 'user-file'], description: 'terrain_relief carves public LAND elevation tiles. Underwater depth / bathymetry / lake-bottom data does NOT exist here — never promise it; decline it.' },
+          mating: { type: 'boolean', description: 'true claims two pieces are made to FIT each other (an inlay plug in its pocket, a hand-authored tenon in a mortise). Only furniture_design produces mating parts; any other mating claim is refused.' },
+        },
+      },
       actions: {
         type: 'array',
         items: {
@@ -247,6 +261,7 @@ RULES:
 - Operations have NO enable/disable param — never invent one. Text ops skip themselves when their bound text is BLANK, so bound text is already optional: "make the caption optional" needs no actions — answer (in summary) that clearing the text field omits it. An optional NON-text feature is a decline (what: an on/off toggle for that op); remove_operation when the user says to drop it.
 - CUTTING MANY PARTS FROM ONE SHEET, and tracking what's already been cut, is NOT a decline — but it takes NO actions, because it is an app SETTING, not part of the recipe: the Current board tracker (inside "Board & material" at the top of the app panel) holds one physical board's size plus every footprint already committed to it, nests each new design into the free space, and reports what's left. Answer it in the SUMMARY: enter the board's W × H under "Current board" (in "Board & material"), then hit "Add to board" after each verified design — the next part nests into the remainder, and the chip shows the % free. It persists across designs and re-weaves, so a run of many one-at-a-time parts (nametags, tags, coasters) is exactly what it's for. Do NOT try to model the sheet, the nesting, or the run history as controls or ops — one recipe still describes ONE part, and that part is what the ledger places. (Only furniture_design nests many panels WITHIN a single design.)
 - If the recipe is empty and the user asks for an app, also set_name it.
+- CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
@@ -673,6 +688,7 @@ export function buildObservation(applyOut, weaveResult, recipe) {
     runTimeMin: stats?.estRunTimeMin ?? null,
     targets,
     awaitingDraw,
+    claimIssues: [],   // filled by checkClaims
   };
 }
 
@@ -704,14 +720,92 @@ export function observationText(obs) {
   }
   if (obs.warnings.length) lines.push(`WARNINGS:\n${list(obs.warnings)}`);
   if (obs.awaitingDraw.length) lines.push(`AWAITING THE USER'S DRAWING: ${obs.awaitingDraw.join(', ')} (ops using these skip until drawn — that is expected, not a failure)`);
+  if (obs.claimIssues?.length) lines.push(`CLAIMS CHECK — REFUSED (the recipe does not substantiate these; fix the recipe if the catalog can, otherwise move the item to declined and reword the summary):\n${list(obs.claimIssues.map(c => c.message))}`);
+  else if (obs.claimsDeclared) lines.push('CLAIMS CHECK: consistent with the recipe');
+  else if (obs.pipeline.length) lines.push('CLAIMS: none declared — declare faces / pieces / parts / dataSource / mating on your next call');
   return lines.join('\n');
+}
+
+// ------------------------------------------------------------ the claims channel
+//
+// The verifier proves motion against declared geometry; the observation
+// shows the model what applied. Neither can see a SEMANTIC overclaim —
+// "flip the board for the other word" when both words sit on one face,
+// "carves the real bathymetry" from land tiles, "a matching walnut plug"
+// with one cutout op. These are claims about what the job delivers, so
+// the model declares them in a small closed vocabulary and this check
+// compares each against the recipe — then also lints the summary for the
+// same promises when the claims are silent. Deterministic; the model's
+// words are data here, never evidence.
+
+const CUTOUT_STRATEGIES = new Set(['tag_cutout', 'disc_cutout', 'shape_cutout']);
+const PART_MAKERS = new Set([...CUTOUT_STRATEGIES, 'furniture_design']);
+const TWO_SIDED_RE = /\b(other side|both sides|two[- ]sided|double[- ]sided|flip (it|the board|the sign|the piece|the part|over)|flip-over|back side|reverse side|second face|back face)\b/i;
+const BATHY_RE = /\b(bathymetr\w*|underwater (depth|terrain|canyon)|lake ?bottom|lake ?bed|sea ?floor|seabed|ocean floor|water depth|depth of the (lake|bay|water)|underwater)\b/i;
+const PLUG_RE = /\b(matching|mating|walnut|maple|cherry|contrasting)\s+(plug|insert|inlay piece|inlay part)s?\b|\bplug (that|which) (fills|fits|drops)|\binlay plug|\bplug part\b/i;
+const mentions = (list, re) => list.some(d => re.test(`${d.what ?? ''} ${d.why ?? ''}`));
+
+export function checkClaims(claims, recipe, summary = '', declined = []) {
+  const issues = [];
+  const pipeline = recipe?.pipeline ?? [];
+  const cutouts = pipeline.filter(o => CUTOUT_STRATEGIES.has(o.strategy));
+  const furniture = pipeline.some(o => o.strategy === 'furniture_design');
+  const terrain = pipeline.some(o => o.strategy === 'terrain_relief');
+  const c = claims && typeof claims === 'object' ? claims : null;
+  const push = (code, message, autoDecline) => issues.push({ code, message, ...(autoDecline ? { autoDecline } : {}) });
+
+  // faces
+  if (c?.faces === 'both') {
+    push('faces', 'claims.faces "both": this job machines ONE face in one setup — there is no flip or second setup in the catalog. Declare "top" and decline the back-face work.',
+      { what: 'the back face (a second, flipped setup)', why: 'Loom machines one face per job — cut the other side as a separate job' });
+  } else if (TWO_SIDED_RE.test(summary) && !mentions(declined, /side|face|flip/i)) {
+    push('faces-text', `the summary says "${summary.match(TWO_SIDED_RE)[0]}", but nothing here machines a second face — everything is on one face of the board. Decline the other side (or reword if you meant one face).`,
+      { what: 'the other side of the board', why: 'Loom machines one face per job — both elements are on the same face; cut the other side as a separate job' });
+  }
+  // data source
+  if (c?.dataSource && !['none', 'land-elevation', 'user-file'].includes(c.dataSource)) {
+    push('dataSource', `claims.dataSource "${c.dataSource}" is not a source that exists here — terrain is public land elevation only.`);
+  }
+  if (terrain && BATHY_RE.test(summary) && !mentions(declined, /bathymetr|underwater|depth/i)) {
+    push('bathymetry', `the summary promises "${summary.match(BATHY_RE)[0]}", but terrain_relief carves LAND elevation tiles — lakes and seas read as a flat water surface. Decline the underwater depth; describe it as the surrounding land relief.`,
+      { what: 'underwater depth (bathymetry)', why: 'the terrain source is land elevation only — the water surface reads flat; no bathymetry data is available' });
+  }
+  // parts and pieces
+  for (const part of Array.isArray(c?.parts) ? c.parts : []) {
+    if (!part || typeof part !== 'object') continue;
+    const op = pipeline.find(o => o.id === part.opId);
+    if (!op) push('phantom-part', `claims.parts "${part.name}": no operation "${part.opId}" exists in the pipeline.`);
+    else if (!PART_MAKERS.has(op.strategy)) push('phantom-part', `claims.parts "${part.name}": operation "${part.opId}" is ${op.strategy}, which does not free a piece — only a cutout (tag/disc/shape) or furniture_design does.`);
+  }
+  if (PLUG_RE.test(summary) && cutouts.length < 2 && !furniture && !mentions(declined, /plug|inlay|insert|mating/i)) {
+    push('phantom-plug', `the summary promises "${summary.match(PLUG_RE)[0]}", but there is ${cutouts.length ? 'only one cutout op' : 'no cutout op'} — a plug needs its own cutout of the same letters, and the catalog has no kerf/clearance fit. Decline the plug.`,
+      { what: 'the matching plug / inlay piece', why: 'no operation produces a mating part — the catalog cuts pockets and outlines, not kerf-fitted inlay pairs' });
+  }
+  if (Number.isFinite(c?.pieces) && c.pieces > cutouts.length && !furniture) {
+    push('pieces', `claims.pieces ${c.pieces}, but one run frees at most ${cutouts.length} (one per cutout op). Say the user re-runs with the control for the rest, or add the cutouts.`);
+  }
+  if (c?.mating === true && !furniture) {
+    push('mating', 'claims.mating true: only furniture_design produces parts made to fit each other — nothing else here is fitted to anything. Decline the fit.',
+      { what: 'parts made to fit each other', why: 'only the furniture joinery strategy produces mating parts; other cutouts are independent outlines' });
+  }
+  return { issues, declared: !!c && Object.keys(c).length > 0 };
+}
+
+// Deterministic corrections for issues the model left standing on its last
+// call: a postscript the user reads, and a decline entry for each catalog-
+// level impossibility (so the gap report still records the demand).
+export function claimCorrections(issues) {
+  const declines = issues.filter(i => i.autoDecline).map(i => i.autoDecline);
+  const notes = issues.map(i => i.message.replace(/^claims\.\w+ [^:]*: /, '').replace(/ Decline .*$|Declare .*$|Say the user.*$/, '').trim());
+  return { declines, postscript: notes.length ? ` (Checked against the recipe: ${notes.join(' ')})` : '' };
 }
 
 const REVISE_TEXT = `That is what the app did with your actions: the recipe as it stands and the weave/verify result. Look before you speak:
 1. If something was SKIPPED, the weave FAILED, or a thing the user asked for is missing from the pipeline — and the catalog can express it — emit corrective actions now. They apply ON TOP of the current recipe: set_operation / set_shape / set_control to change what exists, add_operation only for what is missing, remove_operation for what should go. Never re-add what is already there.
 2. If it cannot be built, put it on declined (what + why). Do not leave it implied as done.
-3. Rewrite summary FROM SCRATCH to describe only what is built and verified NOW — or, if it still fails, say plainly what failed. Never describe an intention as a result.
-4. Keep 2–3 suggest chips.
+3. If CLAIMS CHECK lists refusals, fix the recipe when the catalog can; otherwise move each refused item to declined and drop it from the summary. Re-declare claims with the next call.
+4. Rewrite summary FROM SCRATCH to describe only what is built and verified NOW — or, if it still fails, say plainly what failed. Never describe an intention as a result.
+5. Keep 2–3 suggest chips.
 An empty actions list is the right answer when nothing needs to change.`;
 
 const FINAL_TEXT = `That is the result after your corrections. This is the LAST call: emit NO actions. Give only the honest summary of the state shown (built and verified, or what still fails and why), the declined list, and 2–3 suggest chips.`;
@@ -840,6 +934,10 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     const result = weave ? await safeWeave(weave, cur) : null;
     turn.observation = buildObservation(out, result, cur);
     turn.recipe = cur;   // the state this observation describes (applyActions never mutates it later)
+    turn.claims = p0.claims && typeof p0.claims === 'object' ? p0.claims : (turns[turns.length - 2]?.claims ?? null);
+    const cc = checkClaims(turn.claims, cur, out.summary, out.declined);
+    turn.observation.claimIssues = cc.issues;
+    turn.observation.claimsDeclared = cc.declared;
     if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
     req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2 });
   }
@@ -886,6 +984,19 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     }
   }
 
+  // Claims left standing: the final summary is checked against the final
+  // recipe; anything refused gets a deterministic postscript and a decline.
+  const finalClaims = last.payload?.claims && typeof last.payload.claims === 'object' ? last.payload.claims : ([...turns].reverse().find(x => x.claims)?.claims ?? null);
+  const finalCheck = checkClaims(finalClaims, cur, summary, dedupeDeclined(turns.flatMap(x => x.declined ?? [])));
+  let claimIssues = finalCheck.issues;
+  let claimDeclines = [];
+  if (claimIssues.length) {
+    const corr = claimCorrections(claimIssues);
+    summary += corr.postscript;
+    claimDeclines = corr.declines;
+    last.claimsCorrected = true;
+  }
+
   // Rollback guard: a second look must never leave the user worse off than
   // a state that already verified. The final state is the last OBSERVED one
   // (the last turn's own, when it acted; otherwise the state it was shown).
@@ -913,11 +1024,13 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     turns,
     summary,
     firstSummary: first.summary ?? '',
-    declined: dedupeDeclined(turns.flatMap(x => x.declined ?? [])),
+    declined: dedupeDeclined([...turns.flatMap(x => x.declined ?? []), ...claimDeclines]),
     suggest,
     usage,
     revised: turns.length > 1,
     fixes: turns.slice(1).reduce((n, x) => n + x.applied.length, 0),
     rolledBack,
+    claimIssues,                     // refused claims still standing at the end (already corrected in summary/declined)
+    claimsCaught: turns.some(x => x.observation?.claimIssues?.length) && !claimIssues.length,   // the second look fixed them
   };
 }
