@@ -395,7 +395,7 @@ console.log('--- intent loop: revise request threading ---');
   const m = r2.messages;
   if (m.length === 3 && m[1].role === 'assistant' && m[1].content === content && m[2].role === 'user'
       && m[2].content[0].type === 'tool_result' && m[2].content[0].tool_use_id === 'tu_1' && /Look before you speak/.test(m[2].content[1].text)
-      && r2.system === req.system && r2.tool_choice.name === 'apply_recipe_actions') pass('revise request threads assistant + tool_result on the same system/tools');
+      && r2.system === req.system && JSON.stringify(r2.tool_choice) === JSON.stringify(req.tool_choice) && r2.tools === req.tools) pass('revise request threads assistant + tool_result on the same system/tools/tool_choice');
   else fail(`revise request shape: ${JSON.stringify(m.map(x => x.role))}`);
   const r3 = buildReviseRequest(r2, content, 'tu_2', obs, { final: true });
   if (r3.messages.length === 5 && /LAST call: emit NO actions/.test(r3.messages[4].content[1].text)) pass('final turn asks for no actions');
