@@ -1605,9 +1605,14 @@ export const CATALOG = {
       });
       return {
         ops,
+        // the TAG's own rectangle (explicit width/height and a pin win over
+        // content ± buffer — reporting content ± buffer here let a 24×6 tag
+        // auto-size a 17×4 board and cut off its edge; 3 of 4 models hit it
+        // in the 2026-09-26 A/B), swelled by the cutter radius like the
+        // other cutouts
         bbox: {
-          minX: b.minX - p.buffer - p.toolDiameter / 2, minY: b.minY - p.buffer - p.toolDiameter / 2,
-          maxX: b.maxX + p.buffer + p.toolDiameter / 2, maxY: b.maxY + p.buffer + p.toolDiameter / 2,
+          minX: x0 - p.toolDiameter / 2, minY: y0 - p.toolDiameter / 2,
+          maxX: x1 + p.toolDiameter / 2, maxY: y1 + p.toolDiameter / 2,
         },
       };
     },

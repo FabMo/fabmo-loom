@@ -291,6 +291,27 @@ console.log('--- applyActions: flattened control/operation payloads ---');
   else fail(`skip reasons: ${JSON.stringify(bad.skipped)}`);
 }
 
+console.log('--- tag_cutout: explicit size / pin sizes the stock ---');
+{
+  const mk = (tag) => applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: 'WELCOME', letterHeight: 2 } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.5, ...tag } } },
+  ], declined: [] }).recipe;
+  const big = run(mk({ width: 24, height: 6 }));
+  if (big.ok && big.preview.stock.w === 25 && big.preview.stock.h === 7) pass('explicit 24×6 tag → board 25×7 (tag + margins), verifies');
+  else fail(`explicit tag: ok=${big.ok} stock=${JSON.stringify(big.preview?.stock)} ${big.errors?.[0]}`);
+  const self = run(mk({}));
+  if (self.ok && self.preview.stock.w === 17 && self.preview.stock.h === 4) pass('self-sized tag unchanged (17×4)');
+  else fail(`self-sized tag: ${JSON.stringify(self.preview?.stock)} ${self.errors?.[0]}`);
+  // pinned off-center: the board grows to hold the whole tag, content stays inside
+  const pinned = run(mk({ width: 20, height: 5, posX: 1.5, posY: 0.5 }));
+  if (pinned.ok && pinned.preview.stock.w === 21 && pinned.preview.stock.h === 6) pass('pinned 20×5 tag at (1.5, 0.5) → board 21×6, verifies');
+  else fail(`pinned tag: ok=${pinned.ok} stock=${JSON.stringify(pinned.preview?.stock)} ${pinned.errors?.[0]}`);
+  const tall = run(mk({ height: 6 }));
+  if (tall.ok && tall.preview.stock.h === 7 && tall.preview.stock.w === 17) pass('explicit height only: board height from the tag, width from content + buffer');
+  else fail(`height-only tag: ${JSON.stringify(tall.preview?.stock)} ${tall.errors?.[0]}`);
+}
+
 console.log('--- robustness: shapes the model has actually sent ---');
 {
   // actions as an object keyed 0..n / as a string — must not crash the turn
