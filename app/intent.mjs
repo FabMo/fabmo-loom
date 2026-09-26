@@ -294,7 +294,28 @@ export function applyActions(recipe, payload) {
     return { out };
   };
 
-  const applyOne = (a) => {
+  // The model sometimes flattens the nested payloads — {kind:"add_control",
+  // id, type, label…} with no control: object, {kind:"add_operation", id,
+  // strategy, params} with no operation: — 20 of 571 corpus rows do, and
+  // the loop's A/B showed a second look cannot repair it when the skip
+  // reason is just "bad control". The intent is unambiguous: fold the
+  // top-level fields into the object the schema asked for.
+  const normalize = (a) => {
+    if ((a.kind === 'add_control' || a.kind === 'set_control') && !a.control && typeof a === 'object'
+        && ('type' in a || 'label' in a || 'default' in a || 'options' in a || 'min' in a || 'max' in a)) {
+      const { kind, id, type, label, min, max, step, options } = a;
+      return { kind, id, control: { id, type, label, default: a.default, min, max, step, options } };
+    }
+    if ((a.kind === 'add_operation' || a.kind === 'set_operation') && !a.operation
+        && ('strategy' in a || 'params' in a)) {
+      const { kind, id, strategy, params, after, frame } = a;
+      return { kind, id, operation: { id, strategy, params, after, frame } };
+    }
+    return a;
+  };
+
+  const applyOne = (a0) => {
+    const a = normalize(a0);
     switch (a.kind) {
       case 'set_name':
         if (typeof a.name === 'string' && a.name.trim()) { next.name = a.name.trim(); applied.push(`named it "${next.name}"`); }
@@ -309,7 +330,9 @@ export function applyActions(recipe, payload) {
       }
       case 'add_control': {
         const c = a.control;
-        if (!c?.id || !['text', 'number', 'choice'].includes(c.type)) { skipped.push('add_control: bad control'); break; }
+        if (!c?.id || !['text', 'number', 'choice'].includes(c.type)) {
+          skipped.push(`add_control${c?.id ? ` "${c.id}"` : ''}: needs control: {id, type: "text" | "number" | "choice", label, default…}${c && c.type ? ` — type "${c.type}" is not one of those` : ''}`); break;
+        }
         if (ctrlIds().has(c.id)) { skipped.push(`add_control: "${c.id}" exists`); break; }
         let options;
         if (c.type === 'choice') {
@@ -463,7 +486,11 @@ export function applyActions(recipe, payload) {
       }
       case 'add_operation': {
         const o = a.operation;
-        if (!o?.id || !CATALOG[o.strategy]) { skipped.push(`add_operation: unknown strategy "${o?.strategy}"`); break; }
+        if (!o?.id || !CATALOG[o.strategy]) {
+          skipped.push(!o?.strategy
+            ? `add_operation${o?.id ? ` "${o.id}"` : ''}: needs operation: {id, strategy, params}`
+            : `add_operation${o?.id ? ` "${o.id}"` : ''}: unknown strategy "${o.strategy}" — only the strategies in the catalog exist`); break;
+        }
         if (opIds().has(o.id)) { skipped.push(`add_operation: "${o.id}" exists`); break; }
         const vp = validParams(o.strategy, o.params);
         if (vp.bad) { skipped.push(`add_operation "${o.id}": ${vp.bad}`); break; }
@@ -745,10 +772,31 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   }
   const first = turns[0], last = turns[turns.length - 1];
   const suggest = last.suggest?.length ? last.suggest : first.suggest;
+  let summary = (last.summary ?? '').trim() || (first.summary ?? '');
+  // The last allowed call was told "no actions", but a model that still
+  // sees a fix will sometimes emit it anyway (seen live: ornament-shape-set
+  // fixed itself on the final call and then described the OLD state, since
+  // it never saw the result). Those actions are applied — but nobody has
+  // looked. Weave once more and, when the verdict differs from what the
+  // model was shown, say so in one deterministic sentence.
+  const lastHadActions = (last.payload.actions ?? []).filter(a => a && typeof a === 'object').length > 0;
+  if (lastHadActions && turns.length > 1 && weave && last.applied.length) {
+    const result = await weave(cur);
+    last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur);
+    const shown = turns[turns.length - 2].observation;
+    const before = shown ? shown.ok : null, after = last.observation.ok;
+    if (after !== before) {
+      const firstErr = last.observation.errors[0];
+      summary += after
+        ? ' (Update: after those last corrections the weave verifies and the job posts.)'
+        : ` (Update: after those last corrections the weave still fails${firstErr ? ` — ${firstErr}` : ''}.)`;
+      last.postscript = true;
+    }
+  }
   return {
     recipe: cur,
     turns,
-    summary: (last.summary ?? '').trim() || (first.summary ?? ''),
+    summary,
     firstSummary: first.summary ?? '',
     declined: dedupeDeclined(turns.flatMap(x => x.declined ?? [])),
     suggest,

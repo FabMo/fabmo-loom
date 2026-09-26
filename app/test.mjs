@@ -260,6 +260,35 @@ console.log('--- buildParseRequest ---');
 // shown, how the conversation is threaded, when the loop stops, and that
 // the summary the user reads is the one written with the weave in view.
 
+console.log('--- applyActions: flattened control/operation payloads ---');
+{
+  // the model's flattened form (found by the loop A/B: 20/571 corpus rows)
+  const res = applyActions(structuredClone(EMPTY_RECIPE), {
+    summary: 'x',
+    actions: [
+      { kind: 'add_control', id: 'w', type: 'number', label: 'Width', default: 6, min: 4, max: 10, step: 0.5 },
+      { kind: 'add_control', id: 'word', type: 'text', label: 'Word', default: 'Hi' },
+      { kind: 'add_operation', id: 'e', strategy: 'vcarve_text', params: { text: { ctrl: 'word' }, letterHeight: { ctrl: 'w' } } },
+      { kind: 'set_operation', id: 'e', params: { letterHeight: 1 } },
+      { kind: 'set_control', id: 'w', label: 'Letter height' },
+    ],
+    declined: [],
+  });
+  const c = res.recipe.controls.find(x => x.id === 'w');
+  if (res.skipped.length === 0 && c?.type === 'number' && c.label === 'Letter height' && c.max === 10 && res.recipe.pipeline[0]?.strategy === 'vcarve_text' && res.recipe.pipeline[0].params.letterHeight === 1)
+    pass('flattened add_control / add_operation / set_* fold into the schema shape');
+  else fail(`flattened forms: skipped=${JSON.stringify(res.skipped)} ctrl=${JSON.stringify(c)}`);
+  // and the reasons name the shape when it truly is malformed
+  const bad = applyActions(structuredClone(EMPTY_RECIPE), { summary: 'x', actions: [
+    { kind: 'add_control', control: { id: 'q', type: 'slider' } },
+    { kind: 'add_operation', operation: { id: 'z' } },
+    { kind: 'add_operation', operation: { id: 'y', strategy: 'furniture_build' } },
+  ], declined: [] });
+  if (/type "slider" is not one of those/.test(bad.skipped[0]) && /needs operation: \{id, strategy, params\}/.test(bad.skipped[1]) && /unknown strategy "furniture_build" — only the strategies/.test(bad.skipped[2]))
+    pass('malformed payloads skip with reasons the second look can act on');
+  else fail(`skip reasons: ${JSON.stringify(bad.skipped)}`);
+}
+
 console.log('--- intent loop: observation ---');
 {
   const rec0 = structuredClone(EMPTY_RECIPE);
@@ -373,6 +402,28 @@ console.log('--- intent loop: stop conditions ---');
   calls = 0;
   const forever = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? good : { summary: `again ${calls}`, actions: [{ kind: 'set_name', name: `n${calls}` }], declined: [] })(r); }, weave: async (r) => run(r) });
   if (calls === 3 && forever.recipe.name === 'n3' && forever.summary === 'again 3') pass('cap at maxTurns; final actions applied'); else fail(`cap calls ${calls}, name ${forever.recipe.name}`);
+  // the final call emits fixes anyway (told not to) → they apply, one more
+  // weave runs, and a deterministic update line corrects the stale summary
+  calls = 0;
+  const broken = { summary: 'Sign built.', actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'text', label: 'W', default: 'Hi' } },
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: { ctrl: 'w' }, letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4, width: 0.5, height: 0.5 } } },
+  ], declined: [] };
+  const stillBroken = { summary: 'Tried a fix.', actions: [{ kind: 'set_operation', operation: { id: 'tag', params: { width: 0.6 } } }], declined: [] };
+  const lateFix = { summary: 'The job does NOT yet post — the pinned tag is too small for the word.', actions: [{ kind: 'set_operation', operation: { id: 'tag', params: { width: 0, height: 0 } } }], declined: [] };
+  const late = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? broken : calls === 2 ? stillBroken : lateFix)(r); }, weave: async (r) => run(r) });
+  if (calls === 3 && run(late.recipe).ok && /does NOT yet post.*\(Update: after those last corrections the weave verifies and the job posts\.\)$/.test(late.summary))
+    pass('late fix on the final call: applied, re-woven, stale summary gets a verified postscript');
+  else fail(`late fix: calls ${calls}, ok ${run(late.recipe).ok}, summary "${late.summary}"`);
+  // and when the late fix does NOT help, the postscript says that instead
+  calls = 0;
+  const lateNoHelp = { summary: 'Should be fine now.', actions: [{ kind: 'set_operation', operation: { id: 'tag', params: { width: 0.7 } } }], declined: [] };
+  const badBefore = { ...stillBroken };
+  const late2 = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3, call: async (r) => { calls++; return mk(calls === 1 ? broken : calls === 2 ? badBefore : lateNoHelp)(r); }, weave: async (r) => run(r) });
+  if (!run(late2.recipe).ok && !/Update:/.test(late2.summary)) pass('late action with an unchanged (still failing) verdict adds no postscript');
+  else fail(`late no-help: ok ${run(late2.recipe).ok}, summary "${late2.summary}"`);
+
   // first-turn failures throw the same messages the app always showed
   let err = null;
   try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', call: async () => ({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: { actions: [{ kind: 'set_name', name: 'partial' }] } }] }) }); }

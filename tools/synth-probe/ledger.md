@@ -68,6 +68,36 @@ non-flat-stock objects; textile looms.
 | max_tokens truncation as silent success | **FIXED v0.67** — 8000 + stop_reason refusal |
 | empty payload as silent success | **FIXED v0.67** — surfaced as retryable |
 | stale single-font arg in app/test-live.mjs | open (test cannot pass) |
+| flattened add_control / add_operation payloads ({kind, id, type…} with no control:/operation: object) → "bad control" / unknown strategy "undefined", a reason too vague for the second look to fix | **FIXED v0.76 2026-09-26** — applyActions normalizes the flattened form + specific skip reasons; corpus replay: 19 rows improved (12 now verify, incl. 2 real funnel rows), 0 regressions; birdhouse live retest → verified |
+| final call emits fixes despite "no actions" → applied unseen, summary describes the OLD state (ornament-shape-set recheck: job verified, summary said "does NOT yet post") | **FIXED v0.76** — runIntentLoop re-weaves after a late fix and appends a deterministic "(Update: … verifies / still fails — <error>)" when the verdict changed |
+
+## Closed-loop A/B (2026-09-26)
+
+Same 25 prompts (the 2026-08-10 set), same model (opus-4-8), one-shot vs
+the v0.75 loop (`LOOP=off` vs `LOOP=always`; `compare-loop.mjs`). Judged
+by eye on final summaries, not the word-list proxy.
+
+| | one-shot | loop |
+|---|---|---|
+| confident summary over a failed/empty/crashed pipeline | **10 / 25** | **0 / 25** |
+| verified | 11 | 13 |
+| empty pipeline | 7 | 3 |
+| rows carrying an honest decline | 9 | 15 |
+| corrections applied by the second look | — | 59 (24 rows took a look) |
+| model calls / output tokens | 25 / 25k | 67 / 46k (input 2.8×, mostly cached) |
+
+Rescued by the loop: garden-row-markers (cutout fit fixed → verified),
+rain-gauge-bracket (4 fixes → verified), advent (crash → honest partial),
+fraction-circle + number-line (empty stalls → partial builds with the
+exact failing op named), toggle-switch (bore-vs-pocket → pocket, verified,
+missing holes declared). Made worse by the loop: ornament-shape-set
+(revision converted the cutout op into a bore — verified but hollow,
+honestly reported) and birdhouse-flatpack (turn 1 emitted FLATTENED
+add_control/add_operation payloads; the skip reason "bad control" gave
+the second look nothing to act on, so it repeated the mistake — see the
+robustness row below). The semantic classes (same-face-flip,
+bathymetry-claim, phantom-plug) are untouched by design: the observation
+cannot see them either.
 
 ## Run log
 
@@ -93,3 +123,5 @@ prompts probed, outcomes, new classes, evidence increments, cost.)
 - 2026-08-08 — nightly: 12 PARTIAL, 2 DECLINED, 5 FULFILLED_UNVERIFIED, 5 FULFILLED; 3 prior-miss (abc-name-puzzle-tray, reserved-parking-sign, restroom-pictogram-sign); evidence: rotary / non-flat-stock (upright peg) + multi-part-set +1, batch-input + furniture tray +1, open-path-engraving +2, envelope-overflow-verify +5, empty-payload-as-fulfilled +2, beveled-panels +2, working-as-intended +2, irregular-hole-layouts +1, curved-text +1, batch-input +1, v-inlay +1; OVERCLAIMS: marble-run-track-board, cat-feeding-station-mat, pet-bowl-stand-panels, fish-tank-lid-cutout, disc-golf-scorecard-holder, engraved-photo-locket, ada-room-number-plate, cafe-table-number-blocks, monogram-inlay-cutting-board; funnel +0 (0 declined); $4.19; Envelope-overflow-verify (5 rows) and empty/errored pipelines summarized as built (9 overclaims) dominate again; one new multi-part-set capability gap surfaced across toddler-toy and domino asks, and no funnel declines tonight. ⚠ SEE ATTENTION FILE
 - 2026-08-09 — nightly: 13 FULFILLED_UNVERIFIED, 5 FULFILLED, 6 PARTIAL, 1 DECLINED; 3 prior-miss (angled-shoe-rack, dice-tower-panels, guitar-pick-holder); evidence: envelope-overflow-verify +2, empty-payload-as-fulfilled +1, open-path-engraving +3, conditional-panels +1, drawer-doors +1, cubby-crosslap-collision +1, floor-fn-unavailable +2, bore-vs-pocket +3, bound-to-missing-control +1, working-as-intended +2, overlapping-pockets +3; OVERCLAIMS: cheese-board-handle-slots, serving-tray-handles, cutting-board-juice-groove, nightstand-drawer-box, cubby-storage-grid, bench-dog-hole-grid, router-circle-jig, catan-hex-insert-reask, cribbage-travel-board, marble-run-track-board, ukulele-fret-slots; funnel +0 (0 declined); $4.73; Envelope-overflow, overlapping-pocket/cross-lap collisions, and math-fn parse failures dominate again with 11 confident summaries overclaiming empty or errored pipelines; crosscut-sled and countersink/back-face declines are working-as-intended. ⚠ SEE ATTENTION FILE
 - 2026-08-10 — nightly: 7 FULFILLED_UNVERIFIED, 3 DECLINED, 7 PARTIAL, 8 FULFILLED; evidence: empty-payload-as-fulfilled +3, working-as-intended +6, bore-vs-pocket +1, content-vs-fixed-disc +3, envelope-overflow-verify +2, drawer-doors +1, beveled-panels +1, curved-text +1; OVERCLAIMS: toggle-switch-panel, reserved-parking-sign, fraction-circle-set, pi-hat-enclosure, number-line-ruler, cafe-menu-slot-board; funnel +0 (0 declined); $4.20; Electronics/education batch: four empty/failed pipelines summarized as built plus recurring bore-vs-pocket, content-vs-disc and envelope-overflow slips; all declines (arduino, diffuser, stake, bat, wedge) working-as-intended and no new classes.
+- 2026-09-26 — manual A/B (not a nightly; nightlies were dead Aug 11–Sep 26 on an invalid key, rotated today): 25 prompts × {one-shot, loop}; loop: 24/25 took a second look, 59 corrections, 24 summaries revised; confident-on-failure 10 → 0, verified 11 → 13, empty pipeline 7 → 3; 2 rows worse (ornament, birdhouse); ~$12 total. See "Closed-loop A/B" above.
+- 2026-09-26 — recheck after the flattened-payload fix (2 prompts, loop): birdhouse-flatpack → FULFILLED (first-turn skips 0); ornament-shape-set → FULFILLED with 8 fixes but a stale final summary (fixed itself on the last call, never saw the result) → the postscript rule above.
