@@ -9,13 +9,20 @@
 // should look (new class, regression, broken infra).
 //
 // Usage: node nightly.mjs [--dry]   (--dry: generate but skip live probes)
+//        node nightly.mjs --retriage YYYY-MM-DD
+//   --retriage: backfill a night whose probe ran but whose triage never
+//   landed — reads that day's saved runs/<day>-results.jsonl and does only
+//   triage → corpus-add → run-log line (no corpus check, generation, or probes)
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 const HERE = new URL('./', import.meta.url).pathname;
 const RUNS = `${HERE}runs/`;
-const DAY = new Date().toISOString().slice(0, 10);
+const retriageAt = process.argv.indexOf('--retriage');
+const retriage = retriageAt > 0 ? process.argv[retriageAt + 1] : null;
+if (retriageAt > 0 && !/^\d{4}-\d\d-\d\d$/.test(retriage ?? '')) { console.error('usage: node nightly.mjs --retriage YYYY-MM-DD'); process.exit(1); }
+const DAY = retriage ?? new Date().toISOString().slice(0, 10);
 const dry = process.argv.includes('--dry');
 mkdirSync(RUNS, { recursive: true });
 
@@ -23,6 +30,18 @@ const log = (m) => console.log(`[nightly ${new Date().toISOString().slice(11, 19
 const attention = [];
 let results, tri, priorMisses = [];
 let tally = {};
+let funnelRows = [], funnelDeclines = [];   // declared up here: finish() can run before the funnel pull
+// broken infra must never be silent: any crash still writes the run-log
+// line and an ATTENTION file (a thrown fetch once killed four nights of
+// triage with nothing but a stack trace in nightly.log)
+let crashing = false;
+process.on('uncaughtException', (e) => {
+  console.error(e);
+  if (crashing) process.exit(1);
+  crashing = true;
+  attention.push(`nightly CRASHED — ${String(e?.stack ?? e).slice(0, 600)}`);
+  finish('crashed — see ATTENTION file');
+});
 const runNode = (script, ...args) => {
   const r = spawnSync('node', [script, ...args], { cwd: HERE, encoding: 'utf8', timeout: 30 * 60_000 });
   return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') };
@@ -33,22 +52,35 @@ if (!key) { console.error('no shop key — aborting'); process.exit(1); }
 
 let spendIn = 0, spendOut = 0;
 async function llm(system, user, maxTokens = 4000) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      // the META model (prompt generation + triage) stays on Opus 4.8 so the
-      // nightly series keeps one judge; the intent layer under test uses the
-      // app's own default (intent.mjs DEFAULT_MODEL, Opus 5.5 since v0.78)
-      body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
-    });
-    if (res.status === 429 || res.status >= 500) { await new Promise(r => setTimeout(r, 3000 * (attempt + 1))); continue; }
+  const pause = (attempt) => new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
+  let lastErr = 'API retries exhausted';
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let res;
+    try {
+      res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        // connection: close — runNode() is spawnSync, which blocks the event
+        // loop for the whole live probe; a kept-alive socket goes stale behind
+        // it and the next call dies with "other side closed" / EPIPE
+        headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', connection: 'close' },
+        // the META model (prompt generation + triage) stays on Opus 4.8 so the
+        // nightly series keeps one judge; the intent layer under test uses the
+        // app's own default (intent.mjs DEFAULT_MODEL, Opus 5.5 since v0.78)
+        body: JSON.stringify({ model: 'claude-opus-4-8', max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] }),
+      });
+    } catch (e) {
+      // a thrown fetch is a transport failure (stale socket, reset) — retry it
+      lastErr = `fetch failed: ${e?.cause?.code ?? e?.cause?.message ?? e?.message ?? e}`;
+      log(`llm: ${lastErr} — retrying`);
+      await pause(attempt); continue;
+    }
+    if (res.status === 429 || res.status >= 500) { lastErr = `API ${res.status}`; await pause(attempt); continue; }
     if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const data = await res.json();
     spendIn += data.usage?.input_tokens ?? 0; spendOut += data.usage?.output_tokens ?? 0;
     return data.content.find(b => b.type === 'text')?.text ?? '';
   }
-  throw new Error('API retries exhausted');
+  throw new Error(lastErr);
 }
 // tolerate fences and preambles: parse from the first bracket to the last
 const parseJson = (text) => {
@@ -58,22 +90,26 @@ const parseJson = (text) => {
 };
 
 // ---- 1. corpus regression check (free) — a fail stops the night ------
-log('corpus regression check…');
-const corpus = runNode('test-corpus.mjs');
-if (corpus.code !== 0) {
-  attention.push(`CORPUS REGRESSION — a commit broke handling of recorded model responses:\n${corpus.out.split('\n').filter(l => l.includes('REGRESSION')).join('\n')}`);
-  finish('corpus regression — live probes skipped');
-} else log(corpus.out.trim().split('\n').pop());
+if (!retriage) {
+  log('corpus regression check…');
+  const corpus = runNode('test-corpus.mjs');
+  if (corpus.code !== 0) {
+    attention.push(`CORPUS REGRESSION — a commit broke handling of recorded model responses:\n${corpus.out.split('\n').filter(l => l.includes('REGRESSION')).join('\n')}`);
+    finish('corpus regression — live probes skipped');
+  } else log(corpus.out.trim().split('\n').pop());
+}
 
 // ---- 2. real stream ---------------------------------------------------
-log('funnel pull…');
-const funnel = runNode('funnel-pull.mjs');
-log(funnel.out.trim().split('\n').filter(l => l.startsWith('[funnel]')).join(' | '));
+if (!retriage) {
+  log('funnel pull…');
+  const funnel = runNode('funnel-pull.mjs');
+  log(funnel.out.trim().split('\n').filter(l => l.startsWith('[funnel]')).join(' | '));
+}
 const funnelFile = `${RUNS}funnel-${DAY}.jsonl`;
-const funnelRows = existsSync(funnelFile)
+funnelRows = existsSync(funnelFile)
   ? readFileSync(funnelFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
   : [];
-const funnelDeclines = funnelRows.filter(r => r.declined?.length);
+funnelDeclines = funnelRows.filter(r => r.declined?.length);
 
 // ---- 3. generate tonight's batch --------------------------------------
 const ledger = readFileSync(`${HERE}ledger.md`, 'utf8');
@@ -82,33 +118,38 @@ const WHEEL = ['signage & wayfinding', 'gifts & keepsakes', 'kitchen & serving',
   'games & puzzles', 'musical instruments', 'electronics & enclosures', 'outdoor & garden', 'holiday & seasonal',
   'small-business fixtures', 'school & education', 'cosplay & props', 'maps & terrain', 'decorative patterns & texture',
   'kids & toys', 'pets', 'sports & recreation'];
-const doy = Math.floor((Date.now() - Date.parse(new Date().getFullYear() + '-01-01')) / 86400e3);
-const cats = Array.from({ length: 5 }, (_, i) => WHEEL[(doy * 5 + i) % WHEEL.length]);
-log(`generating 25 prompts in: ${cats.join(' · ')}`);
-
-const genText = await llm(
-  `You generate synthetic user prompts to probe a CNC/CAM "prompt-to-app" tool (Loom). Follow the generation rules in the PROBE.md excerpt. Output ONLY a JSON array, no fences, of {"id","persona","prior","prompt","note"} — id kebab-case unique, prior one of covered|decline|unsure (your honest prediction), note = one line on what the prompt probes.`,
-  `PROBE.md (generation rules — step 3):\n${probeDoc}\n\nCurrent failure-class ledger (for regression re-asks and to avoid re-probing the known-by-design):\n${ledger}\n\nTonight's categories (5 prompts each): ${cats.join(', ')}.\nGenerate the 25 prompts now.`,
-  6000);
-let prompts;
-try {
-  prompts = parseJson(genText).filter(p => p?.id && p?.prompt && p?.prior);
-} catch (e) {
-  attention.push(`generation output unparseable: ${String(e).slice(0, 120)}`);
-  finish('generation failed');
-}
-if (prompts.length < 15) { attention.push(`generation produced only ${prompts.length} prompts`); finish('generation too small'); }
-const promptsFile = `${RUNS}${DAY}-prompts.json`;
-writeFileSync(promptsFile, JSON.stringify(prompts, null, 1));
-log(`${prompts.length} prompts → ${promptsFile}`);
-if (dry) finish('dry run — no live probes');
-
-// ---- 4. probe live -----------------------------------------------------
 const resultsFile = `${RUNS}${DAY}-results.jsonl`;
-writeFileSync(resultsFile, '');   // fresh file — a re-run the same day must not mix batches
-log('probing live…');
-const probe = runNode('probe.mjs', `./runs/${DAY}-prompts.json`, `./runs/${DAY}-results.jsonl`);
-if (!existsSync(resultsFile)) { attention.push(`probe produced no results:\n${probe.out.slice(-400)}`); finish('probe failed'); }
+if (retriage) {
+  if (!existsSync(resultsFile)) { console.error(`no ${resultsFile} to retriage`); process.exit(1); }
+  log(`retriage ${DAY}: saved probe results, triage + corpus-add only`);
+} else {
+  const doy = Math.floor((Date.now() - Date.parse(new Date().getFullYear() + '-01-01')) / 86400e3);
+  const cats = Array.from({ length: 5 }, (_, i) => WHEEL[(doy * 5 + i) % WHEEL.length]);
+  log(`generating 25 prompts in: ${cats.join(' · ')}`);
+
+  const genText = await llm(
+    `You generate synthetic user prompts to probe a CNC/CAM "prompt-to-app" tool (Loom). Follow the generation rules in the PROBE.md excerpt. Output ONLY a JSON array, no fences, of {"id","persona","prior","prompt","note"} — id kebab-case unique, prior one of covered|decline|unsure (your honest prediction), note = one line on what the prompt probes.`,
+    `PROBE.md (generation rules — step 3):\n${probeDoc}\n\nCurrent failure-class ledger (for regression re-asks and to avoid re-probing the known-by-design):\n${ledger}\n\nTonight's categories (5 prompts each): ${cats.join(', ')}.\nGenerate the 25 prompts now.`,
+    6000);
+  let prompts;
+  try {
+    prompts = parseJson(genText).filter(p => p?.id && p?.prompt && p?.prior);
+  } catch (e) {
+    attention.push(`generation output unparseable: ${String(e).slice(0, 120)}`);
+    finish('generation failed');
+  }
+  if (prompts.length < 15) { attention.push(`generation produced only ${prompts.length} prompts`); finish('generation too small'); }
+  const promptsFile = `${RUNS}${DAY}-prompts.json`;
+  writeFileSync(promptsFile, JSON.stringify(prompts, null, 1));
+  log(`${prompts.length} prompts → ${promptsFile}`);
+  if (dry) finish('dry run — no live probes');
+
+  // ---- 4. probe live -----------------------------------------------------
+  writeFileSync(resultsFile, '');   // fresh file — a re-run the same day must not mix batches
+  log('probing live…');
+  const probe = runNode('probe.mjs', `./runs/${DAY}-prompts.json`, `./runs/${DAY}-results.jsonl`);
+  if (!existsSync(resultsFile)) { attention.push(`probe produced no results:\n${probe.out.slice(-400)}`); finish('probe failed'); }
+}
 results = readFileSync(resultsFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
 const errors = results.filter(r => r.outcome === 'ERROR').length;
 if (errors >= 3) attention.push(`${errors} probe rows ERRORED — infrastructure suspect`);
@@ -129,13 +170,15 @@ const compact = results.map(r => ({
   declined: (r.declined ?? []).map(d => ({ what: d.what, why: (d.why ?? '').slice(0, 200) })),
 }));
 log('triaging…');
-const triText = await llm(
+let triText = '';
+try { triText = await llm(
   `You triage probe results for the Loom improvement loop against its failure-class ledger. Rules: classify every non-clean row (declines, verify failures, skips, crashes) to an existing ledger class id when one fits; propose a NEW class only when nothing fits. Separately flag OVERCLAIMS: rows whose FINAL summary confidently claims something their pipeline/actions cannot deliver (the verifier cannot catch these — judge summary against pipeline). Rows may also carry firstSummary — what the model said BEFORE it saw the weave result; when firstSummary overclaimed and the final summary is honest, list the row under caughtByLoop instead of overclaims. Rows may carry loop.claimIssues (semantic claims the app refused and corrected deterministically in the final text/declines) — those are NOT overclaims; list them under caughtByClaims. By-design declines that declined correctly are "working-as-intended", not findings. Output ONLY JSON, no fences: {"classified":[{"id","class","evidence":"one line"}], "newClasses":[{"id","section":"capability|authoring|overclaim|robustness","description","examples":["prompt-id"]}], "overclaims":[{"id","claim","reality"}], "caughtByLoop":[{"id","claim"}], "caughtByClaims":[{"id","claim"}], "shippedRegressions":[{"id","class"}], "runNote":"one sentence"}`,
   `LEDGER:\n${ledger}\n\nTONIGHT'S RESULTS (${results.length} rows):\n${JSON.stringify(compact, null, 1)}\n\nNEW FUNNEL DECLINES (real users — priority):\n${JSON.stringify(funnelDeclines.map(r => ({ id: r.id, utterance: (r.utterance ?? '').slice(0, 200), declined: r.declined })), null, 1)}`,
-  4000);
+  4000); }
+catch (e) { attention.push(`triage call failed (${String(e?.message ?? e).slice(0, 160)}) — rows still added to the corpus; backfill with: node nightly.mjs --retriage ${DAY}`); }
 tri = { classified: [], newClasses: [], overclaims: [], caughtByLoop: [], shippedRegressions: [], runNote: 'triage unparseable' };
 try { tri = { ...tri, ...parseJson(triText) }; }
-catch { attention.push('triage output unparseable — raw saved to runs/'); writeFileSync(`${RUNS}${DAY}-triage-raw.txt`, triText); }
+catch { if (triText) { attention.push('triage output unparseable — raw saved to runs/'); writeFileSync(`${RUNS}${DAY}-triage-raw.txt`, triText); } else tri.runNote = 'triage call failed'; }
 writeFileSync(`${RUNS}${DAY}-triage.json`, JSON.stringify(tri, null, 1));
 
 if (tri.newClasses?.length) attention.push(`NEW failure class(es): ${tri.newClasses.map(c => `${c.id} — ${c.description}`).join('; ')}`);
@@ -160,12 +203,12 @@ function finish(note) {
     : '';
   const misses = priorMisses.length ? `; ${priorMisses.length} prior-miss (${priorMisses.map(r => r.id).join(', ')})` : '';
   const over = tri?.overclaims?.length ? `; OVERCLAIMS: ${tri.overclaims.map(o => o.id).join(', ')}` : '';
-  const looped = results.filter(r => r.loop);
+  const looped = (results ?? []).filter(r => r.loop);
   const loopLine = looped.length
     ? `; loop: ${looped.filter(r => r.loop.turns > 1).length}/${looped.length} took a second look, ${looped.reduce((n, r) => n + (r.loop.fixes || 0), 0)} corrections, ${looped.filter(r => r.loop.summaryChanged).length} summaries revised${looped.some(r => r.loop.rolledBack) ? `, ${looped.filter(r => r.loop.rolledBack).length} rolled back to a verified turn` : ''}${looped.some(r => r.loop.claimsCaught || r.loop.claimIssues?.length) ? `, claims: ${looped.filter(r => r.loop.claimsCaught).length} fixed on the second look + ${looped.filter(r => r.loop.claimIssues?.length).length} corrected in the final text` : ''}${tri?.caughtByLoop?.length ? `, ${tri.caughtByLoop.length} overclaim${tri.caughtByLoop.length === 1 ? '' : 's'} caught by the loop` : ''}`
     : '';
   appendFileSync(`${HERE}ledger.md`,
-    `- ${DAY} — nightly: ${outcomes}${misses}${evidence}${over}${loopLine}; funnel +${funnelRows.length} (${funnelDeclines.length} declined); $${cost}; ${note}${attention.length ? ' ⚠ SEE ATTENTION FILE' : ''}\n`);
+    `- ${DAY} — nightly${retriage ? ` (triage backfilled ${new Date().toISOString().slice(0, 10)})` : ''}: ${outcomes}${misses}${evidence}${over}${loopLine}; funnel +${funnelRows.length} (${funnelDeclines.length} declined); $${cost}; ${note}${attention.length ? ' ⚠ SEE ATTENTION FILE' : ''}\n`);
   if (attention.length) {
     writeFileSync(`${RUNS}ATTENTION-${DAY}.md`, `# Probe attention — ${DAY}\n\n${attention.map(a => `- ${a}`).join('\n\n')}\n`);
     log(`ATTENTION → runs/ATTENTION-${DAY}.md`);
