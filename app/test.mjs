@@ -1392,6 +1392,81 @@ console.log('--- template expressions ---');
   else fail(`text control not caught: ${JSON.stringify(nonNum)}`);
 }
 
+console.log('--- formulas in ANY number param (cornerRadius, diameter, count…) ---');
+{
+  const fn = [
+    ['{floor(7/2)}', '3'], ['{ceil(r/3)}', '1'], ['{round(2.5)}', '3'],
+    ['{min(r, t)}', '0.5'], ['{max(r, t, 3)}', '3'], ['{abs(t-r)}', '1.5'], ['{sqrt(r*8)}', '4'],
+    ['{(floor((32)/6) + 1) * 2}', '12'],
+  ];
+  let bad = 0;
+  for (const [tpl, want] of fn) {
+    const got = expandTemplate(tpl, { r: 2, t: 0.5 });
+    if (got.value !== want) { bad++; fail(`helper ${tpl} → ${JSON.stringify(got)}, want "${want}"`); }
+  }
+  if (!bad) pass(`${fn.length} rounding/extent helpers evaluate (floor ceil round min max abs sqrt)`);
+  const asName = expandTemplate('{min + 1}', { min: 2 });
+  asName.value === '3' ? pass('a control NAMED like a helper still reads as a plain name')
+    : fail(`control named "min" broke: ${JSON.stringify(asName)}`);
+  const noFn = expandTemplate('{sin(1)}', {});
+  noFn.error?.includes('unknown function') ? pass(`unlisted function refused by name: "${noFn.error}"`)
+    : fail(`unlisted function not refused: ${JSON.stringify(noFn)}`);
+
+  // the recorded failure, verbatim shape: a handle slot whose corner
+  // rounding is HALF ITS WIDTH, ring cutout diameters from derived
+  // values, a hole count computed from the layout
+  const payload = {
+    summary: 'tray with slots', declined: [],
+    actions: [
+      { kind: 'add_control', control: { id: 'slotW', type: 'number', label: 'Slot width', default: 1, min: 0.5, max: 2, step: 0.125 } },
+      { kind: 'add_control', control: { id: 'cols', type: 'number', label: 'Columns', default: 3, min: 1, max: 6, step: 1 } },
+      { kind: 'set_derived', derived: { id: 'big', expr: 'slotW*9' } },
+      { kind: 'set_shape', shape: { id: 'row', open: true, path: 'M -2 2 L 2 2' } },
+      { kind: 'add_operation', operation: { id: 'slot_left', strategy: 'pocket_shape', params: { shape: 'rectangle', width: '{slotW}', height: 4, cornerRadius: '{slotW/2}', depth: 0.25, posX: -3 } } },
+      { kind: 'add_operation', operation: { id: 'slot_right', strategy: 'pocket_shape', params: { shape: 'rectangle', width: '{slotW}', height: 4, cornerRadius: 'slotW/2', depth: 0.25, posX: 3 } } },
+      { kind: 'add_operation', operation: { id: 'holes', strategy: 'bore_hole', params: { along: 'row', count: 'floor(cols*1.5)', diameter: '{slotW/4}', depth: '{slotW/8}', endMargin: '{slotW/2}' } } },
+      { kind: 'add_operation', operation: { id: 'cut', strategy: 'disc_cutout', params: { diameter: '{big}' } } },
+    ],
+  };
+  const out = applyActions(structuredClone(EMPTY_RECIPE), payload);
+  if (out.skipped.length) fail(`formula payload skipped actions: ${out.skipped.join(' | ')}`);
+  const r = run(out.recipe);
+  if (r.ok && r.sbp) pass('cornerRadius "{slotW/2}", bare "slotW/2", count "floor(cols*1.5)", disc diameter "{big}" weave and VERIFY');
+  else fail(`formula number params did not verify: ${(r.errors ?? []).join(' | ')}`);
+  // the formula is LIVE, not a one-time constant: the slider moves the geometry
+  const wide = run(out.recipe, { ...controlDefaults(out.recipe), slotW: 1.5 });
+  const dA = (r.sbp.match(/^M[23],/gm) ?? []).length, dB = (wide.sbp?.match(/^M[23],/gm) ?? []).length;
+  if (wide.ok && wide.sbp && wide.sbp !== r.sbp) pass(`moving the bound slider re-weaves different motion (${dA} → ${dB} cut moves), still verified`);
+  else fail(`slider move did not re-weave/verify: ${(wide.errors ?? []).join(' | ')}`);
+
+  // rails stay honest: min/max clamp AFTER evaluation, and junk fails by name
+  const clamp = structuredClone(out.recipe);
+  clamp.pipeline.find(o => o.id === 'holes').params.count = '{cols*1000}';
+  const rc = run(clamp);
+  if (rc.ok || (rc.errors ?? []).every(e => !/count/.test(e))) pass('an over-range formula result is clamped to the param max like any slider value (count ≤ 100)');
+  else fail(`clamped formula errored on the param itself: ${rc.errors.join(' | ')}`);
+  for (const [val, want, label] of [
+    ['{nope/2}', 'unknown name "nope"', 'unknown name'],
+    ['0.5in', 'param cornerRadius:', 'unit-suffixed string (was silently 0.5)'],
+    [{ expr: 'slotW/2' }, 'must be a number, a control binding', 'stray object'],
+  ]) {
+    const badR = structuredClone(out.recipe);
+    badR.pipeline[0].params.cornerRadius = val;
+    const rb = run(badR);
+    const hit = (rb.errors ?? []).find(e => e.includes('op "slot_left"') && e.includes(want));
+    if (!rb.ok && hit) pass(`${label} refused with a reason: "${hit}"`);
+    else fail(`${label} not refused clearly: ok=${rb.ok} ${(rb.errors ?? []).join(' | ')}`);
+  }
+  // string params are untouched: braces in engraved text stay literal
+  const lit = applyActions(structuredClone(EMPTY_RECIPE), { summary: '', declined: [], actions: [
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: '{A}', letterHeight: '{0.5*2}' } } },
+    { kind: 'add_operation', operation: { id: 'c', strategy: 'tag_cutout', params: { cornerRadius: '{1/4}' } } },
+  ] });
+  const rl = run(lit.recipe);
+  if (rl.ok) pass('text "{A}" stays literal while letterHeight "{0.5*2}" and tag cornerRadius "{1/4}" evaluate');
+  else fail(`literal-brace text / formula letterHeight failed: ${(rl.errors ?? []).join(' | ')}`);
+}
+
 console.log('--- the arch app: adjustable radius and band thickness ---');
 {
   const archPath = 'M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z';

@@ -589,9 +589,15 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
     if (v === undefined) { errors.push(`op "${opId}": required param ${key} missing`); continue; }
     // template params (spec.template) may hold {expressions} over the
     // controls + derived namespace — how a shape's internal geometry
-    // binds to sliders. Opt-in per param spec: ordinary string params
-    // (engraved text!) keep literal braces.
-    if (spec.template && typeof v === 'string' && v.includes('{')) {
+    // binds to sliders. Opt-in per param spec for STRINGS: ordinary
+    // string params (engraved text!) keep literal braces. NUMBER params
+    // all take expressions — a number has no literal-brace reading, and
+    // any of them could already be bound to a control, so arithmetic
+    // over controls grants nothing new (min/max clamps still apply
+    // after evaluation). The model writes cornerRadius: "{slotW/2}" as
+    // readily as width: "{slotW}"; a per-param opt-in only made the
+    // first a weave error.
+    if ((spec.template || spec.type === 'number') && typeof v === 'string' && v.includes('{')) {
       const ex = expandTemplate(v, vars);
       if (ex.error) { errors.push(`op "${opId}": param ${key}: ${ex.error}`); continue; }
       v = ex.value;
@@ -607,14 +613,20 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
       else { errors.push(`op "${opId}": param ${key} must be text, not ${Array.isArray(v) ? 'a list' : 'an object'}`); continue; }
     }
     if (spec.type === 'number') {
-      // template number params also take BARE expressions — models write
+      // number params also take BARE expressions — models write
       // posX: "length/2 - inset" as readily as "{length/2 - inset}", and
       // shape specs already accept the braceless form. Number() (not
-      // parseFloat) so "2 + length" doesn't silently truncate to 2.
-      if (spec.template && typeof v === 'string' && v.trim() && Number.isNaN(Number(v))) {
+      // parseFloat) so "2 + length" doesn't silently truncate to 2 (and
+      // "1.5/25.4" to 1.5). A string that is neither a number nor valid
+      // arithmetic fails HERE with the parser's reason (unknown name,
+      // stray unit…) — never a silent leading-digits guess.
+      if (typeof v === 'string' && v.trim() && Number.isNaN(Number(v))) {
         const ex = expandTemplate(`{${v}}`, vars);
         if (ex.error) { errors.push(`op "${opId}": param ${key}: ${ex.error}`); continue; }
         v = ex.value;
+      }
+      if (v && typeof v === 'object') {
+        errors.push(`op "${opId}": param ${key} must be a number, a control binding {ctrl:"…"}, or an {arithmetic} string — not ${Array.isArray(v) ? 'a list' : 'an object'}`); continue;
       }
       v = typeof v === 'number' ? v : parseFloat(v);
       if (isNaN(v)) { errors.push(`op "${opId}": param ${key} is not a number`); continue; }

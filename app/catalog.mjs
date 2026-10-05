@@ -729,7 +729,7 @@ export const CATALOG = {
       diameter: { type: 'number', default: 2, template: true, doc: 'circle only: pocket diameter, inches; {arithmetic} of control ids allowed', bindable: true },
       width: { type: 'number', default: 2, template: true, doc: 'rectangle/custom: pocket width, inches; {arithmetic} allowed', bindable: true },
       height: { type: 'number', default: 0, template: true, doc: 'rectangle/custom: pocket height, inches, {arithmetic} allowed; 0 = default (rectangle 1.5"; custom scales uniformly from width, keeping the shape\'s aspect)', bindable: true },
-      cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches' },
+      cornerRadius: { type: 'number', default: 0.25, doc: 'rectangle only: corner radius, inches, {arithmetic} allowed; clamped to fit, so half the short side makes a round-ended SLOT' },
       depth: { type: 'number', default: 0.125, template: true, doc: 'pocket floor depth, inches; {arithmetic} allowed', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'bulk endmill diameter, inches; 0 = pick automatically from the standard drawer (1/4", 1/8", 1/16", 1/32") at the coverage knee, adding rest passes as they earn their toolchange (restDiameter is then ignored)' },
       restDiameter: { type: 'number', default: 0, doc: '0 = no rest pass; otherwise a smaller bit that cleans rectangle corners' },

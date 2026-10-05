@@ -176,8 +176,19 @@ export function fitRegionsSnug(regions, margin, points) {
 //   M {-r} 0 A {r} {r} 0 0 1 {r} 0 L {r-t} 0 A {r-t} {r-t} 0 0 0 {t-r} 0 Z
 // re-lowered through parse→weld→verify on every slider move. The
 // evaluator is a closed arithmetic grammar (numbers, control ids,
-// + - * / and parens) — no eval, no ambient names, so a template stays
-// data, exactly like the rest of the recipe.
+// + - * / and parens, plus the fixed helpers in FUNCS) — no eval, no
+// ambient names, so a template stays data, exactly like the rest of
+// the recipe.
+
+const FUNCS = {
+  floor: { f: Math.floor, min: 1, max: 1 },
+  ceil: { f: Math.ceil, min: 1, max: 1 },
+  round: { f: Math.round, min: 1, max: 1 },
+  abs: { f: Math.abs, min: 1, max: 1 },
+  sqrt: { f: Math.sqrt, min: 1, max: 1 },
+  min: { f: Math.min, min: 2, max: 8 },
+  max: { f: Math.max, min: 2, max: 8 },
+};
 
 function evalExpr(src, vars) {
   let i = 0;
@@ -199,6 +210,21 @@ function evalExpr(src, vars) {
     const id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
     if (id) {
       i += id[0].length;
+      // a name directly followed by "(" is one of the closed set of
+      // rounding helpers — what makes a formula usable in a WHOLE-NUMBER
+      // param (count: "floor((w - 4)/spacing) + 1"). Never a lookup:
+      // a control may still be called "min" and used as a plain name.
+      if (src[i] === '(') {
+        const fn = FUNCS[id[0]];
+        if (!fn) throw new Error(`unknown function "${id[0]}(" — only ${Object.keys(FUNCS).join(', ')} exist`);
+        i++;
+        const args = [sum()];
+        for (ws(); src[i] === ','; ws()) { i++; args.push(sum()); }
+        if (src[i] !== ')') throw new Error(`missing ")" in "${src}"`);
+        i++;
+        if (args.length < fn.min || args.length > fn.max) throw new Error(`${id[0]}() takes ${fn.min === fn.max ? fn.min : `${fn.min} or more`} value${fn.max === 1 ? '' : 's'} in "${src}"`);
+        return fn.f(...args);
+      }
       const v = vars[id[0]];
       const n = typeof v === 'number' ? v : parseFloat(v);
       if (v === undefined) throw new Error(`unknown name "${id[0]}" (controls: ${Object.keys(vars).join(', ') || 'none'})`);
