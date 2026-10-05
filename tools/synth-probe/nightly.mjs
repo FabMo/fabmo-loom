@@ -188,6 +188,12 @@ if (tri.shippedRegressions?.length) attention.push(`SHIPPED-class regression: ${
 log(runNode('corpus-add.mjs', `./runs/${DAY}-results.jsonl`, DAY).out.trim().replace('\n', ' | '));
 if (funnelRows.length) log(runNode('corpus-add.mjs', `./runs/funnel-${DAY}.jsonl`, `funnel-${DAY}`).out.trim().replace('\n', ' | '));
 
+// ---- 6b. refresh the fix-prompt queue (deterministic, no model call) ------
+// Still measurement: autoprompt.mjs only writes briefs under runs/fix-prompts/
+// for an attended session to execute. It never touches app code.
+try { log(runNode('autoprompt.mjs').out.trim().split('\n').pop()); }
+catch (e) { log(`autoprompt skipped: ${String(e?.message ?? e).slice(0, 120)}`); }
+
 finish(tri.runNote);
 
 // ---- 7+8. run log + attention ---------------------------------------------

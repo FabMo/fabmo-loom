@@ -62,6 +62,12 @@ probing.
    `node corpus-add.mjs ./runs/funnel-YYYY-MM-DD.jsonl funnel-YYYY-MM-DD`
    (second one only when a funnel file was written)
 
+6b. **Refresh the fix-prompt queue (free):**
+   `node autoprompt.mjs`
+   Rewrites `runs/fix-prompts/INDEX.md` (every open class, ranked) and a
+   ready-to-run brief for the top 8. No model call, no app-code edits —
+   see "Autoprompting" below.
+
 7. **Append the run-log line** to ledger.md: date, counts by outcome,
    prior-miss count, new classes, evidence increments, spend.
 
@@ -142,3 +148,26 @@ rows with claimIssues under `caughtByClaims`, not `overclaims`. Codes:
 faces, faces-text, dataSource, bathymetry, phantom-part, phantom-plug,
 pieces, mating. A NEW confident-but-false promise class = a new check in
 `checkClaims`, with a corpus sweep for precision before it ships.
+
+## Autoprompting (2026-10-05)
+
+`autoprompt.mjs` turns the ledger into work orders. For each OPEN class it
+joins every night's triage to the recorded rows and writes
+`runs/fix-prompts/<class>.md`: the asks verbatim, what the user was told,
+the failing op, the ledger's design note, the kind-specific procedure
+(capability → AGENTS.md's decline → feature list; authoring → make the
+runtime accept it before adding a prompt rule; robustness → replay and fix
+at the root), and the acceptance test (`npm test` + `live-retest.mjs` on
+the same prompt ids). Ranking: 5 × real-user asks + 2 × distinct synthetic
+prompts in the last 14 days + ¼ × older ones. Probe rows that died on a
+dropped connection are excluded and listed as infrastructure.
+
+The brief is the hand-off, not the conversion: a brief is executed in an
+attended session (paste it, or `claude -p "$(cat runs/fix-prompts/<class>.md)"`
+from the repo root), it tells the agent not to commit or push, and its
+first step is a written design call that may end in "by-design decline —
+change nothing". The nightly only regenerates the queue.
+
+`node autoprompt.mjs <class>` rewrites and prints one brief;
+`--top N` changes how many are written. Funnel evidence appears as counts
+and query ids only.
