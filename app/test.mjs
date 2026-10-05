@@ -4077,5 +4077,233 @@ console.log('--- pocket_text: skinny-stroke declarations verify ---');
   }
 }
 
+// ---------------- cutout content-fit: refusals that name the fix (v0.85) ----------------
+//
+// The nightly probe's largest class ("envelope-overflow-verify", 48 prompts)
+// was mostly ONE sentence — "the content so far pokes outside that shape" —
+// standing in for five different mistakes, on a loop that gets one
+// corrective turn. These pin the two accounting bugs that were real, and
+// the facts each refusal now carries.
+
+console.log('--- cutout content-fit: exact fits, scoped edge grace, refusals that name the fix ---');
+{
+  const circle = (r) => `M ${-r} 0 A ${r} ${r} 0 1 1 ${r} 0 A ${r} ${r} 0 1 1 ${-r} 0 Z`;
+  const medallion = (rimR, edge, discD = 4) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'rim', path: circle(rimR) }, { id: 'core', path: circle(1) }, { id: 'band', difference: ['rim', 'core'] }],
+    pipeline: [
+      { id: 'tier', strategy: 'pocket_shape', params: { shape: 'band', depth: 0.1, ...(edge ? { edgeTreatment: true } : {}) } },
+      { id: 'cutout', strategy: 'disc_cutout', params: { diameter: discD, tabs: true } },
+    ],
+  });
+  // a pocket authored to END at the rim used to be refused as
+  // "a 4" disc is too small … (needs ≥ 4.00" diameter)" (map-topo-hiking-medallion)
+  const exact = run(medallion(2, false));
+  if (exact.ok && exact.sbp) pass('disc_cutout: content ending exactly AT the rim fits (was "needs ≥ 4.00"" on a 4" disc)');
+  else fail(`exact-fit disc: ${exact.errors?.join(' | ')}`);
+  // an edgeTreatment band overrunning the rim by 0.05" is the documented
+  // stepped-rim recipe — shape_cutout already allowed it, disc_cutout did not
+  const stepped = run(medallion(2.05, true));
+  if (stepped.ok && stepped.sbp) pass('disc_cutout: an edgeTreatment band 0.05" past the rim is accepted (same grace as shape_cutout)');
+  else fail(`stepped-rim disc: ${stepped.errors?.join(' | ')}`);
+  // the grace is SCOPED: the same overrun without edgeTreatment is refused, by name
+  const plain = run(medallion(2.05, false));
+  if (!plain.ok && /too small for the content so far \(needs ≥ 4\.10" diameter\): op "tier" reaches 2\.05" from the disc center, 0\.05" past its 2\.00" radius/.test(plain.errors[0]))
+    pass(`ordinary content past the rim is still refused, naming the op: "${plain.errors[0].slice(0, 150)}…"`);
+  else fail(`unscoped overrun: ok=${plain.ok} ${plain.errors?.[0]}`);
+  // …and it is bounded: an "edge treatment" 0.2" past the rim is not one
+  const far = run(medallion(2.2, true));
+  if (!far.ok && /too small for the content so far/.test(far.errors[0]) && /op "tier"/.test(far.errors[0])) pass('edge grace is bounded: 0.2" past the rim is refused');
+  else fail(`bounded grace: ok=${far.ok} ${far.errors?.[0]}`);
+
+  // shape_cutout, content straddling the edge: which op, where, how far
+  const straddle = run({
+    ...structuredClone(EMPTY_RECIPE),
+    shapes: [{ id: 'plate', path: 'M -1 -1 L 1 -1 L 1 1 L -1 1 Z' }],
+    pipeline: [
+      { id: 'well', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, posX: 1.2, posY: 0.01, depth: 0.1 } },
+      { id: 'cutout', strategy: 'shape_cutout', params: { shape: 'plate' } },
+    ],
+  });
+  const sm = straddle.errors?.[0] ?? '';
+  if (!straddle.ok && /pokes outside that shape: op "well" reaches \(1\.70, 0\.01\), 0\.70" past the outline\. The outline spans X -1\.00\.\.1\.00, Y -1\.00\.\.1\.00; the content spans X 0\.70\.\.1\.70/.test(sm) && /fit-derived shape/.test(sm) && !/one job frees one piece/.test(sm))
+    pass(`straddling content: op, point, distance and both extents named: "${sm.slice(0, 140)}…"`);
+  else fail(`straddle refusal: ${sm}`);
+
+  // a cutout used as a through-SLOT inside the part (rain-gauge-mount,
+  // herringbone-tray handles): the refusal names the right verb, and the
+  // right verb verifies
+  const slotted = (slotStrategy, slotParams) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'slot', path: 'M -1.5 -0.15 L -0.9 -0.15 L -0.9 0.15 L -1.5 0.15 Z' }],
+    pipeline: [
+      { id: 'recess', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1.2, depth: 0.1 } },
+      { id: 'slot_l', strategy: slotStrategy, params: { shape: 'slot', ...slotParams } },
+      { id: 'plate', strategy: 'tag_cutout', params: { width: 4, height: 2.5, tabs: true } },
+    ],
+  });
+  const asCut = run(slotted('shape_cutout', { toolDiameter: 0.125 }));
+  const am = asCut.errors?.[0] ?? '';
+  if (!asCut.ok && /^op "slot_l": the content so far pokes outside that shape: op "recess"/.test(am) && /A cutout frees the WHOLE part/.test(am) && /use pocket_shape with this shape and depth = the stock thickness/.test(am))
+    pass('a cutout used as an interior slot is refused with the verb that does it (pocket_shape at full depth)');
+  else fail(`slot-as-cutout refusal: ${am}`);
+  const asPocket = run(slotted('pocket_shape', { depth: 0.5, toolDiameter: 0.125 }));
+  if (asPocket.ok && asPocket.sbp) pass('…and that verb verifies: through-slot pocket + recess + pinned tag → SBP');
+  else fail(`slot-as-pocket: ${asPocket.errors?.join(' | ')}`);
+  // the model reads the whole reason (errors are no longer clipped at 300)
+  const obsText = observationText(buildObservation({ applied: [], skipped: [], recipe: slotted('shape_cutout', {}) }, asCut));
+  if (obsText.includes('decline cutting the set in one run')) pass('the observation carries the full refusal to the second look');
+  else fail('observation clipped the refusal');
+
+  // a SECOND loose piece beside the first (tangram, pauldron plates): still
+  // refused — one job frees one piece — but now it says so
+  const twoPieces = run({
+    ...structuredClone(EMPTY_RECIPE),
+    shapes: [{ id: 'a', path: 'M -3 -1 L -1 -1 L -1 1 L -3 1 Z' }, { id: 'b', path: 'M 1 -1 L 3 -1 L 3 1 L 1 1 Z' }],
+    pipeline: [
+      { id: 'cut_a', strategy: 'shape_cutout', params: { shape: 'a' } },
+      { id: 'cut_b', strategy: 'shape_cutout', params: { shape: 'b' } },
+    ],
+  });
+  const tm = twoPieces.errors?.[0] ?? '';
+  if (!twoPieces.ok && /^op "cut_b": the content so far pokes outside that shape: the earlier cutout "cut_a" lies outside it/.test(tm) && /one job frees one piece/.test(tm))
+    pass('side-by-side second cutout: still refused (by design), naming the earlier cutout and the one-piece-per-job rule');
+  else fail(`two-piece refusal: ${tm}`);
+  // …a multi-island shape handed to ONE cutout no longer fails mysteriously
+  const islands = run({
+    ...structuredClone(EMPTY_RECIPE),
+    shapes: [{ id: 'both', path: 'M -3 -1 L -1 -1 L -1 1 L -3 1 Z M 1 -0.5 L 2 -0.5 L 2 0.5 L 1 0.5 Z' }],
+    pipeline: [
+      { id: 'mark', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 0.5, posX: 1.5, posY: 0.01, depth: 0.1 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'both' } },
+    ],
+  });
+  if (!islands.ok && /Shape "both" is 2 separate pieces and a cutout follows only ONE outline/.test(islands.errors?.[0] ?? '')) pass('multi-piece shape in one cutout: the refusal says only the largest outline is cut');
+  else fail(`islands refusal: ${islands.errors?.[0]}`);
+  // nested cutouts — each enclosing everything before it — keep working
+  const nested = run({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [
+      { id: 'hole', strategy: 'disc_cutout', params: { diameter: 1 } },
+      { id: 'ring', strategy: 'disc_cutout', params: { diameter: 3, tabs: true } },
+    ],
+  });
+  if (nested.ok) pass('nested cutouts (a ring: inner disc, then the outer one around it) still verify');
+  else fail(`nested cutouts: ${nested.errors?.join(' | ')}`);
+
+  // pinned tag: every op bigger than the tag is listed with the scale that
+  // fits — and applying that number fixes it (reserved-parking-sign)
+  const sign = (h1) => ({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [
+      { id: 'top', strategy: 'vcarve_text', params: { text: 'RESERVED', letterHeight: h1 } },
+      { id: 'tag', strategy: 'tag_cutout', params: { width: 8, height: 6, posY: 0.001 } },
+    ],
+  });
+  const wide = run(sign(2));
+  const wm = wide.errors?.[0] ?? '';
+  const pct = +(wm.match(/"top" [\d.]+" wide \(fits at (\d+)% or less\)/)?.[1] ?? NaN);
+  if (!wide.ok && wm.includes('no longer contains the content') && pct > 0 && pct < 100) {
+    const fixed = run(sign(2 * pct / 100));
+    if (fixed.ok) pass(`pinned tag: "${wm.match(/ops bigger[^.]*/)[0]}" — and ${pct}% of the letter height verifies`);
+    else fail(`pinned tag: the named ${pct}% did not fix it: ${fixed.errors?.[0]}`);
+  } else fail(`pinned-tag refusal: ${wm}`);
+}
+
+console.log('--- applyActions: teardown order, and names still in use ---');
+{
+  // foam-pauldron-template (2026-09-30): the second look listed its removals
+  // BEFORE the edit that freed them; remove_shape skipped, a derived value
+  // the surviving shape used was removed anyway, and from then on every
+  // set_shape dry-lower failed on "unknown name" — the fix could not land.
+  const base = applyActions(structuredClone(EMPTY_RECIPE), { summary: '', declined: [], actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'number', label: 'W', default: 4, min: 1, max: 8 } },
+    { kind: 'set_derived', derived: { id: 'hw1', expr: 'w/2' } },
+    { kind: 'set_shape', shape: { id: 'lame1', path: 'M {-hw1} -1 L {hw1} -1 L {hw1} 1 L {-hw1} 1 Z' } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'shape_cutout', params: { shape: 'lame1' } } },
+  ] });
+  const teardown = applyActions(base.recipe, { summary: '', declined: [], actions: [
+    { kind: 'remove_shape', id: 'lame1' },
+    { kind: 'remove_derived', id: 'hw1' },
+    { kind: 'set_derived', derived: { id: 'hw', expr: 'w/2 + 0.5' } },
+    { kind: 'set_shape', shape: { id: 'plate', path: 'M {-hw} -1 L {hw} -1 L {hw} 1 L {-hw} 1 Z' } },
+    { kind: 'set_operation', operation: { id: 'cut', params: { shape: 'plate' } } },
+  ] });
+  const tr = run(teardown.recipe);
+  if (!base.skipped.length && !teardown.skipped.length && !teardown.recipe.shapes.some(x => x.id === 'lame1') && !teardown.recipe.derived.some(x => x.id === 'hw1') && tr.ok)
+    pass('removals listed before the edit that frees them are retried: 0 skipped, old shape + derived gone, job verifies');
+  else fail(`teardown order: skipped ${JSON.stringify(teardown.skipped)} ok=${tr.ok} ${tr.errors?.[0] ?? ''}`);
+  // a name a shape still uses is NOT removed (it used to be, leaving the shape unbuildable)
+  const dangling = applyActions(base.recipe, { summary: '', declined: [], actions: [{ kind: 'remove_derived', id: 'hw1' }] });
+  if (dangling.skipped.length === 1 && /remove_derived: "hw1" is still used by shape "lame1"/.test(dangling.skipped[0]) && run(dangling.recipe).ok)
+    pass(`a derived value a shape still uses stays: "${dangling.skipped[0]}"`);
+  else fail(`dangling derived: ${JSON.stringify(dangling.skipped)}`);
+  const ctl = applyActions(base.recipe, { summary: '', declined: [], actions: [{ kind: 'remove_control', id: 'w' }] });
+  if (ctl.skipped.length === 1 && /remove_control: "w" is still used by derived value "hw1"/.test(ctl.skipped[0])) pass('a control a derived value still uses stays too');
+  else fail(`dangling control: ${JSON.stringify(ctl.skipped)}`);
+  // path COMMAND letters are not names: a control called "L" is removable
+  const letter = applyActions(base.recipe, { summary: '', declined: [], actions: [
+    { kind: 'add_control', control: { id: 'L', type: 'number', label: 'L', default: 1, min: 0, max: 2 } },
+    { kind: 'remove_control', id: 'L' },
+  ] });
+  if (!letter.skipped.length && !letter.recipe.controls.some(c => c.id === 'L')) pass('no false "still used": a control named like a path command (L) is removable');
+  else fail(`path-letter false positive: ${JSON.stringify(letter.skipped)}`);
+}
+
+console.log('--- applyActions: a strategy name written as the action kind ---');
+{
+  const out = applyActions(structuredClone(EMPTY_RECIPE), { summary: '', declined: [], actions: [
+    { kind: 'bore_hole', id: 'cups', operation: { id: 'cups', strategy: 'bore_hole', params: { diameter: 0.3, depth: 0.2, toolDiameter: 0.125, at: '-1 0; 1 0' } } },
+    { kind: 'pocket_shape', id: 'well', params: { shape: 'circle', diameter: 0.6, depth: 0.1, posY: 1 } },
+    { kind: 'add_operation', operation: { id: 'cutout', strategy: 'tag_cutout', params: { buffer: 0.5 } } },
+    { kind: 'no_such_verb', id: 'x' },
+  ] });
+  const r = run(out.recipe);
+  if (out.recipe.pipeline.map(o => `${o.id}:${o.strategy}`).join(',') === 'cups:bore_hole,well:pocket_shape,cutout:tag_cutout'
+      && out.skipped.length === 1 && /unknown action kind "no_such_verb"/.test(out.skipped[0]) && r.ok)
+    pass('{kind: "<strategy>"} (nested or flattened) is added as that operation and verifies; a truly unknown kind still skips');
+  else fail(`strategy-as-kind: pipeline ${JSON.stringify(out.recipe.pipeline.map(o => o.id))} skipped ${JSON.stringify(out.skipped)} ok=${r.ok} ${r.errors?.[0] ?? ''}`);
+}
+
+console.log('--- runIntentLoop: a malformed FINAL payload is data, not a crash ---');
+{
+  // rain-gauge-bracket, 2026-09-29: `(last.payload.actions ?? []).filter is
+  // not a function` — the last call returned actions as a non-array. v0.77
+  // coerced that inside applyActions; this later raw read was missed.
+  const tu = (input) => ({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input }] });
+  const good = { summary: 'Sign built.', actions: [
+    { kind: 'add_control', control: { id: 'w', type: 'text', label: 'W', default: 'Hi' } },
+    { kind: 'add_operation', operation: { id: 'e', strategy: 'vcarve_text', params: { text: { ctrl: 'w' }, letterHeight: 1 } } },
+    { kind: 'add_operation', operation: { id: 'tag', strategy: 'tag_cutout', params: { buffer: 0.4 } } },
+  ], declined: [] };
+  const tweak = { summary: 'Roomier tag.', actions: [{ kind: 'set_operation', operation: { id: 'tag', params: { buffer: 0.5 } } }], declined: [] };
+  const finals = [
+    ['a string', { summary: 'Built and verified.', actions: 'none', declined: [] }, null],
+    ['an empty object', { summary: 'Built and verified.', actions: {}, declined: [] }, null],
+    ['a number', { summary: 'Built and verified.', actions: 0, declined: [] }, null],
+    ['an object keyed 0..n (applied)', { summary: 'Renamed it.', actions: { 0: { kind: 'set_name', name: 'Late' } }, declined: [] }, 'Late'],
+    ['a string, with declined as a sentence and summary as a list', { summary: ['flip it over'], actions: 'none', declined: 'the back face' }, null],
+  ];
+  for (const [label, payload, name] of finals) {
+    let calls = 0;
+    try {
+      const out = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'a sign', maxTurns: 3,
+        call: async () => { calls++; return tu(calls === 1 ? good : calls === 2 ? tweak : payload); }, weave: async (r) => run(r) });
+      const okState = run(out.recipe).ok && calls === 3 && typeof out.summary === 'string' && out.summary.length > 0
+        && Array.isArray(out.declined) && out.declined.every(d => d && typeof d === 'object')
+        && (name ? out.recipe.name === name : true);
+      if (okState) pass(`final call with actions as ${label}: no crash, state kept${name ? ', late action applied' : ''}${out.declined.length ? `, declined kept as [{what:"${out.declined[0].what}"}]` : ''}`);
+      else fail(`final ${label}: calls ${calls} ok ${run(out.recipe).ok} summary ${JSON.stringify(out.summary)} declined ${JSON.stringify(out.declined)}`);
+    } catch (e) { fail(`final call with actions as ${label} CRASHED: ${String(e?.stack ?? e).split('\n').slice(0, 2).join(' ')}`); }
+  }
+  // the same hole on the FIRST call: malformed declined must not crash the claims check
+  try {
+    const out = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'x', maxTurns: 3,
+      call: async () => tu({ summary: 'Cannot do that.', actions: 'none', declined: { what: 'a 3D roller', why: 'flat stock' } }), weave: async (r) => run(r) });
+    if (out.declined.length === 1 && out.declined[0].what === 'a 3D roller') pass('declined as ONE object (not a list) is kept as a decline');
+    else fail(`single-object declined: ${JSON.stringify(out.declined)}`);
+  } catch (e) { fail(`single-object declined CRASHED: ${String(e).slice(0, 200)}`); }
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -57,7 +57,8 @@ export async function loadEnv() {
 }
 
 export function usesGuestStrategy(row, env) {
-  return (row.payload.actions ?? []).some(a =>
+  const acts = row.payload.actions;   // recorded raw — may be the malformed (non-array) shape
+  return (Array.isArray(acts) ? acts : acts && typeof acts === 'object' ? Object.values(acts) : []).some(a =>
     a?.operation?.strategy && !env.baseStrategies.has(a.operation.strategy));
 }
 

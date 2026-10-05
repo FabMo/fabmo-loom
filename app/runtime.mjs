@@ -770,8 +770,16 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
           : 'the operation that publishes frames (the furniture build) must come BEFORE this one'}`);
         break;
       }
-      frame.ctx ??= { ...ctx, contentBBox: null, contentRings: [] };
+      frame.ctx ??= { ...ctx, contentBBox: null, contentRings: [], contentOwners: [], priorCutouts: [], opBoxes: [], edgeOps: new Set() };
     }
+    // who is running: content outlines are attributed to their op, so a
+    // refused cutout can name the op that pokes out of it
+    (frame ? frame.ctx : ctx).opId = op.id;
+    // cutouts still to come after this op: a cutout that is not the last
+    // one and cannot enclose the content is a slot or a second piece, and
+    // its refusal says that instead of "enlarge the outline"
+    if (!frame) ctx.cutoutsAhead = recipe.pipeline.slice(recipe.pipeline.indexOf(op) + 1)
+      .filter(o => !o.frame && CATALOG[o.strategy]?.wrapsContent).length;
     const r = entry.run(p, frame ? frame.ctx : ctx);
     // a strategy may SKIP itself (blank text on an optional caption):
     // the op contributes nothing, the rest of the pipeline still builds
@@ -804,6 +812,12 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
       built.push({ op, r: sub });
       for (const w of sub.warnings ?? []) strategyWarnings.push(`op "${op.id}": ${w}`);
     }
+    // cutouts already made (a later cutout that cannot enclose them is the
+    // several-pieces-in-one-job case, and its refusal says so by name)
+    if (entry.wrapsContent && !frame) (ctx.priorCutouts ??= []).push(op.id);
+    // per-op extents: a pinned tag that no longer contains the content
+    // names the op that sticks out
+    if (r.bbox) (ctx.opBoxes ??= []).push({ id: op.id, bbox: r.bbox });
     ctx.contentBBox = ctx.contentBBox
       ? {
           minX: Math.min(ctx.contentBBox.minX, r.bbox.minX), minY: Math.min(ctx.contentBBox.minY, r.bbox.minY),

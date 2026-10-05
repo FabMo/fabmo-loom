@@ -21,7 +21,7 @@ const PROMPTS = promptsPath.endsWith('.json')
 
 const LOOM = '/var/opt/apps/contributors/brian.o/fabmo-loom';
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
-const { runIntentLoop } = await import(`${LOOM}/app/intent.mjs`);
+const { runIntentLoop, actionList } = await import(`${LOOM}/app/intent.mjs`);
 // LOOP=always|trouble|off — the closed loop is the default; 'off' is the
 // pre-loop one-shot behavior, kept so the two can be measured side by side
 const LOOP_MODE = ['always', 'trouble', 'off'].includes(process.env.LOOP) ? process.env.LOOP : 'always';
@@ -123,8 +123,8 @@ async function probe(p) {
     rec.summary = out.summary;
     rec.firstSummary = out.firstSummary;
     rec.declined = out.declined;
-    rec.actionKinds = (first.payload.actions ?? []).map(a => a.kind + (a.operation?.strategy ? `:${a.operation.strategy}` : ''));
-    rec.rawActions = first.payload.actions ?? [];
+    rec.actionKinds = actionList(first.payload).map(a => a.kind + (a.operation?.strategy ? `:${a.operation.strategy}` : ''));
+    rec.rawActions = first.payload.actions ?? [];   // RAW on purpose: a malformed shape is corpus evidence
     rec.revisedActions = out.turns.slice(1).flatMap(t => t.payload.actions ?? []);
     rec.loop = {
       mode: LOOP_MODE, turns: out.turns.length, fixes: out.fixes, rolledBack: out.rolledBack ?? null,
@@ -132,7 +132,7 @@ async function probe(p) {
       claimsRefusedDuring: out.turns.flatMap(t => (t.observation?.claimIssues ?? []).map(i => i.code)),
       summaryChanged: out.revised && out.summary.trim() !== out.firstSummary.trim(),
       perTurn: out.turns.map(t => ({
-        actions: (t.payload.actions ?? []).length, applied: t.applied.length, skipped: t.skipped.length,
+        actions: actionList(t.payload).length, applied: t.applied.length, skipped: t.skipped.length,
         ok: t.observation ? t.observation.ok : null, pipeline: t.observation ? t.observation.pipeline.length : null,
       })),
     };

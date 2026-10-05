@@ -9,7 +9,7 @@ import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { openDraw, initDraw } from './draw.mjs';
 import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
-import { runIntentLoop, promptRecipeView, MODELS, DEFAULT_MODEL, isKnownModel } from './intent.mjs';
+import { runIntentLoop, actionList, promptRecipeView, MODELS, DEFAULT_MODEL, isKnownModel } from './intent.mjs';
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
@@ -1255,11 +1255,11 @@ async function generate() {
         app: 'loom',
         utterance,
         intent: {
-          summary: out.summary, actions: firstTurn.payload.actions ?? [], declined: out.declined, suggest: out.suggest,
+          summary: out.summary, actions: actionList(firstTurn.payload), declined: out.declined, suggest: out.suggest,
           loop: {
             turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack,
             claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
-            revisedActions: out.turns.slice(1).flatMap(t => t.payload.actions ?? []),
+            revisedActions: out.turns.slice(1).flatMap(t => actionList(t.payload)),
             observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped.length, errors: t.observation.errors.slice(0, 3) } : null),
           },
         },

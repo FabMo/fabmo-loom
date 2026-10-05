@@ -325,6 +325,26 @@ export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, sh
 // invalid actions are skipped with a reason (never a throw — the model's
 // output is data, not trusted code). Returns a NEW recipe.
 
+// The model's payload is data, not a trusted shape: `actions` has arrived
+// as an object keyed 0..n and as a bare string, `declined` as one object or
+// a sentence. EVERY read of either goes through these two — a raw
+// `payload.actions ?? []` is the hole that crashed a turn twice (applyActions
+// 2026-09-26, then runIntentLoop's last-call check 2026-09-29).
+export function actionList(payload) {
+  const a = payload?.actions;
+  const list = Array.isArray(a) ? a : a && typeof a === 'object' ? Object.values(a) : [];
+  return list.filter(x => x && typeof x === 'object');
+}
+export function declinedList(payload) {
+  const d = payload?.declined;
+  const list = Array.isArray(d) ? d
+    : d && typeof d === 'object' ? (('what' in d || 'why' in d) ? [d] : Object.values(d))
+    : typeof d === 'string' && d.trim() ? [d] : [];
+  return list
+    .map(x => (typeof x === 'string' && x.trim() ? { what: x.trim(), why: '' } : x))
+    .filter(x => x && typeof x === 'object' && !Array.isArray(x));
+}
+
 export function applyActions(recipe, payload) {
   const next = structuredClone(recipe);
   const applied = [], skipped = [];
@@ -361,9 +381,56 @@ export function applyActions(recipe, payload) {
       const { kind, id, strategy, params, after, frame } = a;
       return { kind, id, operation: { id, strategy, params, after, frame } };
     }
+    // a STRATEGY name written as the action kind — {kind: "bore_hole", id,
+    // operation: {…}} (menorah-candle-holder, twice in the corpus): the
+    // cups vanished as 'unknown action kind' and the cutout then had
+    // nothing to cut around. It is an operation; add it (or edit it, when
+    // that id is already in the pipeline).
+    if (typeof a.kind === 'string' && CATALOG[a.kind]) {
+      const op = a.operation && typeof a.operation === 'object'
+        ? { ...a.operation, id: a.operation.id ?? a.id, strategy: a.operation.strategy ?? a.kind }
+        : { id: a.id, strategy: a.kind, params: a.params, after: a.after, frame: a.frame };
+      const exists = next.pipeline.some(o => o.id === op.id);
+      return { kind: exists ? 'set_operation' : 'add_operation', id: op.id, operation: op };
+    }
     return a;
   };
 
+
+  // Is a control/derived NAME still referenced by a shape or an operation?
+  // Removing it then would leave the shape unbuildable ("unknown name")
+  // and — because every later set_shape dry-lowers the whole shapes list —
+  // block unrelated edits too (foam-pauldron-template, 2026-09-30: the
+  // teardown removed a derived value a not-yet-removed shape still used).
+  // Names are read where expressions live: inside {…} anywhere, and whole
+  // strings in expression-valued fields (never in a raw path's commands or
+  // in shape-id references).
+  function nameUsedBy(name, { derived = true } = {}) {
+    if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
+    const word = new RegExp(`(^|[^A-Za-z0-9_])${name}([^A-Za-z0-9_]|$)`);
+    const inExpr = (str, bare) => (str.includes('{')
+      ? (str.match(/\{[^{}]*\}/g) ?? []).some(seg => word.test(seg))
+      : bare && word.test(str));
+    const walk = (v, key) => {
+      if (typeof v === 'string') return key !== 'id' && key !== 'of' && inExpr(v, key !== 'path');
+      if (Array.isArray(v)) return key !== 'union' && key !== 'difference' && key !== 'intersect' && v.some(x => walk(x, key));
+      if (v && typeof v === 'object') return Object.entries(v).some(([k, x]) => walk(x, k));
+      return false;
+    };
+    if (derived) {
+      const d = (next.derived ?? []).find(x => x.id !== name && word.test(x.expr ?? ''));
+      if (d) return `derived value "${d.id}"`;
+    }
+    const sh = (next.shapes ?? []).find(x => walk(x, null));
+    if (sh) return `shape "${sh.id}"`;
+    for (const o of next.pipeline ?? []) {
+      const spec = CATALOG[o.strategy]?.params ?? {};
+      for (const [k, v] of Object.entries(o.params ?? {})) {
+        if (typeof v === 'string' && inExpr(v, spec[k]?.type === 'number')) return `operation "${o.id}" (param ${k})`;
+      }
+    }
+    return null;
+  }
   const applyOne = (a0) => {
     const a = normalize(a0);
     switch (a.kind) {
@@ -413,6 +480,8 @@ export function applyActions(recipe, payload) {
       case 'remove_control': {
         const used = next.pipeline.some(o => Object.values(o.params ?? {}).some(v => v && typeof v === 'object' && v.ctrl === a.id));
         if (used) { skipped.push(`remove_control: "${a.id}" still bound to an operation`); break; }
+        const ref = nameUsedBy(a.id);
+        if (ref) { skipped.push(`remove_control: "${a.id}" is still used by ${ref} — change or remove that first`); break; }
         const before = next.controls.length;
         next.controls = next.controls.filter(c => c.id !== a.id);
         before === next.controls.length ? skipped.push(`remove_control: no "${a.id}"`) : applied.push(`removed control "${a.id}"`);
@@ -451,6 +520,8 @@ export function applyActions(recipe, payload) {
         next.derived ??= [];
         const usedBy = next.derived.some(x => x.id !== a.id && new RegExp(`\\b${a.id}\\b`).test(x.expr));
         if (usedBy) { skipped.push(`remove_derived: "${a.id}" is referenced by another derived value`); break; }
+        const ref = nameUsedBy(a.id, { derived: false });
+        if (ref) { skipped.push(`remove_derived: "${a.id}" is still used by ${ref} — change or remove that first`); break; }
         const before = next.derived.length;
         next.derived = next.derived.filter(x => x.id !== a.id);
         before === next.derived.length ? skipped.push(`remove_derived: no "${a.id}"`) : applied.push(`removed derived "${a.id}"`);
@@ -600,16 +671,15 @@ export function applyActions(recipe, payload) {
   // and their shape/control references are checked here in full.
   // actions must be an array; a model has sent an object keyed 0..n and a
   // bare string — data, not trusted shape (crashed a whole turn, 2026-09-26)
-  const rawActions = Array.isArray(payload.actions) ? payload.actions
-    : payload.actions && typeof payload.actions === 'object' ? Object.values(payload.actions)
-    : [];
   if (payload.actions !== undefined && !Array.isArray(payload.actions)) skipped.push('actions: expected an array of action objects');
-  const actions = rawActions.filter(a => a && typeof a === 'object');
+  const actions = actionList(payload);
   const ordered = [
     ...actions.filter(a => a.kind === 'add_control'),
     ...actions.filter(a => a.kind !== 'add_control'),
   ];
-  const RETRYABLE = new Set(['set_derived', 'set_shape']);
+  // removals retry too: a teardown listed before the edit that frees it
+  // ("remove shape A … then point the op at shape B") is order, not error
+  const RETRYABLE = new Set(['set_derived', 'set_shape', 'remove_control', 'remove_derived', 'remove_shape', 'remove_terrain']);
   const sweep = (list) => {
     const failed = [];
     for (const a of list) {
@@ -637,7 +707,7 @@ export function applyActions(recipe, payload) {
     .map(s => s.trim())
     .filter(s => s.length <= 160)
     .slice(0, 3);
-  return { recipe: next, applied, skipped, declined: payload.declined ?? [], summary: payload.summary ?? '', suggest };
+  return { recipe: next, applied, skipped, declined: declinedList(payload), summary: typeof payload.summary === 'string' ? payload.summary : '', suggest };
 }
 
 
@@ -682,7 +752,9 @@ export function buildObservation(applyOut, weaveResult, recipe) {
     pipeline: (rec.pipeline ?? []).map(o => ({ id: o.id, strategy: o.strategy, ...(o.frame ? { frame: o.frame } : {}) })),
     weaved: !!r,
     ok: r ? !!r.ok : null,
-    errors: (r?.errors ?? []).map(e => clip(String(e), 300)),
+    // errors carry the fix (which op, where, how far, what to do instead) and
+    // the second look gets one try at it — they get more room than warnings
+    errors: (r?.errors ?? []).map(e => clip(String(e), 900)),
     warnings: (r?.warnings ?? []).map(w => clip(String(w), 300)),
     stock: r?.preview?.stock ? { w: r.preview.stock.w, h: r.preview.stock.h, thickness: r.preview.stock.thickness, pinned: !!r.preview.stock.pinned } : null,
     runTimeMin: stats?.estRunTimeMin ?? null,
@@ -915,8 +987,8 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       break;
     }
     const p0 = toolUse.input ?? {};
-    const p0Actions = Array.isArray(p0.actions) ? p0.actions : p0.actions && typeof p0.actions === 'object' ? Object.values(p0.actions) : [];
-    if (t === 0 && !p0Actions.length && !p0.declined?.length && !(typeof p0.summary === 'string' && p0.summary.trim())) {
+    const p0Actions = actionList(p0);
+    if (t === 0 && !p0Actions.length && !declinedList(p0).length && !(typeof p0.summary === 'string' && p0.summary.trim())) {
       throw new IntentError('the model came back empty-handed — nothing was applied; hit Generate again');
     }
     const out = applyActions(cur, p0);
@@ -926,7 +998,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       summary: out.summary, suggest: out.suggest, usage: data.usage ?? null, observation: null,
     };
     turns.push(turn);
-    const hadActions = p0Actions.filter(a => a && typeof a === 'object').length > 0;
+    const hadActions = p0Actions.length > 0;
     // nothing changed → nothing new to look at: a pure decline on turn 0,
     // or a revise turn that wrote its summary with the state already in view
     if (!hadActions) break;
@@ -968,7 +1040,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   // it never saw the result). Those actions are applied — but nobody has
   // looked. Weave once more and, when the verdict differs from what the
   // model was shown, say so in one deterministic sentence.
-  const lastHadActions = (last.payload.actions ?? []).filter(a => a && typeof a === 'object').length > 0;
+  const lastHadActions = actionList(last.payload).length > 0;
   if (lastHadActions && turns.length > 1 && weave && last.applied.length) {
     const result = await safeWeave(weave, cur);
     last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur);

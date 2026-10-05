@@ -68,6 +68,99 @@ function contentCenter(ctx) {
 // boxes — a 2" circle reaches 1.0" from center, not its bbox corner's 1.41"
 function noteContent(ctx, rings) {
   (ctx.contentRings ??= []).push(...rings);
+  // parallel to contentRings: which op machined each ring (ctx.opId is set
+  // by the runtime before every run) — a refused cutout names the op that
+  // pokes out instead of just reciting the rule
+  (ctx.contentOwners ??= []).push(...rings.map(() => ctx.opId ?? null));
+}
+function distToRing(q, ring) {
+  let best = Infinity;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const ax = ring[j].x, ay = ring[j].y, dx = ring[i].x - ax, dy = ring[i].y - ay;
+    const L2 = dx * dx + dy * dy;
+    const t = L2 ? Math.max(0, Math.min(1, ((q.x - ax) * dx + (q.y - ay) * dy) / L2)) : 0;
+    best = Math.min(best, Math.hypot(q.x - ax - t * dx, q.y - ay - t * dy));
+  }
+  return best;
+}
+const ringBBox = (rings) => rings.flat().reduce((a, q) => ({
+  minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
+  maxX: Math.max(a.maxX, q.x), maxY: Math.max(a.maxY, q.y),
+}), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+// Content that fails a cutout's fit check, grouped by the op that machined
+// it: the worst point of each, and how far past the TRUE outline it sits.
+// `inside(q)` is the caller's own acceptance test (grace included), so
+// this only ever explains a refusal — it never decides one.
+function fitOffenders(ctx, ring, inside) {
+  const byOp = new Map();
+  (ctx.contentRings ?? []).forEach((cr, i) => {
+    const op = ctx.contentOwners?.[i] ?? null;
+    for (const q of cr) {
+      if (inside(q)) continue;
+      const over = distToRing(q, ring);
+      const cur = byOp.get(op);
+      if (!cur) byOp.set(op, { op, x: q.x, y: q.y, over, n: 1 });
+      else { cur.n++; if (over > cur.over) { cur.x = q.x; cur.y = q.y; cur.over = over; } }
+    }
+  });
+  return [...byOp.values()].sort((a, b) => b.over - a.over);
+}
+// How far an edge-treatment pocket (a rabbet band, a stepped rim) may
+// overrun the outline of the cutout that follows it: such a band is
+// AUTHORED ~0.05" past the future edge so no sliver wall survives, and
+// that must not read as misplaced content.
+const EDGE_GRACE = 0.1;
+// Exact fits: content authored to END at the outline (a ring pocket out to
+// the disc's own radius) arrives a few 1e-7 past it after arc flattening;
+// 5 thou — the tag's pinning grace — is well inside the cutter's kerf.
+const FIT_TOL = 5e-3;
+const quoteOps = (ids) => ids.map(o => (o == null ? 'an earlier op' : `"${o}"`)).join(', ');
+
+// The refusal a cutout gives when earlier content pokes out of it. The
+// model gets ONE corrective turn on this text, so the facts come first —
+// which op, where, how far, and the outline's own extent — and then the
+// fix that matches the geometry: content that straddles the edge wants a
+// bigger outline; content (or an earlier cutout) lying wholly outside a
+// SMALLER outline means the cutout is being used for something it is not
+// (a through-slot inside the part, or a second loose piece).
+function cutoutFitError(ctx, ring, off, { sized = false, width = 0, pieces = 1, shapeId = '' } = {}) {
+  const f = (v) => v.toFixed(2);
+  const sb = ringBBox([ring]);
+  const cb = ctx.contentBBox;
+  const prior = ctx.priorCutouts ?? [];
+  const worst = off[0] ?? null;
+  const ownerTotal = worst ? (ctx.contentRings ?? []).reduce((n, cr, i) => n + ((ctx.contentOwners?.[i] ?? null) === worst.op ? cr.length : 0), 0) : 0;
+  const wholeOutside = !!worst && worst.n === ownerTotal;
+  const smaller = !!cb && (sb.maxX - sb.minX) * (sb.maxY - sb.minY) < (cb.maxX - cb.minX) * (cb.maxY - cb.minY);
+  const cx = (sb.minX + sb.maxX) / 2, cy = (sb.minY + sb.maxY) / 2;
+  let msg = `the content so far pokes outside that ${sized ? `${width}"-wide ` : ''}shape`;
+  if (worst) {
+    msg += `: op ${quoteOps([worst.op])} reaches (${f(worst.x)}, ${f(worst.y)}), ${f(worst.over)}" past the outline`;
+    if (off.length > 1) msg += ` (also ${quoteOps(off.slice(1, 4).map(o => o.op))})`;
+  } else if (prior.length) {
+    msg += `: the earlier cutout ${quoteOps(prior.slice(-1))} lies outside it`;
+  }
+  msg += `. The outline spans X ${f(sb.minX)}..${f(sb.maxX)}, Y ${f(sb.minY)}..${f(sb.maxY)}`;
+  if (cb) msg += `; the content spans X ${f(cb.minX)}..${f(cb.maxX)}, Y ${f(cb.minY)}..${f(cb.maxY)}`;
+  if (pieces > 1) msg += `. Shape "${shapeId}" is ${pieces} separate pieces and a cutout follows only ONE outline (the largest)`;
+  if (prior.length || pieces > 1 || (wholeOutside && (smaller || ctx.cutoutsAhead > 0))) {
+    msg += '. A cutout frees the WHOLE part, so it must enclose everything machined before it (earlier cutouts included). For a slot, window or hole THROUGH the part, use pocket_shape with this shape and depth = the stock thickness, before the one cutout that frees the part. For another separate PIECE: one job frees one piece — keep one cutout, pick the piece with a control (one run each), and decline cutting the set in one run';
+  } else {
+    const offCenter = Math.hypot(cx, cy) > 0.25 * Math.max(sb.maxX - sb.minX, sb.maxY - sb.minY);
+    msg += ` — ${offCenter ? `the outline is centered at (${f(cx)}, ${f(cy)}), not on the content: re-author it around the content (shapes are inches about the origin), or ` : ''}${sized ? 'enlarge width/height' : 'enlarge its controls'} so the outline clears that point, move or shrink ${worst ? `op ${quoteOps([worst.op])}` : 'the content'}, or reshape the outline (a fit-derived shape — set_shape fit {of, margin} — sizes itself around the content)`;
+  }
+  return { error: msg };
+}
+// farthest content point from c, per op (true outlines only)
+function contentReachByOp(ctx, c) {
+  const byOp = new Map();
+  (ctx.contentRings ?? []).forEach((cr, i) => {
+    const op = ctx.contentOwners?.[i] ?? null;
+    let reach = byOp.get(op) ?? 0;
+    for (const q of cr) reach = Math.max(reach, Math.hypot(q.x - c.x, q.y - c.y));
+    byOp.set(op, reach);
+  });
+  return [...byOp.entries()].map(([op, reach]) => ({ op, reach }));
 }
 function contentReach(ctx, c) {
   if (!ctx.contentRings?.length) {
@@ -146,7 +239,7 @@ function namedShapeRegion(ctx, id, use) {
   const regions = [...sh.regions].sort((a, b) => Math.abs(ringArea(b.outer)) - Math.abs(ringArea(a.outer)));
   const warnings = regions.length > 1
     ? [`shape "${id}" welds to ${regions.length} separate pieces — using the largest`] : [];
-  return { region: regions[0], warnings, anchored: true };
+  return { region: regions[0], warnings, anchored: true, pieces: regions.length };
 }
 
 // ALL pieces of a (possibly multi-piece) shape — for consumers that
@@ -226,7 +319,7 @@ function customShapeRegion(p) {
   if (regions.length > 1) {
     warnings.push(`that shape welds to ${regions.length} separate pieces — using the largest; the rest are ignored`);
   }
-  return { region: regions[0], w: sized.w, h: sized.h, warnings, anchored: sized.anchored };
+  return { region: regions[0], w: sized.w, h: sized.h, warnings, anchored: sized.anchored, pieces: regions.length };
 }
 
 // Enforce the medial axis's own invariant against the exact region
@@ -793,6 +886,9 @@ export const CATALOG = {
         }
       }
       noteContent(ctx, regions.map(r => r.outer));
+      // an edge treatment deliberately overruns the later cutout's edge —
+      // the cutouts' content-fit checks scope their grace to these ops
+      if (p.edgeTreatment) (ctx.edgeOps ??= new Set()).add(ctx.opId ?? null);
       const params = {
         stepoverPct: 40, totalDepth: p.depth, depthPerPass: 0.125,
         safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30,
@@ -1392,9 +1488,24 @@ export const CATALOG = {
       const R = p.diameter / 2;
       // contentReach measures from the (possibly pinned) center, so an
       // off-center pin that leaves content poking out is refused here
-      const reach = contentReach(ctx, c);
-      if (reach > R + 1e-9) {
-        return { error: `a ${p.diameter}" disc ${pinned ? `pinned at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}) ` : ''}is too small for the content so far (needs ≥ ${(2 * reach).toFixed(2)}" diameter${pinned ? ' around that center — move the content, enlarge the disc, or clear posX/posY to recenter' : ''})` };
+      // Two scoped allowances, neither a blanket one: FIT_TOL lets content
+      // authored to end exactly AT the rim pass (it used to be refused as
+      // "needs ≥ 4.00"" on a 4" disc), and an edgeTreatment pocket — a
+      // stepped rim that overruns the edge on purpose — gets the same
+      // EDGE_GRACE shape_cutout gives it. Everything else must be inside;
+      // the verifier still checks every swept footprint independently.
+      const reaches = contentReachByOp(ctx, c);
+      const allow = (o) => R + (ctx.edgeOps?.has(o.op) ? EDGE_GRACE : FIT_TOL);
+      const over = reaches.length
+        ? reaches.filter(o => o.reach > allow(o)).sort((a, b) => b.reach - a.reach)
+        : (contentReach(ctx, c) > R + FIT_TOL ? [{ op: undefined, reach: contentReach(ctx, c) }] : []);
+      if (over.length) {
+        const reach = over[0].reach;
+        const need = Math.ceil((2 * reach - 1e-4) * 100) / 100;   // rounded UP (a 4.004" need never prints as 4.00"), less arc-flattening noise
+        const who = over[0].op !== undefined
+          ? `: op ${quoteOps([over[0].op])} reaches ${reach.toFixed(2)}" from the disc center, ${(reach - R).toFixed(2)}" past its ${R.toFixed(2)}" radius${over.length > 1 ? ` (also ${quoteOps(over.slice(1, 4).map(o => o.op))})` : ''} — enlarge the disc, or pull that op inside (holes ALONG the rim outline sit half outside it: space them along an inset shape)`
+          : '';
+        return { error: `a ${p.diameter}" disc ${pinned ? `pinned at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}) ` : ''}is too small for the content so far (needs ≥ ${need.toFixed(2)}" diameter${pinned ? ' around that center — move the content, enlarge the disc, or clear posX/posY to recenter' : ''})${who}` };
       }
       const ring = circleRing(c.x, c.y, R);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
@@ -1490,22 +1601,21 @@ export const CATALOG = {
       // The shape is expanded by a small grace first: edge treatments
       // (a rabbet pocket) deliberately overrun the future edge a little,
       // and that must not read as misplaced content.
-      const EDGE_GRACE = 0.1;
       const graceRing = expandRing(ring, EDGE_GRACE) ?? ring;
       const graceRegion = { outer: graceRing, holes: [] };
       const sized = !p.shape && p.width > 0;
-      const fitError = { error: `the content so far pokes outside that ${sized ? `${p.width}"-wide ` : ''}shape — enlarge ${sized ? 'width/height' : 'its controls'}, or reshape the outline` };
+      const inside = (q) => pointInPolygon(q.x, q.y, graceRegion);
+      const why = { sized, width: p.width, pieces: cs.pieces ?? 1, shapeId: p.shape };
       if (ctx.contentRings?.length) {
-        for (const cr of ctx.contentRings) {
-          if (cr.some(q => !pointInPolygon(q.x, q.y, graceRegion))) return fitError;
-        }
+        const off = fitOffenders(ctx, ring, inside);
+        if (off.length) return cutoutFitError(ctx, ring, off, why);
       } else if (ctx.contentBBox) {
         const b = ctx.contentBBox;
         const step = 0.05;
         const walk = [[b.maxX, b.minY], [b.maxX, b.maxY]];
         for (let x = b.minX; x <= b.maxX + 1e-9; x += step) { walk.push([x, b.minY], [x, b.maxY]); }
         for (let y = b.minY; y <= b.maxY + 1e-9; y += step) { walk.push([b.minX, y], [b.maxX, y]); }
-        if (walk.some(([x, y]) => !pointInPolygon(x, y, graceRegion))) return fitError;
+        if (walk.some(([x, y]) => !pointInPolygon(x, y, graceRegion))) return cutoutFitError(ctx, ring, [], why);
       }
       const prof = generateProfile(shapeRegion, { diameter: p.toolDiameter }, {
         side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
@@ -1579,7 +1689,28 @@ export const CATALOG = {
       // taken from a live weave must not refuse the very state it pinned
       const TOL = 5e-3;
       if (b.minX < x0 - TOL || b.maxX > x1 + TOL || b.minY < y0 - TOL || b.maxY > y1 + TOL) {
-        return { error: `the pinned tag (${w.toFixed(2)}" × ${h.toFixed(2)}" centered at ${cx.toFixed(2)}, ${cy.toFixed(2)}) no longer contains the content (${b.minX.toFixed(2)}..${b.maxX.toFixed(2)} × ${b.minY.toFixed(2)}..${b.maxY.toFixed(2)}) — move the content back inside, enlarge width/height, or clear posX/posY/width/height to let the tag size itself again` };
+        // name the ops that stick out and the numbers that fix them: the
+        // second look gets one try, and "move the content back inside"
+        // alone left it guessing a letter height (reserved-parking-sign:
+        // 2.4" → 2.0", still 0.4" too wide; a second line was too wide too)
+        const f = (v) => v.toFixed(2);
+        const big = [], out = [];
+        for (const ob of ctx.opBoxes ?? []) {
+          const o = ob.bbox;
+          const ow = o.maxX - o.minX, oh = o.maxY - o.minY;
+          if (ow > w + TOL || oh > h + TOL) {
+            big.push(`"${ob.id}" ${ow > w + TOL ? `${f(ow)}" wide` : `${f(oh)}" tall`} (fits at ${Math.floor(Math.min(w / ow, h / oh) * 100)}% or less)`);
+          } else {
+            const d = Math.max(x0 - o.minX, o.maxX - x1, y0 - o.minY, o.maxY - y1);
+            if (d > TOL) out.push(`"${ob.id}" by ${f(d)}"`);
+          }
+        }
+        const who = [
+          big.length ? `bigger than the tag on their own: ${big.slice(0, 4).join(', ')}` : '',
+          out.length ? `sticking out past its edge: ${out.slice(0, 4).join(', ')}` : '',
+        ].filter(Boolean).join('; ');
+        const needW = 2 * Math.max(cx - b.minX, b.maxX - cx), needH = 2 * Math.max(cy - b.minY, b.maxY - cy);
+        return { error: `the pinned tag (${f(w)}" × ${f(h)}" centered at ${f(cx)}, ${f(cy)}) no longer contains the content (${f(b.minX)}..${f(b.maxX)} × ${f(b.minY)}..${f(b.maxY)}, ${f(b.maxX - b.minX)}" × ${f(b.maxY - b.minY)}" in all)${who ? ` — ops ${who}. Shrink or move those until the whole content fits` : ' — move the content back inside'}, or enlarge width/height (at least ${f(needW)}" × ${f(needH)}" around this center), or clear posX/posY/width/height to let the tag size itself again` };
       }
       const ring = roundedRectRing(x0, y0, x1, y1, p.cornerRadius);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
