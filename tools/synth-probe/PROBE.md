@@ -49,6 +49,12 @@ probing.
 
 4. **Probe live (~$3):**
    `node probe.mjs ./runs/YYYY-MM-DD-prompts.json ./runs/YYYY-MM-DD-results.jsonl`
+   Each model call retries a dropped connection (`fetch failed`), 429 and
+   5xx up to 4 attempts with backoff (`model-call.mjs`, shared with
+   `live-retest.mjs`); other 4xx are not retried. A row whose call still
+   fails is recorded as outcome `INFRA_ERROR` (`infra: true`) — the
+   network, not Loom. Plain `ERROR` means Loom threw. Three consecutive
+   INFRA_ERROR rows abort the batch.
 
 5. **Triage.** For every non-FULFILLED row (and every FULFILLED row
    whose prior said decline — possible overclaim: read the summary
@@ -56,6 +62,12 @@ probing.
    classify against ledger.md; increment counts; open new classes as
    needed. Watch specifically for the semantic-overclaim pattern — a
    confident summary the pipeline doesn't back.
+   `INFRA_ERROR` rows are NOT triaged: nightly.mjs withholds them from the
+   triage call, strips them from anything it returns (so they can never be
+   class evidence or a SHIPPED regression), leaves them out of prior-misses
+   and the corpus, and tallies them separately in the run-log line. They
+   still count toward the "3+ rows ERRORED — infrastructure suspect"
+   attention rule.
 
 6. **Grow the corpus:**
    `node corpus-add.mjs ./runs/YYYY-MM-DD-results.jsonl YYYY-MM-DD`
@@ -160,7 +172,8 @@ runtime accept it before adding a prompt rule; robustness → replay and fix
 at the root), and the acceptance test (`npm test` + `live-retest.mjs` on
 the same prompt ids). Ranking: 5 × real-user asks + 2 × distinct synthetic
 prompts in the last 14 days + ¼ × older ones. Probe rows that died on a
-dropped connection are excluded and listed as infrastructure.
+dropped connection (`INFRA_ERROR`, or the older `ERROR` + "fetch failed"
+rows) are excluded and listed as infrastructure.
 
 The brief is the hand-off, not the conversion: a brief is executed in an
 attended session (paste it, or `claude -p "$(cat runs/fix-prompts/<class>.md)"`

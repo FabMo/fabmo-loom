@@ -16,6 +16,7 @@
 // id and count only — real users' words never enter a brief.
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from 'node:fs';
+import { isInfraRow } from './model-call.mjs';
 
 const HERE = new URL('./', import.meta.url).pathname;
 const RUNS = `${HERE}runs/`;
@@ -68,7 +69,8 @@ for (const f of readdirSync(RUNS).filter(f => /^\d{4}-\d\d-\d\d(-manual)?-triage
     if (!c?.class || !c.id) continue;
     const row = rows.get(c.id);
     // a dropped connection in the probe is not a Loom failure
-    if (row?.outcome === 'ERROR' && /fetch failed|ECONNRESET|EPIPE|socket/i.test(String(row.error ?? ''))) { infra.push(`${day}:${c.id}`); continue; }
+    // (INFRA_ERROR rows since 2026-10-05; the legacy regex on row.error before)
+    if (isInfraRow(row)) { infra.push(`${day}:${c.id}`); continue; }
     const key = slug(c.class);
     if (key === 'working-as-intended' || /by-design/i.test(c.class) || byDesign.includes(key)) continue;
     if (!classes.has(key)) classes.set(key, []);

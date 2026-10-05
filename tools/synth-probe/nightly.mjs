@@ -16,6 +16,7 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { isInfraRow, INFRA_OUTCOME } from './model-call.mjs';
 
 const HERE = new URL('./', import.meta.url).pathname;
 const RUNS = `${HERE}runs/`;
@@ -28,7 +29,7 @@ mkdirSync(RUNS, { recursive: true });
 
 const log = (m) => console.log(`[nightly ${new Date().toISOString().slice(11, 19)}] ${m}`);
 const attention = [];
-let results, tri, priorMisses = [];
+let results, tri, priorMisses = [], infraRows = [];
 let tally = {};
 let funnelRows = [], funnelDeclines = [];   // declared up here: finish() can run before the funnel pull
 // broken infra must never be silent: any crash still writes the run-log
@@ -151,16 +152,24 @@ if (retriage) {
   if (!existsSync(resultsFile)) { attention.push(`probe produced no results:\n${probe.out.slice(-400)}`); finish('probe failed'); }
 }
 results = readFileSync(resultsFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
-const errors = results.filter(r => r.outcome === 'ERROR').length;
-if (errors >= 3) attention.push(`${errors} probe rows ERRORED — infrastructure suspect`);
+// infra rows = the network/API gave out after the probe's bounded retries
+// (INFRA_ERROR; isInfraRow also recognizes the pre-marker "fetch failed"
+// ERROR rows so a --retriage of an old night gets the same treatment).
+// They are probe infrastructure, never Loom evidence: counted here, kept out
+// of triage, prior-misses and the corpus.
+infraRows = results.filter(isInfraRow);
+const infraIds = new Set(infraRows.map(r => r.id));
+const loomRows = results.filter(r => !infraIds.has(r.id));
+const errors = loomRows.filter(r => r.outcome === 'ERROR').length + infraRows.length;
+if (errors >= 3) attention.push(`${errors} probe rows ERRORED${infraRows.length ? ` (${infraRows.length} network/API after retries: ${infraRows.map(r => r.id).join(', ')})` : ''} — infrastructure suspect`);
 
 // ---- 5. triage ----------------------------------------------------------
 tally = {};
-for (const r of results) tally[r.outcome] = (tally[r.outcome] ?? 0) + 1;
-priorMisses = results.filter(r =>
+for (const r of results) { const k = infraIds.has(r.id) ? INFRA_OUTCOME : r.outcome; tally[k] = (tally[k] ?? 0) + 1; }
+priorMisses = loomRows.filter(r =>
   (r.prior === 'covered' && !/FULFILLED/.test(r.outcome ?? '')) ||
   (r.prior === 'decline' && r.outcome === 'FULFILLED'));
-const compact = results.map(r => ({
+const compact = loomRows.map(r => ({
   id: r.id, prior: r.prior, outcome: r.outcome, verified: r.verified,
   prompt: r.prompt, summary: (r.summary ?? '').slice(0, 300),
   firstSummary: r.firstSummary && r.firstSummary !== r.summary ? r.firstSummary.slice(0, 300) : undefined,
@@ -171,14 +180,28 @@ const compact = results.map(r => ({
 }));
 log('triaging…');
 let triText = '';
-try { triText = await llm(
+// nothing but infra rows and no funnel declines = nothing to judge: skip the call
+const nothingToTriage = !compact.length && !funnelDeclines.length;
+try { if (!nothingToTriage) triText = await llm(
   `You triage probe results for the Loom improvement loop against its failure-class ledger. Rules: classify every non-clean row (declines, verify failures, skips, crashes) to an existing ledger class id when one fits; propose a NEW class only when nothing fits. Separately flag OVERCLAIMS: rows whose FINAL summary confidently claims something their pipeline/actions cannot deliver (the verifier cannot catch these — judge summary against pipeline). Rows may also carry firstSummary — what the model said BEFORE it saw the weave result; when firstSummary overclaimed and the final summary is honest, list the row under caughtByLoop instead of overclaims. Rows may carry loop.claimIssues (semantic claims the app refused and corrected deterministically in the final text/declines) — those are NOT overclaims; list them under caughtByClaims. By-design declines that declined correctly are "working-as-intended", not findings. Output ONLY JSON, no fences: {"classified":[{"id","class","evidence":"one line"}], "newClasses":[{"id","section":"capability|authoring|overclaim|robustness","description","examples":["prompt-id"]}], "overclaims":[{"id","claim","reality"}], "caughtByLoop":[{"id","claim"}], "caughtByClaims":[{"id","claim"}], "shippedRegressions":[{"id","class"}], "runNote":"one sentence"}`,
-  `LEDGER:\n${ledger}\n\nTONIGHT'S RESULTS (${results.length} rows):\n${JSON.stringify(compact, null, 1)}\n\nNEW FUNNEL DECLINES (real users — priority):\n${JSON.stringify(funnelDeclines.map(r => ({ id: r.id, utterance: (r.utterance ?? '').slice(0, 200), declined: r.declined })), null, 1)}`,
+  `LEDGER:\n${ledger}\n\nTONIGHT'S RESULTS (${compact.length} rows${infraRows.length ? `; ${infraRows.length} more omitted — the probe's network/API call failed, they say nothing about Loom` : ''}):\n${JSON.stringify(compact, null, 1)}\n\nNEW FUNNEL DECLINES (real users — priority):\n${JSON.stringify(funnelDeclines.map(r => ({ id: r.id, utterance: (r.utterance ?? '').slice(0, 200), declined: r.declined })), null, 1)}`,
   4000); }
 catch (e) { attention.push(`triage call failed (${String(e?.message ?? e).slice(0, 160)}) — rows still added to the corpus; backfill with: node nightly.mjs --retriage ${DAY}`); }
 tri = { classified: [], newClasses: [], overclaims: [], caughtByLoop: [], shippedRegressions: [], runNote: 'triage unparseable' };
 try { tri = { ...tri, ...parseJson(triText) }; }
-catch { if (triText) { attention.push('triage output unparseable — raw saved to runs/'); writeFileSync(`${RUNS}${DAY}-triage-raw.txt`, triText); } else tri.runNote = 'triage call failed'; }
+catch { if (triText) { attention.push('triage output unparseable — raw saved to runs/'); writeFileSync(`${RUNS}${DAY}-triage-raw.txt`, triText); } else tri.runNote = nothingToTriage ? 'no Loom rows to triage — every probe row was a network/API failure' : 'triage call failed'; }
+// belt and braces: an infra row can never be evidence, a new class, an
+// overclaim or a SHIPPED regression, whatever the triage model returned
+if (infraIds.size) {
+  const keep = (x) => !infraIds.has(typeof x === 'string' ? x : x?.id);
+  for (const k of ['classified', 'overclaims', 'caughtByLoop', 'caughtByClaims', 'shippedRegressions'])
+    if (Array.isArray(tri[k])) tri[k] = tri[k].filter(keep);
+  if (Array.isArray(tri.newClasses)) tri.newClasses = tri.newClasses
+    .map(c => Array.isArray(c?.examples) && c.examples.length ? { ...c, examples: c.examples.filter(keep), _had: true } : c)
+    .filter(c => !(c?._had && !c.examples.length))
+    .map(({ _had, ...c }) => c);
+  tri.infraErrors = infraRows.map(r => ({ id: r.id, error: String(r.error ?? '').split('\n')[0].slice(0, 160) }));
+}
 writeFileSync(`${RUNS}${DAY}-triage.json`, JSON.stringify(tri, null, 1));
 
 if (tri.newClasses?.length) attention.push(`NEW failure class(es): ${tri.newClasses.map(c => `${c.id} — ${c.description}`).join('; ')}`);
@@ -203,7 +226,7 @@ function finish(note) {
   const cost = (spendIn * 5e-6 + spendOut * 25e-6
     + (results ?? []).reduce((s, r) => s + (r.usage?.input_tokens ?? 0) * 4e-6 + (r.usage?.output_tokens ?? 0) * 20e-6 + (r.usage?.cache_read_input_tokens ?? 0) * 0.2e-6 + (r.usage?.cache_creation_input_tokens ?? 0) * 5e-6, 0)).toFixed(2);
   const outcomes = Object.keys(tally).length
-    ? Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ') : 'no probes';
+    ? Object.entries(tally).map(([k, v]) => `${v} ${k}${k === INFRA_OUTCOME ? ' (network/API after retries — not Loom)' : ''}`).join(', ') : 'no probes';
   const evidence = tri?.classified?.length
     ? '; evidence: ' + Object.entries(tri.classified.reduce((m, c) => ((m[c.class] = (m[c.class] ?? 0) + 1), m), {})).map(([c, n]) => `${c} +${n}`).join(', ')
     : '';

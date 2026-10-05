@@ -19,7 +19,7 @@ const sets = args.map(a => { const [label, file] = a.split('='); return { label,
 function tally(rows) {
   const t = { n: rows.length, verified: 0, firstTurnOk: 0, firstTurnObserved: 0, empty: 0, cof: 0, declined: 0, fixes: 0, looks: 0, revised: 0, calls: 0, inTok: 0, cacheTok: 0, outTok: 0, errors: 0, priorMiss: 0, declinePriorBuilt: 0, firstSkips: 0 };
   for (const r of rows) {
-    if (r.outcome === 'ERROR' || /CRASH/.test(r.outcome)) t.errors++;
+    if (/ERROR|CRASH/.test(r.outcome ?? '')) t.errors++;   // includes INFRA_ERROR (network/API)
     if (r.verified) t.verified++;
     const empty = !(r.pipeline?.length);
     if (empty) t.empty++;

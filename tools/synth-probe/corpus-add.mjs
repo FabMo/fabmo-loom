@@ -11,6 +11,7 @@
 
 import { readFileSync, appendFileSync } from 'node:fs';
 import { loadEnv, replayRow, blessOf, readCorpus, usesGuestStrategy } from './corpus-lib.mjs';
+import { isInfraRow } from './model-call.mjs';
 
 const [, , inPath, runKey] = process.argv;
 if (!inPath || !runKey) { console.error('usage: node corpus-add.mjs <rows.jsonl> <runKey> [--prompts <file>]'); process.exit(1); }
@@ -34,13 +35,14 @@ const existing = new Set([...(readCorpus(CORPUS) ?? []), ...(readCorpus(LOCAL) ?
 const rows = readFileSync(new URL(inPath, import.meta.url).pathname, 'utf8')
   .trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
 
-let added = 0, skippedDup = 0, skippedBad = 0, guestless = 0;
+let added = 0, skippedDup = 0, skippedBad = 0, skippedInfra = 0, guestless = 0;
 for (const [idx, raw] of rows.entries()) {
   // normalize probe-results and funnel-log shapes into a corpus row;
   // early funnel entries predate query ids — fall back to timestamp
   const actions = raw.rawActions ?? raw.actions;
   const id = raw.id ?? raw.ts ?? `row-${idx}`;
   const key = `${runKey}/${id}`;
+  if (isInfraRow(raw)) { skippedInfra++; continue; }              // the network failed, not Loom — nothing to replay
   if (!Array.isArray(actions)) { skippedBad++; continue; }        // truncated/malformed responses aren't replayable
   if (existing.has(key)) { skippedDup++; continue; }
   let context = raw.context ?? null;
@@ -66,5 +68,5 @@ for (const [idx, raw] of rows.entries()) {
   existing.add(key);
   added++;
 }
-console.log(`corpus-add: ${added} added, ${skippedDup} duplicate, ${skippedBad} unreplayable (no action list)${guestless ? `, ${guestless} guest rows skipped (guests unavailable)` : ''}`);
+console.log(`corpus-add: ${added} added, ${skippedDup} duplicate, ${skippedBad} unreplayable (no action list)${skippedInfra ? `, ${skippedInfra} infra-error rows skipped` : ''}${guestless ? `, ${guestless} guest rows skipped (guests unavailable)` : ''}`);
 console.log(`corpus now: ${readCorpus(CORPUS)?.length ?? 0} rows`);

@@ -5,6 +5,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { PROMPTS, FAKE_SVG } from './prompts.mjs';
+import { makeCallModel } from './model-call.mjs';
 
 // prompt ids resolve from the pilot set first, then any nightly batch
 // (runs/<day>-prompts.json) — nightly finds are retestable by id too
@@ -29,6 +30,8 @@ for (const f of FONTS) {
   fonts[f.id] = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 const key = readFileSync('/var/opt/apps/.intent.env', 'utf8').match(/^ANTHROPIC_API_KEY=(.+)$/m)[1].trim();
+// bounded retries on a dropped connection / 429 / 5xx (model-call.mjs)
+const callModel = makeCallModel({ key, onRetry: (why, attempt) => console.log(`  model call: ${why} — retry ${attempt + 1}`) });
 
 const quiet = (fn) => {
   const o = console.log, w = console.warn;
@@ -44,12 +47,9 @@ for (const id of ids) {
   if (p.asset === 'svg') recipe.assets.push({ id: 'logo.svg', name: 'logo.svg', kind: 'svg', data: FAKE_SVG });
   const req = buildParseRequest(recipe, p.prompt);
   req.system = [{ type: 'text', text: req.system, cache_control: { type: 'ephemeral' } }];
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify(req),
-  });
-  const data = await res.json();
+  let data;
+  try { data = await callModel(req); }
+  catch (e) { console.log(`\n=== ${id} — ${e?.infra ? 'NETWORK/API FAILURE (not a Loom result — rerun)' : 'API ERROR'}: ${String(e?.message ?? e).slice(0, 300)}`); continue; }
   console.log(`\n=== ${id} — stop ${data.stop_reason}, ${data.usage?.output_tokens} out tokens`);
   const tu = data.content?.find(b => b.type === 'tool_use');
   if (!tu || data.stop_reason === 'max_tokens') { console.log('  STILL TRUNCATED/EMPTY'); continue; }

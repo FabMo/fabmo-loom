@@ -11,6 +11,7 @@
 
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { FAKE_SVG } from './prompts.mjs';
+import { makeCallModel, INFRA_OUTCOME } from './model-call.mjs';
 
 const promptsPath = process.argv[2] ?? './prompts.mjs';
 const outPath = process.argv[3] ?? './results.jsonl';
@@ -64,6 +65,9 @@ function baseRecipe(p) {
   return r;
 }
 
+// transport with bounded retries (dropped connection, 429, 5xx) lives in
+// model-call.mjs; what still fails after them throws with `infra: true`
+const send = makeCallModel({ key, onRetry: (why, attempt) => console.log(`  model call: ${why} — retry ${attempt + 1}`) });
 async function callModel(req0) {
   // prompt caching: the system prompt is identical for every EMPTY_RECIPE
   // call — cache it so 50 probes cost like a handful (and the loop's
@@ -71,20 +75,7 @@ async function callModel(req0) {
   const req = typeof req0.system === 'string'
     ? { ...req0, system: [{ type: 'text', text: req0.system, cache_control: { type: 'ephemeral' } }] }
     : req0;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify(req),
-    });
-    if (res.status === 429 || res.status >= 500) {
-      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-      continue;
-    }
-    if (!res.ok) throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 300)}`);
-    return await res.json();
-  }
-  throw new Error('API retries exhausted');
+  return send(req);
 }
 
 // synthetic elevation grid for any authored terrain reference (the browser
@@ -170,6 +161,9 @@ async function probe(p) {
       rec.verified ? 'FULFILLED' : 'FULFILLED_UNVERIFIED';
     return rec;
   } catch (e) {
+    // infra = the network/API gave out after bounded retries — the prompt
+    // never got a fair run, so the row must not read as a Loom failure
+    if (e?.infra) { rec.outcome = INFRA_OUTCOME; rec.infra = true; rec.error = String(e.message).slice(0, 500); return rec; }
     rec.outcome = 'ERROR'; rec.error = String(e?.stack ?? e).slice(0, 500);
     return rec;
   }
@@ -181,11 +175,15 @@ console.log(`probing ${todo.length} prompts → ${OUT} (loop: ${LOOP_MODE}${MODE
 
 // warmup call first so the cached system prompt is written once
 const CONCURRENCY = 4;
-let done = 0;
+let done = 0, infraStreak = 0, aborted = false;
 const record = (r) => {
   appendFileSync(OUT, JSON.stringify(r) + '\n');
   done++;
-  const flag = r.prior === 'covered' && /DECLINED|PARTIAL|ALL_SKIPPED|CRASH|ERROR/.test(r.outcome) ? ' ⚠ prior-miss'
+  // PROBE.md guardrail: 3 consecutive API failures abort the batch
+  infraStreak = r.infra ? infraStreak + 1 : 0;
+  if (infraStreak >= 3 && !aborted) { aborted = true; console.log('3 consecutive model calls failed — aborting the batch (infrastructure)'); }
+  const flag = r.infra ? ' (network/API — not a Loom result)'
+    : r.prior === 'covered' && /DECLINED|PARTIAL|ALL_SKIPPED|CRASH|ERROR/.test(r.outcome) ? ' ⚠ prior-miss'
     : r.prior === 'decline' && r.outcome === 'FULFILLED' ? ' ✓ better-than-expected' : '';
   const loop = r.loop ? ` [${r.loop.turns} call${r.loop.turns === 1 ? '' : 's'}${r.loop.fixes ? `, ${r.loop.fixes} fixes` : ''}${r.loop.summaryChanged ? ', summary revised' : ''}]` : '';
   console.log(`[${done}/${todo.length}] ${r.id}: ${r.outcome}${r.verified === false ? ' (verify FAIL)' : ''}${flag}${loop}`);
@@ -195,10 +193,10 @@ record(await probe(todo[0]));
 const rest = todo.slice(1);
 let idx = 0;
 await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
-  while (idx < rest.length) {
+  while (idx < rest.length && !aborted) {
     const p = rest[idx++];
     record(await probe(p));
   }
 }));
 
-console.log('done');
+console.log(aborted ? `aborted after ${done}/${todo.length}${done < todo.length ? ' — remaining prompts not probed' : ''}` : 'done');
