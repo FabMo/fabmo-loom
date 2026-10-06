@@ -471,6 +471,56 @@ export function buildShapes(recipe, vars, { defer = false } = {}) {
   return { shapes, warnings, pending, resolve };
 }
 
+// ---- ingredients: what the shop needs on hand ---------------------------
+//
+// An op may return `ingredients`: [{ kind: 'sheet', thickness, w, h, count,
+// note?, utilization? } | { kind: 'hardware', item, qty, note? }]. The
+// runtime unions them across the pipeline (same sheet → counts add, same
+// hardware item → quantities add) into result.ingredients, which the UI
+// lists and the model reads on its second look — so "I only have 3/4" is
+// an ordinary refinement turn against a list the app computed, never one
+// the model narrated. Sheets are in inches; thickness is the stock class.
+function addIngredient(list, ing, opId) {
+  if (!ing || typeof ing !== 'object') return;
+  if (ing.kind === 'sheet') {
+    const th = +ing.thickness, w = ing.w != null ? +ing.w : null, h = ing.h != null ? +ing.h : null;
+    if (!(th > 0)) return;
+    const count = Math.max(1, Math.round(+ing.count || 1));
+    const same = list.find(i => i.kind === 'sheet' && Math.abs(i.thickness - th) < 1e-6
+      && ((i.w == null && w == null) || (i.w != null && w != null && Math.abs(i.w - w) < 0.01 && Math.abs(i.h - h) < 0.01)));
+    if (same) {
+      same.count += count;
+      if (ing.note && !same.note.includes(ing.note)) same.note += `; ${ing.note}`;
+      if (ing.utilization != null) same.utilization = same.utilization == null ? ing.utilization : (same.utilization + ing.utilization) / 2;
+    } else {
+      list.push({ kind: 'sheet', thickness: th, w, h, count, note: String(ing.note ?? ''), ...(ing.utilization != null ? { utilization: +ing.utilization } : {}), from: opId });
+    }
+  } else if (ing.kind === 'hardware') {
+    const item = String(ing.item ?? '').trim();
+    if (!item) return;
+    const qty = Math.max(1, Math.round(+ing.qty || 1));
+    const same = list.find(i => i.kind === 'hardware' && i.item === item);
+    if (same) { same.qty += qty; if (ing.note && !same.note.includes(ing.note)) same.note += `; ${ing.note}`; }
+    else list.push({ kind: 'hardware', item, qty, note: String(ing.note ?? ''), from: opId });
+  }
+}
+
+/** One line per ingredient, shop language — shared by the panel and the model's observation. */
+export function ingredientLines(ingredients) {
+  const thick = t => {
+    const fr = [[0.125, '1/8"'], [0.25, '1/4"'], [0.375, '3/8"'], [0.5, '1/2"'], [0.625, '5/8"'], [0.75, '3/4"'], [1, '1"']].find(([v]) => Math.abs(v - t) < 0.02);
+    return fr ? fr[1] : `${+t.toFixed(3)}"`;
+  };
+  return (ingredients ?? []).map(i => {
+    if (i.kind === 'sheet') {
+      const size = i.w != null ? ` ${+i.w.toFixed(1)} × ${+i.h.toFixed(1)}` : '';
+      const util = i.utilization != null ? `, ${Math.round(i.utilization * 100)}% used` : '';
+      return `${i.count} sheet${i.count > 1 ? 's' : ''} ${thick(i.thickness)}${size}${i.note ? ` (${i.note}${util})` : util ? ` (${util.slice(2)})` : ''}`;
+    }
+    return `${i.qty} × ${i.item}${i.note ? ` (${i.note})` : ''}`;
+  });
+}
+
 // ---- frames: native verbs mounted inside guest geometry -------------
 //
 // An op may PUBLISH frames (`r.frames`: [{ id, cx, cy, rot, w, h }] —
@@ -730,6 +780,9 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   const assemblies = [];
   // published frames (id → {cx, cy, rot, w, h, ctx}) — see applyFrame above
   const frames = {};
+  // the INGREDIENTS LIST — what the shop must have on hand to cut this
+  // (see mergeIngredients below): ops contribute sheets and hardware
+  const ingredients = [];
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
@@ -805,6 +858,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     }
     if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
     for (const f of r.frames ?? []) frames[f.id] = { ...f };
+    for (const ing of r.ingredients ?? []) addIngredient(ingredients, ing, op.id);
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
     // pocket + a smaller-bit rest pass = two tools); each sub-op carries
     // its own tool, moves, and declared target
@@ -1052,11 +1106,18 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     }),
   };
 
+  // a job that declared no sheet of its own is cut from the one board
+  // the stock auto-sized (or the pinned blank / placed sheet)
+  if (!ingredients.some(i => i.kind === 'sheet') && autoStock) {
+    addIngredient(ingredients, { kind: 'sheet', thickness: autoStock.thickness, w: autoStock.w, h: autoStock.h, count: 1,
+      note: autoStock.pinned ? 'the pinned blank' : autoStock.placed ? 'the current board' : 'minimum board, auto-sized to the content' });
+  }
+
   const result = {
     ok: report.ok,
     errors: report.errors,
     warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
-    report, job, composed, rationale,
+    report, job, composed, rationale, ingredients,
     preview: { built, placement, stock: autoStock, shapeOutlines, assemblies },
   };
   if (report.ok) {

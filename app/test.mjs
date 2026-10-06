@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes } from './runtime.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes, ingredientLines } from './runtime.mjs';
 import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError, checkClaims, claimCorrections } from './intent.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
@@ -2681,6 +2681,27 @@ console.log('--- guest mount: register, weave, verify ---');
       },
     },
   };
+  // hardware/sheet-declaring guest: two of them in one pipeline must MERGE
+  // (same sheet → counts add; same item → qty adds; different sheet kept apart)
+  registerCatalogEntries({
+    thin_part: {
+      doc: 'MOCK GUEST: a 1/4" part with two screws',
+      params: { size: { type: 'number', default: 2 }, x0: { type: 'number', default: 0 } },
+      run(p, ctx) {
+        const sz = +p.size || 2, x0 = +p.x0 || 0;
+        const region = { outer: [{ x: x0, y: 0 }, { x: x0 + sz, y: 0 }, { x: x0 + sz, y: sz }, { x: x0, y: sz }], holes: [] };
+        const g = generatePocket(region, { diameter: 0.25 }, { stepoverPct: 40, totalDepth: 0.1, depthPerPass: 0.1, safeZ: ctx.safeZ, feedRate: 80, plungeRate: 30 });
+        return {
+          ops: [{ subName: 'thin', tool: { name: '1/4" endmill', diameter: 0.25 }, cutter: { type: 'flat', diameter: 0.25 }, feedRate: 80, plungeRate: 30, moves: g.moves, target: g.target }],
+          bbox: { minX: x0, minY: 0, maxX: x0 + sz, maxY: sz },
+          ingredients: [
+            { kind: 'sheet', thickness: 0.25, w: 24, h: 48, count: 1, note: 'thin part' },
+            { kind: 'hardware', item: 'wood screws', qty: 2 },
+          ],
+        };
+      },
+    },
+  });
   const added = registerCatalogEntries(mockGuest);
   if (added.length === 1 && CATALOG.two_pads) pass('guest entry registered into the live catalog');
   else fail(`registration failed: ${JSON.stringify(added)}`);
@@ -2699,6 +2720,19 @@ console.log('--- guest mount: register, weave, verify ---');
   const r = run(res.recipe);
   if (r.ok && r.sbp) pass('guest-woven recipe VERIFIED → SBP through the unchanged gate');
   else fail(`guest recipe rejected: ${r.errors?.join(' | ')}`);
+  // ingredients contract: an op that declares no sheet is cut from the
+  // auto-sized board; a guest's hardware rides along, merged by item
+  {
+    const sheets = (r.ingredients ?? []).filter(i => i.kind === 'sheet');
+    if (sheets.length === 1 && sheets[0].count === 1 && Math.abs(sheets[0].w - r.preview.stock.w) < 1e-6 && /auto-sized/.test(sheets[0].note)) pass(`ingredients: the auto-sized board is the one sheet (${sheets[0].w}" × ${sheets[0].h}" × ${sheets[0].thickness}")`);
+    else fail(`ingredients sheet wrong: ${JSON.stringify(sheets)}`);
+    const lines = ingredientLines(r.ingredients);
+    if (lines.length === 1 && /^1 sheet /.test(lines[0])) pass(`ingredient line reads "${lines[0]}"`);
+    else fail(`ingredient lines: ${JSON.stringify(lines)}`);
+    const obs = observationText(buildObservation(res, r, res.recipe));
+    if (/INGREDIENTS \(computed by the app/.test(obs) && obs.includes(lines[0])) pass('the model\'s second look lists the ingredients');
+    else fail('ingredients missing from the observation text');
+  }
   if (r.ok) {
     const asm = r.preview.assemblies?.[0];
     if (asm?.opId === 'pads' && asm.panels?.length === 1 &&
@@ -2757,6 +2791,19 @@ console.log('--- guest mount: register, weave, verify ---');
   const rbf = run(badFrame);
   if (!rbf.ok && rbf.errors[0].includes('no frame "lid"') && rbf.errors[0].includes('face')) {
     pass('unknown frame refused, published frames named');
+  {
+    let rec2 = structuredClone(EMPTY_RECIPE);
+    const res2 = applyActions(rec2, { summary: 'two thin parts', actions: [
+      { kind: 'add_operation', operation: { id: 'a', strategy: 'thin_part', params: { size: 2 } } },
+      { kind: 'add_operation', operation: { id: 'b', strategy: 'thin_part', params: { size: 2, x0: 3 } } },
+    ], declined: [] });
+    const r2 = run(res2.recipe);
+    const ing = r2.ingredients ?? [];
+    const sheet = ing.find(i => i.kind === 'sheet' && Math.abs(i.thickness - 0.25) < 1e-9);
+    const screws = ing.find(i => i.kind === 'hardware' && i.item === 'wood screws');
+    if (r2.ok && sheet?.count === 2 && screws?.qty === 4 && !ing.some(i => i.kind === 'sheet' && i.thickness !== 0.25)) pass(`ingredients merge across ops: ${ingredientLines(ing).join(' | ')}`);
+    else fail(`ingredients merge wrong: ok=${r2.ok} ${JSON.stringify(ing)} ${(r2.errors ?? []).join('|')}`);
+  }
   } else fail(`unknown-frame error wrong: ${rbf.errors?.join(' | ')}`);
   // surface targets can't ride a frame yet — clean refusal, not garbage motion
   const dishFrame = structuredClone(res.recipe);

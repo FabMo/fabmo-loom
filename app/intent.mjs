@@ -11,7 +11,7 @@
 
 import { CATALOG, catalogDoc } from './catalog.mjs';
 import { expandTemplate } from './shape.mjs';
-import { buildVars, buildShapes } from './runtime.mjs';
+import { buildVars, buildShapes, ingredientLines } from './runtime.mjs';
 import { GLYPHS } from './glyphs.mjs';
 
 // ---------------------------------------------------------------- schema
@@ -281,7 +281,7 @@ RULES:
 - CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
 ${STANCE_RULE}
-- SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices.
+- SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices. When the build's INGREDIENTS (in your second look) need more than one stock thickness or any bought hardware, one chip must let the user say what they don't have ("I only have 3/4\" plywood — redesign for one thickness", "no drawer slides — use wood runners"): the ingredients list is a question to the shop, not an order.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
 CURRENT RECIPE:
@@ -788,6 +788,7 @@ export function buildObservation(applyOut, weaveResult, recipe) {
     warnings: (r?.warnings ?? []).map(w => clip(String(w), 300)),
     stock: r?.preview?.stock ? { w: r.preview.stock.w, h: r.preview.stock.h, thickness: r.preview.stock.thickness, pinned: !!r.preview.stock.pinned } : null,
     runTimeMin: stats?.estRunTimeMin ?? null,
+    ingredients: ingredientLines(r?.ingredients ?? []),
     targets,
     awaitingDraw,
     claimIssues: [],   // filled by checkClaims
@@ -815,6 +816,7 @@ export function observationText(obs) {
     if (obs.stock) bits.push(`board ${obs.stock.w}" × ${obs.stock.h}" × ${obs.stock.thickness}"${obs.stock.pinned ? ' (pinned blank)' : ' (auto-sized)'}`);
     if (obs.runTimeMin != null) bits.push(`about ${Math.max(1, Math.round(obs.runTimeMin))} min of machine time`);
     lines.push(bits.join('; '));
+    if (obs.ingredients?.length) lines.push(`INGREDIENTS (computed by the app — what the shop needs on hand; the user may say they lack one, then redesign around what they have): ${obs.ingredients.join('; ')}`);
     const bad = obs.targets.filter(t => t.gouges || t.depthViolations || t.maskViolations || t.intrusionArea);
     if (obs.targets.length) lines.push(`VERIFIER TARGETS: ${obs.targets.length} checked${bad.length ? `; flagged: ${bad.map(t => t.name).join(', ')}` : ', all clean'}`);
   } else {

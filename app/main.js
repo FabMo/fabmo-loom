@@ -4,7 +4,7 @@
 // relayed by the server) emits recipe actions only — no code, no
 // motion. See intent.mjs for the trust boundary.
 
-import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars } from './runtime.mjs';
+import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars, ingredientLines } from './runtime.mjs';
 import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
 import { openDraw, initDraw } from './draw.mjs';
@@ -567,6 +567,19 @@ function whyCurveLine(curve) {
   return `coverage over the drawer: ${curve.map(cell).join(' · ')} — ✓ marks the knee, where a smaller bit stops earning its toolchange`;
 }
 
+// The ingredients list: sheets by thickness and hardware, computed by the
+// weave (runtime addIngredient) — a question to the shop, answered in the
+// prompt box ("I only have 3/4" plywood").
+function ingredientsHtml(r) {
+  const lines = ingredientLines(r.ingredients ?? []);
+  if (!lines.length) return '';
+  const sheets = (r.ingredients ?? []).filter(i => i.kind === 'sheet');
+  const thicknesses = new Set(sheets.map(i => i.thickness));
+  const hw = (r.ingredients ?? []).filter(i => i.kind === 'hardware').reduce((n, i) => n + i.qty, 0);
+  const head = `${sheets.reduce((n, i) => n + i.count, 0)} sheet${sheets.length !== 1 || sheets[0]?.count !== 1 ? 's' : ''}${thicknesses.size > 1 ? ` in ${thicknesses.size} thicknesses` : ''}${hw ? ` · ${hw} hardware item${hw > 1 ? 's' : ''}` : ''}`;
+  return `<details open><summary>ingredients — ${head}</summary>${lines.map(escapeHtml).join('<br>')}<br><small>computed from the layout, not narrated — say what you don't have and the design changes</small></details>`;
+}
+
 function whyHtml(r) {
   const ra = r.rationale;
   if (!ra?.ops?.length) return '';
@@ -609,7 +622,7 @@ function render() {
     const runTxt = runMin >= 90 ? `${(runMin / 60).toFixed(1)} hr` : `${Math.max(1, Math.round(runMin))} min`;
     $('verdictText').textContent = `this exact motion was measured, not assumed · ≈ ${runTxt} on the machine`;
     $('numbers').innerHTML = `<b>${r.report.stats.moveCount.toLocaleString()}</b> moves · <b>${r.report.stats.cutLength}"</b> of cut · ≈ <b>${r.report.stats.estCutTimeMin} min</b> cutting + <b>${r.report.stats.rapidLength}"</b> of jog` +
-      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '') + measurements + whyHtml(r);
+      (r.report.stats.toolchangeCount > 1 ? ` · <b>${r.report.stats.toolchangeCount}</b> tool mounts` : '') + ingredientsHtml(r) + measurements + whyHtml(r);
     const st = r.preview?.stock;
     // sheet-fit tag: the user's declared material wins; 4×8 (96×48, the
     // standard full-size sheet) is the fallback once the board outgrows
