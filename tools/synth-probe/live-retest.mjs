@@ -22,6 +22,7 @@ const { FONTS } = await import(`${LOOM}/app/fonts.mjs`);
 for (const g of [
   '/var/opt/apps/contributors/brian.o/furniture_designer_app/shared/loom-guest.mjs',
   '/var/opt/apps/contributors/brian.o/braille_sign_app/shared/loom-guest.mjs',
+  '/var/opt/apps/contributors/brian.o/furniture_compiler/shared/loom-guest.mjs',
 ]) registerCatalogEntries((await import(g)).entries);
 
 const fonts = {};

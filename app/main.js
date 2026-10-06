@@ -571,6 +571,10 @@ function whyHtml(r) {
   const ra = r.rationale;
   if (!ra?.ops?.length) return '';
   const lines = [];
+  if (recipe.stance?.idiom) {
+    const st = recipe.stance;
+    lines.push(`<b>Stance:</b> ${escapeHtml(st.idiom)}${st.why ? ` — ${escapeHtml(st.why)}` : ''}${st.decisions?.length ? `; so: ${st.decisions.map(escapeHtml).join('; ')}` : ''} <small>(the model's design hypothesis — ask for another idiom to see the same piece differently)</small>`);
+  }
   if (recipe.about) lines.push(`<i>${escapeHtml(recipe.about)}</i> <small>(the design plan, in the model's words — everything below is measured, not narrated)</small>`);
   for (const t of ra.tools) lines.push(whyToolLine(t, ra));
   if (!ra.material) lines.push('feeds are each strategy\'s stock numbers — declare a material in ⚙ Machine &amp; tools to derive them from chipload');
@@ -1237,6 +1241,7 @@ async function generate() {
     // just the chat log) — the why-these-choices panel opens with it as
     // the one narrated line above the deterministic decision record
     if (out.summary?.trim()) recipe.about = out.summary.trim();
+    if (out.stance) recipe.stance = out.stance;   // the design hypothesis the user can argue with
     controlValues = { ...controlDefaults(recipe), ...pickExisting(controlValues, recipe) };
     persist();
     renderControls();

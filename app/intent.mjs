@@ -186,6 +186,16 @@ export const ACTION_TOOL = {
           required: ['what', 'why'],
         },
       },
+      stance: {
+        type: 'object',
+        description: 'The DESIGN STANCE this build takes (every call that builds something new): the idiom you chose for the piece, why it suits THIS ask, and the two concrete decisions that followed from it. A stance is a hypothesis about the user, stated so they can argue with it — it rides into the recipe and the why-these-choices panel.',
+        properties: {
+          idiom: { type: 'string', description: 'the design idiom, named in your own words (a style, a tradition, a maker\'s sensibility, a mood) — chosen for this ask, not from any fixed list' },
+          why: { type: 'string', description: 'one clause: why this idiom suits this ask' },
+          decisions: { type: 'array', items: { type: 'string' }, description: 'exactly two concrete design decisions the idiom produced (a proportion, an overhang or inset, a foot or corner treatment, exposed vs hidden joinery, a handle, an edge, a texture, text placement) — each a short phrase naming the control or feature it became' },
+        },
+        required: ['idiom', 'why', 'decisions'],
+      },
       suggest: {
         type: 'array',
         description: 'Two or three suggested NEXT prompts — shown as clickable chips under this turn. Each is the FULL sentence the user would type, aimed at THIS recipe after these actions, and doable with the listed strategies (never suggest what you would have to decline). Use ___ where the user supplies their own value ("carve ___ in the seat"). MANDATORY: if any action added a feature the user did not ask for (a design move — e.g. a grab handle), one suggestion must offer to change or remove that feature, so the move is visible as a choice. After a decline, suggest the concrete path forward you named in the summary (draw it, upload the SVG).',
@@ -197,6 +207,13 @@ export const ACTION_TOOL = {
 };
 
 // ------------------------------------------------------- grounding prompt
+
+// The design-stance rule (exported so tools/synth-probe/stance-ab.mjs can
+// A/B the prompt with and without it). Deliberately names NO idioms: a
+// list of examples anchored the model on its first two entries in the
+// 2026-10-05 A/B (11 of 20 builds "Scandinavian"); the model knows far
+// more idioms than any list, and the point is a genuine choice per ask.
+export const STANCE_RULE = `- DESIGN STANCE (every build): before authoring, COMMIT to a design idiom for this piece — choose it for THIS ask (the object, who uses it, where it lives) from everything you know about how makers have approached such things, and name it in your own words; never default to the proportions of the worked examples in the catalog docs, and do not reach for the same idiom every time. Let TWO concrete decisions follow from it (overall proportion, overhang or inset, foot or corner treatment, exposed vs hidden joinery, a handle or cutout, an edge or texture, text placement) and build them. Fill the stance field (idiom, why, the two decisions), name the two decisions in the summary so the user can push back on them, and make one suggest chip offer the same piece in a different idiom.`;
 
 // The recipe as shown to the model: asset payloads (base64 images, svg
 // text) are replaced by a byte count — they would drown the prompt and the
@@ -263,6 +280,7 @@ RULES:
 - If the recipe is empty and the user asks for an app, also set_name it.
 - CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
+${STANCE_RULE}
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -707,7 +725,19 @@ export function applyActions(recipe, payload) {
     .map(s => s.trim())
     .filter(s => s.length <= 160)
     .slice(0, 3);
-  return { recipe: next, applied, skipped, declined: declinedList(payload), summary: typeof payload.summary === 'string' ? payload.summary : '', suggest };
+  return { recipe: next, applied, skipped, declined: declinedList(payload), summary: typeof payload.summary === 'string' ? payload.summary : '', suggest, stance: stanceOf(payload) };
+}
+
+// the model's design stance, sanitized like suggest: strings only, trimmed,
+// capped — null when absent or malformed (declines and answers carry none)
+export function stanceOf(payload) {
+  const s = payload?.stance;
+  if (!s || typeof s !== 'object') return null;
+  const str = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : '');
+  const idiom = str(s.idiom, 60);
+  if (!idiom) return null;
+  const decisions = (Array.isArray(s.decisions) ? s.decisions : []).map(d => str(d, 160)).filter(Boolean).slice(0, 3);
+  return { idiom, why: str(s.why, 200), decisions };
 }
 
 
@@ -995,7 +1025,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     cur = out.recipe;
     const turn = {
       payload: p0, applied: out.applied, skipped: out.skipped, declined: out.declined,
-      summary: out.summary, suggest: out.suggest, usage: data.usage ?? null, observation: null,
+      summary: out.summary, suggest: out.suggest, stance: out.stance, usage: data.usage ?? null, observation: null,
     };
     turns.push(turn);
     const hadActions = p0Actions.length > 0;
@@ -1015,6 +1045,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   }
   const first = turns[0], last = turns[turns.length - 1];
   const suggest = last.suggest?.length ? last.suggest : first.suggest;
+  const stance = turns.map(x => x.stance).filter(Boolean).pop() ?? null;   // the build turn's stance (a revise turn may restate it)
   let summary = (typeof last.summary === 'string' ? last.summary : '').trim();
   // never fall back to the FIRST summary once a look has happened — that
   // one was written blind, which is the whole problem
@@ -1098,6 +1129,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     firstSummary: first.summary ?? '',
     declined: dedupeDeclined([...turns.flatMap(x => x.declined ?? []), ...claimDeclines]),
     suggest,
+    stance,                          // { idiom, why, decisions } or null — rides onto recipe.stance
     usage,
     revised: turns.length > 1,
     fixes: turns.slice(1).reduce((n, x) => n + x.applied.length, 0),

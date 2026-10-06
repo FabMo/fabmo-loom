@@ -32,6 +32,7 @@ const { registerCatalogEntries } = await import(`${LOOM}/app/catalog.mjs`);
 const guests = [
   '/var/opt/apps/contributors/brian.o/furniture_designer_app/shared/loom-guest.mjs',
   '/var/opt/apps/contributors/brian.o/braille_sign_app/shared/loom-guest.mjs',
+  '/var/opt/apps/contributors/brian.o/furniture_compiler/shared/loom-guest.mjs',
 ];
 for (const g of guests) {
   const mod = await import(g);
