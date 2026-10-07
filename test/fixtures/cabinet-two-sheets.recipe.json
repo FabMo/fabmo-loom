@@ -1,0 +1,224 @@
+{
+ "version": 2,
+ "name": "Cabinet Box",
+ "stock": {
+  "thickness": 0.75
+ },
+ "margin": 0.375,
+ "controls": [
+  {
+   "id": "w",
+   "type": "number",
+   "label": "Width (in)",
+   "default": 24,
+   "min": 12,
+   "max": 48,
+   "step": 0.5
+  },
+  {
+   "id": "h",
+   "type": "number",
+   "label": "Height (in)",
+   "default": 34.5,
+   "min": 12,
+   "max": 48,
+   "step": 0.5
+  },
+  {
+   "id": "d",
+   "type": "number",
+   "label": "Depth (in)",
+   "default": 23,
+   "min": 10,
+   "max": 30,
+   "step": 0.5
+  },
+  {
+   "id": "kick",
+   "type": "number",
+   "label": "Toe-kick height (in)",
+   "default": 4,
+   "min": 2.5,
+   "max": 6,
+   "step": 0.25
+  },
+  {
+   "id": "kd",
+   "type": "number",
+   "label": "Toe-kick depth (in)",
+   "default": 3,
+   "min": 2,
+   "max": 5,
+   "step": 0.25
+  },
+  {
+   "id": "n",
+   "type": "number",
+   "label": "Shelves",
+   "default": 1,
+   "min": 1,
+   "max": 4,
+   "step": 1
+  }
+ ],
+ "derived": [],
+ "shapes": [],
+ "pipeline": [
+  {
+   "id": "cabinet",
+   "strategy": "furniture_assembly",
+   "params": {
+    "assembly": {
+     "version": 1,
+     "units": "in",
+     "params": {
+      "w": "w",
+      "h": "h",
+      "d": "d",
+      "kick": "kick",
+      "kd": "kd",
+      "n": "n"
+     },
+     "thickness": 0.75,
+     "joinery": {
+      "style": "dado",
+      "tenon_width": 1.5,
+      "tenon_spacing": 6,
+      "edge_margin": 2
+     },
+     "box": [
+      "w",
+      "h",
+      "d"
+     ],
+     "parts": [
+      {
+       "id": "side_l",
+       "axis": "x",
+       "at": "t/2",
+       "y": [
+        0,
+        "h"
+       ],
+       "z": [
+        0,
+        "d"
+       ],
+       "cutouts": [
+        {
+         "y": [
+          0,
+          "kick"
+         ],
+         "z": [
+          "d - kd",
+          "d"
+         ]
+        }
+       ]
+      },
+      {
+       "id": "side_r",
+       "axis": "x",
+       "at": "w - t/2",
+       "y": [
+        0,
+        "h"
+       ],
+       "z": [
+        0,
+        "d"
+       ],
+       "cutouts": [
+        {
+         "y": [
+          0,
+          "kick"
+         ],
+         "z": [
+          "d - kd",
+          "d"
+         ]
+        }
+       ]
+      },
+      {
+       "id": "top",
+       "axis": "y",
+       "at": "h - t/2",
+       "x": [
+        "t/2",
+        "w - t/2"
+       ],
+       "z": [
+        0,
+        "d"
+       ]
+      },
+      {
+       "id": "bottom",
+       "axis": "y",
+       "at": "kick + t/2",
+       "x": [
+        "t/2",
+        "w - t/2"
+       ],
+       "z": [
+        0,
+        "d"
+       ]
+      },
+      {
+       "id": "back",
+       "axis": "z",
+       "at": "t/2",
+       "x": [
+        "t/2",
+        "w - t/2"
+       ],
+       "y": [
+        "kick + t/2",
+        "h - t/2"
+       ]
+      },
+      {
+       "id": "kickboard",
+       "axis": "z",
+       "at": "d - kd - t/2",
+       "x": [
+        "t/2",
+        "w - t/2"
+       ],
+       "y": [
+        0,
+        "kick + t/2"
+       ]
+      },
+      {
+       "kind": "shelves",
+       "count": "n",
+       "between": [
+        "kick + t",
+        "h - t"
+       ],
+       "x": [
+        "t/2",
+        "w - t/2"
+       ],
+       "z": [
+        "t",
+        "d"
+       ],
+       "id": "shelf_{i+1}"
+      }
+     ]
+    },
+    "bitDiameter": 0.25,
+    "tabs": true,
+    "labels": true
+   }
+  }
+ ],
+ "assets": [],
+ "terrains": []
+}

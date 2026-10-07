@@ -47,6 +47,7 @@ function boxBlurGrid(grid, cols, rows, r) {
 // theme — and always in public clones, where no tokens are served — so
 // the wood stays what it is: the material, not a theme surface.
 export function meshTheme() {
+  if (typeof document === 'undefined') return null;   // node tests build layers too
   const css = getComputedStyle(document.body);
   const read = (p, f) => css.getPropertyValue(p).trim() || f;
   if (read('--t-mesh-style', '') !== 'themed') return null;

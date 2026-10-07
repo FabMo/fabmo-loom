@@ -550,7 +550,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.87</span></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.88</span></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -660,6 +660,7 @@
           style="display:none; position:absolute; left:50%; transform:translateX(-50%); bottom:10px; z-index:5; align-items:center; gap:8px; padding:5px 12px; border-radius:999px; background:var(--panel); border:1px solid var(--border); box-shadow:0 1px 6px rgba(0,0,0,.12)">
           <label for="assembleSlider" style="margin:0; white-space:nowrap">assemble</label>
           <input id="assembleSlider" type="range" min="0" max="1" step="0.005" value="0" style="width:180px">
+          <span id="assembleNote" style="white-space:nowrap; font-size:12px; opacity:.8"></span>
         </div>
         <canvas id="preview" width="1160" height="600" style="display:none"></canvas>
         <div id="preview3d"></div>
@@ -680,6 +681,7 @@
       <div id="warnings" class="warnings"></div>
       <div class="step" id="stepCut" style="display:none">
         <div class="step-head"><span class="step-num">3</span><span>Cut it</span></div>
+        <div id="sheetPick" class="numbers" style="display:none; margin-bottom:6px"></div>
         <div class="btns">
           <button id="sendFabmo" class="big" style="display:none" disabled
             title="Queue this verified cut on the connected FabMo — start it from the tool">Send to machine</button>

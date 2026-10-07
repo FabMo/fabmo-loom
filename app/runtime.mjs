@@ -778,6 +778,10 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // Collected op-level and handed to the preview; app/assembly3d.mjs
   // renders it as the parts rising out of the machined board.
   const assemblies = [];
+  // setups manifests: an entry whose layout needs several sheets/fixturings
+  // returns `setups: { count, current, groups }` — the UI's sheet picker
+  // flips the entry's `setup` param through them, one exported file each
+  const setups = [];
   // published frames (id → {cx, cy, rot, w, h, ctx}) — see applyFrame above
   const frames = {};
   // the INGREDIENTS LIST — what the shop must have on hand to cut this
@@ -857,6 +861,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
       if (fe) { errors.push(`op "${op.id}": ${fe.error}`); break; }
     }
     if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
+    if (r.setups) setups.push({ opId: op.id, ...r.setups });
     for (const f of r.frames ?? []) frames[f.id] = { ...f };
     for (const ing of r.ingredients ?? []) addIngredient(ingredients, ing, op.id);
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
@@ -1118,7 +1123,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     errors: report.errors,
     warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
     report, job, composed, rationale, ingredients,
-    preview: { built, placement, stock: autoStock, shapeOutlines, assemblies },
+    preview: { built, placement, stock: autoStock, shapeOutlines, assemblies, setups },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });

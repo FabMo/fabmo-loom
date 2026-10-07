@@ -189,7 +189,19 @@ possible macro-strategy. The contract a guest must satisfy:
    poses tween as rigid motions. Loom renders an "assemble" scrub on the
    3D view blending every panel between its spot in the machined board
    and its assembled pose (app/assembly3d.mjs). Purely visual — the
-   verifier neither sees nor trusts it.
+   verifier neither sees nor trusts it. Two optional refinements: a
+   panel may carry `pockets: [{ ring, depth }]` for BLIND recesses
+   (dados, blind mortises, stopped bores) — the view cuts them `depth`
+   deep from the machined face instead of punching them through, so
+   keep only true through holes in `rings`; and when a layout needs
+   several sheets/fixturings, return EVERY panel with `setup: n`
+   (1-based) and `active: false` on the ones this weave does not cut —
+   the view shows the whole piece with the other sheets' panels ghosted.
+   A multi-sheet entry also returns `setups: { count, current, groups:
+   [[panel ids]…] }`: Loom's sheet picker flips the entry's `setup`
+   param (a bindable number, 1-based) through them and re-weaves, and
+   exported filenames carry `-sheetKofN`. The exported file is always
+   ONE fixturing.
 5. **Optionally, published `frames`** — native verbs mounted on guest
    geometry. `run()` may return `frames: [{ id, cx, cy, rot, w, h }]`
    (e.g. each furniture panel's placed body: center, rotation in

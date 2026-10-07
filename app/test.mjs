@@ -2670,10 +2670,20 @@ console.log('--- guest mount: register, weave, verify ---');
             box: [2 * sz + 0.5, sz, sz],
             panels: [{
               id: 'padA', thickness: 0.2, rings: [square(0).outer],
+              // a blind recess rides as a pocket with its depth (not a through ring)
+              pockets: [{ ring: [{ x: 0.5, y: 0.5 }, { x: 1, y: 0.5 }, { x: 1, y: 1 }, { x: 0.5, y: 1 }], depth: 0.1 }],
               sheet: { x: 0, y: 0 },
               world: { origin: [0, 0, sz], u: [1, 0, 0], v: [0, 0, -1] },
+              setup: 1, active: true,
+            }, {
+              // a panel of ANOTHER sheet: in the piece, not in this board
+              id: 'padB', thickness: 0.2, rings: [square(0).outer],
+              sheet: { x: 0, y: 0 },
+              world: { origin: [0, 0, 0], u: [1, 0, 0], v: [0, 0, -1] },
+              setup: 2, active: false,
             }],
           },
+          setups: { count: 2, current: 1, groups: [['padA'], ['padB']] },
           // frames contract: a clear face beside the pads, TURNED 90°,
           // for native verbs to mount into (see the framed-vcarve checks)
           frames: [{ id: 'face', cx: 2 * sz + 2.5, cy: sz / 2, rot: 90, w: 4, h: 4 }],
@@ -2735,10 +2745,15 @@ console.log('--- guest mount: register, weave, verify ---');
   }
   if (r.ok) {
     const asm = r.preview.assemblies?.[0];
-    if (asm?.opId === 'pads' && asm.panels?.length === 1 &&
-        asm.panels[0].world?.u && Number.isFinite(asm.panels[0].sheet?.x)) {
-      pass('op-level assembly data flows to the preview (assembled-view contract)');
-    } else fail(`assembly passthrough wrong: ${JSON.stringify(asm)?.slice(0, 120)}`);
+    if (asm?.opId === 'pads' && asm.panels?.length === 2 &&
+        asm.panels[0].world?.u && Number.isFinite(asm.panels[0].sheet?.x) &&
+        asm.panels[0].pockets?.[0]?.depth === 0.1 && asm.panels[1].active === false && asm.panels[1].setup === 2) {
+      pass('op-level assembly data flows to the preview (assembled-view contract: pockets + other-sheet panels)');
+    } else fail(`assembly passthrough wrong: ${JSON.stringify(asm)?.slice(0, 160)}`);
+    const sets = r.preview.setups;
+    if (sets?.length === 1 && sets[0].opId === 'pads' && sets[0].count === 2 && sets[0].current === 1 && sets[0].groups[1][0] === 'padB') {
+      pass('setups manifest flows to the preview (sheet-picker contract)');
+    } else fail(`setups passthrough wrong: ${JSON.stringify(sets)}`);
     // baked layout survives: two distinct pads at the guest's offsets
     const sim = simulateJob(r.preview.built, r.preview.placement, r.preview.stock);
     const p2 = r.preview.placement;

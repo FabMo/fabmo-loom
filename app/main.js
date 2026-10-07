@@ -652,6 +652,7 @@ function render() {
   updateSheetChip(r.preview?.stock);
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
+  renderSheetPick(r);
   $('stepCut').style.display = (recipe.pipeline ?? []).length ? '' : 'none';
   renumberSteps();
   updateFabmoSend();
@@ -800,6 +801,12 @@ function syncAssembly(pre, stock) {
   if (!asms.length) { assemblyBlend = 0; $('assembleSlider').value = '0'; return; }
   assemblyLayer = buildAssemblyLayer(asms, pre.placement ?? { x: 0, y: 0 }, stock);
   view3d.scene.add(assemblyLayer.group);
+  // a multi-sheet piece: the panels of the OTHER sheets are not in this
+  // board — they fade in ghosted as the piece assembles; say so
+  const sheetInfo = pre.setups?.[0];
+  $('assembleNote').textContent = assemblyLayer.ghostCount && sheetInfo
+    ? `sheet ${sheetInfo.current} of ${sheetInfo.count} in the board · faded panels cut on the other sheet${sheetInfo.count > 2 ? 's' : ''}`
+    : '';
   $('assembleSlider').value = String(assemblyBlend);
   assemblyLayer.setBlend(assemblyBlend);
   window.loomAssembly = { layer: assemblyLayer, blend: () => assemblyBlend, introPlaying: () => assemblyIntroRaf !== 0 };   // test handle
@@ -1465,8 +1472,51 @@ $('saveKey').addEventListener('click', () => {
   const v = $('apiKey').value.trim();
   if (v) { localStorage.setItem('loom:apiKey', v); addTurn('Key saved to this browser.'); }
 });
-$('dlSbp').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.sbp`, result.sbp));
-$('dlNc').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.nc`, result.gcode));
+$('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
+$('dlNc').addEventListener('click', () => result?.ok && download(`${exportStem()}.nc`, result.gcode));
+
+// ---- sheets: a layout that needs several sheets/fixturings cuts ONE per
+// weave (the exported file IS one fixturing). The entry reports a setups
+// manifest; this picker flips its `setup` param (or the control it is
+// bound to) and re-weaves, so each sheet's cuts export in turn. The
+// assembled view keeps showing the whole piece throughout.
+function exportStem() {
+  const s = result?.preview?.setups?.[0];
+  return slug(recipe.name) + (s ? `-sheet${s.current}of${s.count}` : '');
+}
+function sheetLabel() {
+  const s = result?.preview?.setups?.[0];
+  return s ? ` — sheet ${s.current} of ${s.count}` : '';
+}
+window.loomSheets = { stem: exportStem, label: sheetLabel };   // test handle
+function renderSheetPick(r) {
+  const el = $('sheetPick');
+  const sets = r?.preview?.setups ?? [];
+  if (!sets.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = sets.map((s) => {
+    const here = s.groups[s.current - 1] ?? [];
+    const buttons = s.groups.map((ids, i) =>
+      `<button class="small${i + 1 === s.current ? '' : ' ghost'}" data-op="${escapeHtml(s.opId)}" data-sheet="${i + 1}" title="${escapeHtml(ids.join(', '))}">Sheet ${i + 1} · ${ids.length} panel${ids.length === 1 ? '' : 's'}</button>`).join('');
+    return `<div style="display:flex; flex-wrap:wrap; align-items:center; gap:6px">` +
+      `<span>${sets.length > 1 ? escapeHtml(s.opId) + ': ' : ''}this file cuts <b>sheet ${s.current} of ${s.count}</b> — ${escapeHtml(here.join(', '))}. Cut each sheet from fresh stock:</span>` +
+      `<span style="display:inline-flex; gap:4px">${buttons}</span></div>`;
+  }).join('');
+}
+$('sheetPick').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-sheet]');
+  if (!b) return;
+  const op = recipe.pipeline.find((o) => o.id === b.dataset.op);
+  if (!op) return;
+  const k = parseInt(b.dataset.sheet, 10);
+  op.params ??= {};
+  const bound = op.params.setup;
+  if (bound && typeof bound === 'object' && typeof bound.ctrl === 'string') controlValues[bound.ctrl] = k;
+  else op.params.setup = k;
+  persist();
+  renderControls();
+  runAndRender();
+});
 $('addAsset').addEventListener('click', () => $('assetFile').click());
 // Open the draw dialog. `prefer` aims it at one recipe drawing: its name
 // pre-filled while undrawn, its asset preselected for replacement once
@@ -1815,8 +1865,8 @@ $('fabmoScan').addEventListener('click', async () => {
 function fabmoJobFile() {
   return {
     content: result.sbp,
-    filename: `${slug(recipe.name)}.sbp`,
-    name: recipe.name,
+    filename: `${exportStem()}.sbp`,
+    name: recipe.name + sheetLabel(),
     description: 'Woven and verified by FabMo Loom',
   };
 }
@@ -1842,8 +1892,8 @@ async function weavePositionedOnBoard() {
     at,
     file: {
       content: placed.sbp,
-      filename: `${slug(recipe.name)}-on-sheet.sbp`,
-      name: `${recipe.name} @ ${at}`,
+      filename: `${exportStem()}-on-sheet.sbp`,
+      name: `${recipe.name}${sheetLabel()} @ ${at}`,
       description: 'Positioned on the current board — woven and verified by FabMo Loom',
     },
     commit() {
