@@ -401,6 +401,25 @@
       flex-wrap: wrap;
     }
 
+    .prompt-image {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 8px;
+      font-size: .85rem;
+      color: var(--mut);
+    }
+    .prompt-image img {
+      flex: 0 0 auto;
+      width: 56px;
+      height: 56px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .prompt-image span { flex: 1; min-width: 0; }
+    textarea.drop-target { outline: 2px dashed var(--btn-bg); outline-offset: 2px; }
+
     #appName {
       font-size: 1.05rem;
       font-weight: 700;
@@ -561,8 +580,18 @@
     <section class="panel">
       <label for="prompt">What should the app do?</label>
       <textarea id="prompt" placeholder='e.g. "an app to engrave names"'></textarea>
+      <!-- A picture of what they want (photo, rendering, sketch) rides with
+           the prompt as the model's eyes; it is NOT a recipe asset — it is
+           never stored, only sent with this turn. -->
+      <div id="promptImageStrip" class="prompt-image" style="display:none">
+        <img id="promptImageThumb" alt="attached picture">
+        <span id="promptImageNote">Picture attached — the picture decides the shape, your words decide the sizes. Add the overall dimensions.</span>
+        <button id="promptImageClear" class="ghost small" type="button" title="Remove the picture">✕</button>
+      </div>
       <div class="btns">
         <button id="generate">Generate</button>
+        <button id="attachPicture" class="ghost" type="button" title="Attach a picture of what you want — a photo, a rendering, a sketch. Paste or drop one here too."><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:5px"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>Picture</button>
+        <input type="file" id="promptImageFile" accept="image/*" style="display:none">
         <button id="whatBtn" class="big ghost" title="How Loom works, and example apps to load">What is this?</button>
         <button id="reset" class="ghost small">Start over</button>
       </div>

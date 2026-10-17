@@ -1208,8 +1208,54 @@ async function parseViaGuestPass(req, invite) {
   return payload.data;
 }
 
+// ---------------------------------------------------------------- picture
+// A picture attached to the prompt: fitted to 1568px (the API's own
+// ceiling — a phone photo would only cost upload time and tokens past it)
+// via the same canvas path the asset uploader uses, held in memory for one
+// Generate, never persisted into the recipe or localStorage.
+let promptImage = null;   // { media_type, data, previewUrl, width, height } | null
+
+function setPromptImage(img) {
+  promptImage = img;
+  $('promptImageStrip').style.display = img ? 'flex' : 'none';
+  $('promptImageThumb').src = img ? img.previewUrl : '';
+  $('attachPicture').classList.toggle('active', !!img);
+  $('prompt').placeholder = img ? 'e.g. "71 5/8 wide, 16 1/2 tall, 15 3/8 deep — 3/4 plywood"' : 'e.g. "an app to engrave names"';
+}
+
+async function takePromptImage(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  try {
+    const { data, width, height } = await imageToDataUrl(file, 1568);
+    const comma = data.indexOf(',');
+    const media_type = /^data:(image\/\w+)/.exec(data)?.[1] ?? 'image/png';
+    setPromptImage({ media_type, data: data.slice(comma + 1), previewUrl: data, width, height });
+  } catch (e) {
+    addTurn(/hei[cf]/i.test(file.type + file.name) ? 'HEIC photos can\'t be read by the browser — export it as JPEG first.' : escapeHtml(e.message), true);
+  }
+}
+
+$('attachPicture').addEventListener('click', () => $('promptImageFile').click());
+$('promptImageFile').addEventListener('change', (e) => { takePromptImage(e.target.files?.[0]); e.target.value = ''; });
+$('promptImageClear').addEventListener('click', () => setPromptImage(null));
+$('prompt').addEventListener('paste', (e) => {
+  const item = [...(e.clipboardData?.items ?? [])].find(i => i.type.startsWith('image/'));
+  if (item) { e.preventDefault(); takePromptImage(item.getAsFile()); }
+});
+for (const ev of ['dragenter', 'dragover']) {
+  $('prompt').addEventListener(ev, (e) => { if ([...(e.dataTransfer?.types ?? [])].includes('Files')) { e.preventDefault(); $('prompt').classList.add('drop-target'); } });
+}
+$('prompt').addEventListener('dragleave', () => $('prompt').classList.remove('drop-target'));
+$('prompt').addEventListener('drop', (e) => {
+  $('prompt').classList.remove('drop-target');
+  const file = [...(e.dataTransfer?.files ?? [])].find(f => f.type.startsWith('image/'));
+  if (file) { e.preventDefault(); e.stopPropagation(); takePromptImage(file); }
+});
+
 async function generate() {
-  const utterance = $('prompt').value.trim();
+  const typed = $('prompt').value.trim();
+  const image = promptImage ? { media_type: promptImage.media_type, data: promptImage.data } : null;
+  const utterance = typed || (image ? 'Build what is in this picture.' : '');
   if (!utterance || busy) return;
   if (utterance.includes(BLANK)) {
     selectBlank();
@@ -1240,7 +1286,7 @@ async function generate() {
     // callback is the app's own weave path (worker + resolved terrains),
     // so what the model is told is exactly what the user would see.
     const out = await runIntentLoop({
-      recipe, utterance, shop, model: currentModel(),
+      recipe, utterance, shop, model: currentModel(), image,
       call: (req) => { if (calls++ > 0) stopWeave.setLabel?.(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
         stopWeave.setLabel?.('weaving…');
@@ -1290,6 +1336,9 @@ async function generate() {
         },
         usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
         context: parseContext,
+        // the picture itself is never logged — only that there was one, so
+        // a replay knows this parse cannot be reproduced from text alone
+        ...(promptImage ? { image: { attached: true, width: promptImage.width, height: promptImage.height } } : {}),
       }),
     });
 
@@ -1305,7 +1354,8 @@ async function generate() {
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
     const skipped = lastTurn.skipped.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';
-    const turnEl = addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}`);
+    const pic = promptImage ? `<img src="${promptImage.previewUrl}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:6px">` : '';
+    const turnEl = addTurn(`<div class="you">» ${pic}${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}`);
 
     // the funnel's query id, pinned to the turn: "quote this when something
     // came out wrong" — replayable server-side with intent/replay.mjs
@@ -1323,6 +1373,7 @@ async function generate() {
       turnEl.append(chip);
     }).catch(() => {});
     $('prompt').value = '';
+    setPromptImage(null);   // one picture, one turn — the recipe now carries what it taught
   } catch (e) {
     addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
   } finally {

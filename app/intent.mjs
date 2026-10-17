@@ -226,7 +226,13 @@ export function promptRecipeView(recipe) {
   };
 }
 
-export function buildSystemPrompt(recipe, shop = {}) {
+// When the user attached a picture (a photo, rendering or sketch of what
+// they want): the model's eyes, with the division of labour spelled out —
+// the picture decides WHAT and in what proportion, the text decides the
+// numbers. Same stance as the furniture app's Weave box.
+const PICTURE_RULE = `- FROM A PICTURE: the user attached an image of what they want. Read it like a shop designer handed a photo and a tape-measure note. The PICTURE decides kind, structure and proportion (a 5-bay cube unit two rows high; a plaque with a name over a symbol; a bench with a stretcher). The TEXT decides the numbers — perspective makes pixel measurement worthless, so never derive a dimension from the picture when the user stated one; use it for RATIOS scaled to the stated size, and when nothing is stated choose real-world sizes and SAY in the summary that they are guesses. Reinterpret into this catalog, don't transcribe: a dowelled or face-framed cabinet becomes a furniture_design in tenoned panels; add what the picture hides but the piece needs (a back, a stretcher) and name the addition in the summary. A recognizable likeness, a logo or lettering style in the picture still cannot be traced from it (the likeness rule above holds — offer draw or an SVG upload); curves, turned legs, moulding and hardware go to declined. Finish the summary with one line starting "Assumed:" listing every number or part you guessed, specific enough to check with a tape measure.`;
+
+export function buildSystemPrompt(recipe, shop = {}, { hasImage = false } = {}) {
   // the user's declared physical limits (app settings, not the recipe) —
   // grounding the model in what the shop can actually cut turns "make it
   // fit my machine" from a guess into arithmetic
@@ -280,7 +286,7 @@ RULES:
 - If the recipe is empty and the user asks for an app, also set_name it.
 - CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
-${STANCE_RULE}
+${STANCE_RULE}${hasImage ? `\n${PICTURE_RULE}` : ''}
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices. When the build's INGREDIENTS (in your second look) need more than one stock thickness or any bought hardware, one chip must let the user say what they don't have ("I only have 3/4\" plywood — redesign for one thickness", "no drawer slides — use wood runners"): the ingredients list is a question to the shop, not an order.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -322,15 +328,27 @@ export function withAutoToolChoice(req) {
   };
 }
 
-export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {} } = {}) {
+// What the user is taken to have said when they attach a picture and
+// type nothing.
+export const DEFAULT_IMAGE_UTTERANCE = 'Build what is in this picture.';
+
+// image (optional): { media_type: 'image/jpeg'|'image/png'|'image/gif'|
+// 'image/webp', data: <base64, no data: prefix> }. It rides as the first
+// content block of the first user turn, so every revise turn (which
+// re-sends the conversation) keeps it in view.
+export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null } = {}) {
+  const text = (utterance ?? '').trim() || (image ? DEFAULT_IMAGE_UTTERANCE : utterance);
+  const content = image
+    ? [{ type: 'image', source: { type: 'base64', media_type: image.media_type, data: image.data } }, { type: 'text', text }]
+    : text;
   const req = {
     model,
     // generous: geometry-heavy builds (multi-shape recipes, big edits)
     // were hitting 2000 and truncating mid-action-list, which reads as a
     // silent half-build — the app also surfaces stop_reason max_tokens
     max_tokens: 8000,
-    system: buildSystemPrompt(recipe, shop),
-    messages: [{ role: 'user', content: utterance }],
+    system: buildSystemPrompt(recipe, shop, { hasImage: !!image }),
+    messages: [{ role: 'user', content }],
     tools: [ACTION_TOOL],
     tool_choice: { type: 'tool', name: 'apply_recipe_actions' },
   };
@@ -976,11 +994,11 @@ const dedupeDeclined = (list) => {
 // Returns { recipe, turns, summary, firstSummary, declined, suggest, usage,
 //           revised, fixes } — turns[i] carries payload/applied/skipped/
 //           observation for logging and measurement.
-export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always' }) {
+export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null }) {
   const turns = [];
   // Anthropic's usage fields, summed across calls (the probe prices from them)
   const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop });
+  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop, image });
   let cur = recipe;
   const cap = mode === 'off' ? 1 : Math.max(1, maxTurns);
   for (let t = 0; t < cap; t++) {

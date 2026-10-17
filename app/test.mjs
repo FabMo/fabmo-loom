@@ -256,6 +256,29 @@ console.log('--- buildParseRequest ---');
   else fail(`default model/request: ${req.model} ${JSON.stringify(req.tool_choice)}`);
 }
 
+console.log('--- buildParseRequest with a picture ---');
+{
+  const img = { media_type: 'image/jpeg', data: 'AAAA' };
+  const req = buildParseRequest(structuredClone(EMPTY_RECIPE), '', { image: img });
+  const c = req.messages[0].content;
+  if (Array.isArray(c) && c[0]?.type === 'image' && c[0].source?.data === 'AAAA' && c[0].source?.media_type === 'image/jpeg'
+      && c[1]?.type === 'text' && c[1].text === 'Build what is in this picture.') pass('picture rides first in the user turn; empty text gets the default utterance');
+  else fail(`picture request content: ${JSON.stringify(c).slice(0, 200)}`);
+  if (/FROM A PICTURE/.test(req.system) && /Assumed:/.test(req.system)) pass('system prompt carries the picture rule only when a picture is attached');
+  else fail('picture rule missing from system prompt');
+  if (!/FROM A PICTURE/.test(buildParseRequest(structuredClone(EMPTY_RECIPE), 'a sign').system)) pass('no picture → no picture rule');
+  else fail('picture rule leaked into a text-only request');
+  const withText = buildParseRequest(structuredClone(EMPTY_RECIPE), '30 wide', { image: img });
+  if (withText.messages[0].content[1].text === '30 wide') pass('typed text wins over the default utterance');
+  else fail('typed text lost');
+  // the revise turn re-sends the conversation — the picture must still be in it
+  const blank = structuredClone(EMPTY_RECIPE);
+  const obs = buildObservation(applyActions(blank, { actions: [] }), null, blank);
+  const revised = buildReviseRequest(req, [{ type: 'tool_use', id: 'tu1', name: 'apply_recipe_actions', input: {} }], 'tu1', obs);
+  if (revised.messages[0].content[0].type === 'image') pass('the picture stays in view on the revise turn');
+  else fail('revise turn dropped the picture');
+}
+
 // ---------------- 8b. the closed loop: act → observe → revise ----------------
 // The model's second look is driven by a scripted fake `call`, so the
 // whole act/observe/revise choreography tests offline: what the model is
