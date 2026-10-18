@@ -261,6 +261,9 @@ function render() {
   }
   $('errors').textContent = (r?.ok || !r) ? '' : (r.errors ?? []).join('\n');
   $('dlSbp').disabled = !r?.ok;
+  const su = pre?.setups?.[0];
+  $('dlSbp').textContent = su && su.count > 1 ? `Download .sbp (${su.current} of ${su.count})` : 'Download .sbp';
+  renderSheetPicker();
 
   // the 3D view — a refused weave still shows whatever built, on the board
   view3d ??= createView3D($('view3d'), { width: 1000, height: 1000 });
@@ -347,6 +350,26 @@ const AXES = [
   { key: 'H', re: /height|tall|high/i },
   { key: 'D', re: /depth|deep/i },
 ];
+// Counts the model exposed — drawers, cubbies, columns, rows, shelves —
+// are the integer-step controls (every count the model has authored so
+// far is step 1; every size is fractional). The sheet-to-cut control is
+// its own thing: a picker, not a slider (see sheetControl).
+function countControls(rec, exclude = new Set()) {
+  return (rec.controls ?? []).filter(c => c.type === 'number' && !exclude.has(c.id)
+    && c.id !== sheetControl(rec)?.id && Number(c.step) === 1 && Number.isInteger(Number(c.default ?? 0)));
+}
+// the control bound to a pipeline op's `setup` param (the sheet to cut when
+// a layout needs several), or a control plainly named setup
+function sheetControl(rec) {
+  for (const op of rec.pipeline ?? []) {
+    const b = op.params?.setup;
+    const id = b && typeof b === 'object' ? b.ctrl : (typeof b === 'string' ? b : null);
+    const c = id && (rec.controls ?? []).find(c => c.id === id);
+    if (c) return c;
+  }
+  return (rec.controls ?? []).find(c => c.id === 'setup') ?? null;
+}
+
 function sizeControls(rec) {
   const numeric = (rec.controls ?? []).filter(c => c.type === 'number');
   const byId = Object.fromEntries(numeric.map(c => [c.id, c]));
@@ -370,14 +393,24 @@ let sliderTimer = 0;
 function renderSliders() {
   const wrap = $('sliders');
   wrap.innerHTML = '';
-  for (const c of sizeControls(recipe)) {
+  const sizes = sizeControls(recipe);
+  const counts = countControls(recipe, new Set(sizes.map(c => c.id)));
+  const slider = (c, cls = '') => {
     const v = controlValues[c.id] ?? c.default ?? 0;
     const min = c.min ?? Math.max(0.5, v / 2), max = c.max ?? v * 2, step = c.step ?? 0.25;
     const div = document.createElement('div');
-    div.className = 'slider';
+    div.className = `slider ${cls}`.trim();
     div.innerHTML = `<div class="top"><span>${escapeHtml(c.label ?? c.id)}</span><b data-for="${escapeHtml(c.id)}">${fmt(v)}</b></div>
       <input type="range" min="${min}" max="${max}" step="${step}" value="${v}" data-id="${escapeHtml(c.id)}" aria-label="${escapeHtml(c.label ?? c.id)}">`;
     wrap.appendChild(div);
+  };
+  sizes.forEach(c => slider(c));
+  if (counts.length) {
+    const h = document.createElement('div');
+    h.className = 'group';
+    h.textContent = 'counts';
+    wrap.appendChild(h);
+    counts.forEach(c => slider(c, 'count'));
   }
   wrap.oninput = (e) => {
     const inp = e.target.closest('input[type=range]');
@@ -388,6 +421,32 @@ function renderSliders() {
     clearTimeout(sliderTimer);
     sliderTimer = setTimeout(() => { persist(); runAndRender(); }, 120);
   };
+}
+
+// ---------------------------------------------------------- sheet picker
+// A piece that needs several sheets exports ONE fixturing at a time (the
+// guest contract). The model's "Sheet / setup to cut" control picks which;
+// the summary tells people to use it, so it has to be on the screen.
+function renderSheetPicker() {
+  const wrap = $('sheets');
+  const s = result?.preview?.setups?.[0];
+  const ctl = sheetControl(recipe);
+  if (!s || !(s.count > 1) || !ctl) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  wrap.style.display = 'block';
+  const cur = Number(controlValues[ctl.id] ?? s.current);
+  wrap.innerHTML = `<div class="top"><span>sheet to cut</span><span class="muted">${s.count} sheets · the file holds one</span></div>
+    <div class="seg">${Array.from({ length: s.count }, (_, i) => `<button type="button" data-sheet="${i + 1}" class="${i + 1 === cur ? 'on' : ''}">${i + 1}</button>`).join('')}</div>`;
+  wrap.onclick = (e) => {
+    const b = e.target.closest('button[data-sheet]');
+    if (!b) return;
+    controlValues[ctl.id] = Number(b.dataset.sheet);
+    persist();
+    runAndRender();
+  };
+}
+function exportStem() {
+  const s = result?.preview?.setups?.[0];
+  return slug(recipe.name) + (s && s.count > 1 ? `-sheet${s.current}of${s.count}` : '');
 }
 
 // --------------------------------------------------------------- build
@@ -481,7 +540,7 @@ function download(name, content, type = 'text/plain') {
   URL.revokeObjectURL(a.href);
 }
 const slug = (t) => (t ?? '').trim().replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'loom';
-$('dlSbp').addEventListener('click', () => result?.ok && download(`${slug(recipe.name)}.sbp`, result.sbp));
+$('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
 $('reset').addEventListener('click', () => {
   cancelIntro();
   recipe = structuredClone(EMPTY_RECIPE);
@@ -490,6 +549,7 @@ $('reset').addEventListener('click', () => {
   try { localStorage.removeItem(STATE_KEY); } catch {}
   $('result').style.display = 'none';
   $('sliders').innerHTML = '';
+  $('sheets').innerHTML = ''; $('sheets').style.display = 'none';
   $('about').textContent = ''; $('declined').innerHTML = '';
   $('clearPhoto').click();
   updateBuildLabel();

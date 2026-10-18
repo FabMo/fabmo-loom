@@ -66,6 +66,12 @@
     input[type=range] { width: 100%; accent-color: var(--navy); height: 32px; margin: 0; }
     #assemble { accent-color: var(--ok); }
     #assembleWrap { display: none; }
+    .group { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 16px 2px 0; }
+    .slider.count input[type=range] { accent-color: var(--ok); }
+    .muted { color: var(--muted); font-size: 13px; }
+    .seg { display: flex; gap: 6px; margin-top: 4px; }
+    .seg button { flex: 1; min-height: 40px; padding: 6px 0; border-radius: 10px; font-weight: 600; }
+    .seg button.on { background: var(--navy); color: #fff; border-color: var(--navy); }
     #assembleWrap .top span { color: var(--muted); font-size: 13px; }
     details.about { margin-top: 10px; font-size: 14px; }
     details.about summary { cursor: pointer; color: var(--muted); font-size: 13px; }
@@ -128,6 +134,7 @@
     <div class="status"><span class="badge" id="badge">—</span><span id="numbers"></span></div>
     <div id="errors"></div>
     <div id="sliders"></div>
+    <div class="slider" id="sheets" style="display:none"></div>
     <div class="slider" id="assembleWrap">
       <div class="top"><span>flat on the board ↔ assembled</span></div>
       <input id="assemble" type="range" min="0" max="1" step="0.01" value="0">
@@ -140,7 +147,7 @@
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.92</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.93</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>
