@@ -14,6 +14,7 @@ import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
+import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
@@ -1289,12 +1290,16 @@ async function generate() {
     // own key wins when both exist: unlimited beats metered
     const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
     let calls = 0;
+    // Worked examples: past verified builds for a similar ask, retrieved
+    // locally from app/exemplars.json. Fresh builds only — an edit of an
+    // existing design would be misled by whole-build examples.
+    const exemplars = recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
     // The closed loop: parse → apply → weave → the model sees the result
     // and corrects / writes the final summary (see intent.mjs). The weave
     // callback is the app's own weave path (worker + resolved terrains),
     // so what the model is told is exactly what the user would see.
     const out = await runIntentLoop({
-      recipe, utterance, shop, model: currentModel(), image,
+      recipe, utterance, shop, model: currentModel(), image, exemplars,
       call: (req) => { if (calls++ > 0) stopWeave.setLabel?.(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
         stopWeave.setLabel?.('weaving…');
@@ -1335,6 +1340,7 @@ async function generate() {
         utterance,
         intent: {
           summary: out.summary, actions: actionList(firstTurn.payload), declined: out.declined, suggest: out.suggest,
+          exemplars: exemplars.map(e => e.key),
           loop: {
             turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack,
             claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
@@ -2245,6 +2251,7 @@ async function loadGuests() {
 }
 
 (async function boot() {
+  loadExemplars();   // worked-example index, fetched once in the background so the first build has it
   const loaded = {};
   await Promise.all(FONTS.map(async (f) => {
     const res = await fetch(f.file);

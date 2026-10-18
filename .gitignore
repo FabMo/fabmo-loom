@@ -13,3 +13,6 @@ tools/synth-probe/runs/
 tools/synth-probe/funnel-cursor.json
 # real photos dropped in for the picture lane (photo-pick.mjs)
 tools/synth-probe/photos.local/
+# worked-example index, generated from corpus.jsonl by exemplars-build.mjs (nightly)
+app/exemplars.json
+app/exemplars.json.gz

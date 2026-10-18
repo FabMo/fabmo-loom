@@ -298,6 +298,9 @@ if (tri.shippedRegressions?.length) attention.push(`SHIPPED-class regression: ${
 if (results.length) log(runNode('corpus-add.mjs', `./runs/${DAY}-results.jsonl`, DAY).out.trim().replace('\n', ' | '));
 if (photoRows.length) log(runNode('corpus-add.mjs', `./runs/${DAY}-photo-results.jsonl`, `${DAY}-photo`).out.trim().replace('\n', ' | '));
 if (funnelRows.length) log(runNode('corpus-add.mjs', `./runs/funnel-${DAY}.jsonl`, `funnel-${DAY}`).out.trim().replace('\n', ' | '));
+// the worked-example index the app and the probe retrieve from grows with the corpus
+try { log(runNode('exemplars-build.mjs').out.trim().split('\n')[0]); }
+catch (e) { log(`exemplars-build skipped: ${String(e?.message ?? e).slice(0, 120)}`); }
 
 // ---- 6b. refresh the fix-prompt queue (deterministic, no model call) ------
 // Still measurement: autoprompt.mjs only writes briefs under runs/fix-prompts/

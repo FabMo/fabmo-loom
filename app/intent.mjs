@@ -13,6 +13,7 @@ import { CATALOG, catalogDoc } from './catalog.mjs';
 import { expandTemplate } from './shape.mjs';
 import { buildVars, buildShapes, ingredientLines } from './runtime.mjs';
 import { GLYPHS } from './glyphs.mjs';
+import { exemplarBlock } from './exemplars.mjs';
 
 // ---------------------------------------------------------------- schema
 
@@ -336,10 +337,18 @@ export const DEFAULT_IMAGE_UTTERANCE = 'Build what is in this picture.';
 // 'image/webp', data: <base64, no data: prefix> }. It rides as the first
 // content block of the first user turn, so every revise turn (which
 // re-sends the conversation) keeps it in view.
-export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null } = {}) {
+// exemplars (optional): rows from pickExemplars() — past verified builds
+// for a similar ask. They ride in the FIRST USER TURN, before the ask, so
+// the system prompt (cached across calls) does not vary per request.
+export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null, exemplars = null } = {}) {
   const text = (utterance ?? '').trim() || (image ? DEFAULT_IMAGE_UTTERANCE : utterance);
-  const content = image
-    ? [{ type: 'image', source: { type: 'base64', media_type: image.media_type, data: image.data } }, { type: 'text', text }]
+  const examples = exemplarBlock(exemplars);
+  const content = image || examples
+    ? [
+      ...(image ? [{ type: 'image', source: { type: 'base64', media_type: image.media_type, data: image.data } }] : []),
+      ...(examples ? [{ type: 'text', text: examples }] : []),
+      { type: 'text', text },
+    ]
     : text;
   const req = {
     model,
@@ -1001,11 +1010,11 @@ const dedupeDeclined = (list) => {
 // Returns { recipe, turns, summary, firstSummary, declined, suggest, usage,
 //           revised, fixes } — turns[i] carries payload/applied/skipped/
 //           observation for logging and measurement.
-export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null }) {
+export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null, exemplars = null }) {
   const turns = [];
   // Anthropic's usage fields, summed across calls (the probe prices from them)
   const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop, image });
+  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop, image, exemplars });
   let cur = recipe;
   const cap = mode === 'off' ? 1 : Math.max(1, maxTurns);
   for (let t = 0; t < cap; t++) {

@@ -24,6 +24,7 @@ import { buildAssemblyLayer } from './assembly3d.mjs';
 import { simulateJob } from './sim.mjs';
 import { startWeave, LOGO_PALETTE } from './weave.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
+import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { loadToolLibrary } from '../ir/tools.js';
 import * as THREE from 'three';
 
@@ -577,8 +578,10 @@ async function generate() {
     const parseContext = structuredClone(promptRecipeView(recipe));
     const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
     let calls = 0;
+    // worked examples from past verified builds (fresh builds only; see main.js)
+    const exemplars = recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
     const out = await runIntentLoop({
-      recipe, utterance, shop: {}, model: currentModel(), image,
+      recipe, utterance, shop: {}, model: currentModel(), image, exemplars,
       call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
         stage('weaving…');
@@ -609,6 +612,7 @@ async function generate() {
       body: JSON.stringify({
         app: 'loom', utterance,
         intent: { summary: out.summary, actions: actionList(out.turns[0].payload), declined: out.declined, suggest: out.suggest, surface: 'mobile',
+          exemplars: exemplars.map(e => e.key),
           loop: { turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack } },
         usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
         context: parseContext,
@@ -671,6 +675,7 @@ async function loadGuests() {
   return list;
 }
 (async function boot() {
+  loadExemplars();   // worked-example index, fetched once in the background so the first build has it
   const restored = loadState();
   updateBuildLabel();
   if (!haveAuth()) showAuth(true);

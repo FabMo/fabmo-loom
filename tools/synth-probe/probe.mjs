@@ -32,6 +32,11 @@ const PROMPTS = promptsPath.endsWith('.json')
 const LOOM = '/var/opt/apps/contributors/brian.o/fabmo-loom';
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
 const { runIntentLoop, actionList, DEFAULT_IMAGE_UTTERANCE } = await import(`${LOOM}/app/intent.mjs`);
+const { pickExemplars } = await import(`${LOOM}/app/exemplars.mjs`);
+// the worked-example index the app retrieves from (exemplars-build.mjs);
+// EXEMPLARS=off measures the model without it
+const EXEMPLARS = process.env.EXEMPLARS === 'off' || !existsSync(`${LOOM}/app/exemplars.json`)
+  ? [] : JSON.parse(readFileSync(`${LOOM}/app/exemplars.json`, 'utf8'));
 // LOOP=always|trouble|off — the closed loop is the default; 'off' is the
 // pre-loop one-shot behavior, kept so the two can be measured side by side
 const LOOP_MODE = ['always', 'trouble', 'off'].includes(process.env.LOOP) ? process.env.LOOP : 'always';
@@ -125,9 +130,14 @@ async function probe(p) {
     const t0 = Date.now();
     const weaveRec = (r) => quiet(() => runRecipe(r, controlDefaults(r), FONT_SHELF, syntheticGrids(r)));
     let out;
+    // worked examples exactly as the app retrieves them — minus this very
+    // prompt, so a re-probe is never handed its own previous answer
+    const exemplars = EXEMPLARS.length
+      ? pickExemplars(EXEMPLARS, p.prompt || DEFAULT_IMAGE_UTTERANCE, { hasImage: !!image, exclude: [p.prompt, p.id] }) : [];
+    rec.exemplars = exemplars.map(e => e.key);
     try {
       out = await runIntentLoop({
-        recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE, image,
+        recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE, image, exemplars,
         call: callModel,
         weave: async (r) => weaveRec(r),
       });

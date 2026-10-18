@@ -76,6 +76,15 @@ machine with a real spindle. These rules are not style preferences.
   checked against the recipe, never against its own words — add a check
   there when a new class of confident-but-false promise shows up in the
   ledger, and keep the summary lint precise (it runs on every turn).
+- `app/exemplars.mjs` — worked examples for the model: past VERIFIED
+  builds retrieved lexically (BM25 + subject class) from
+  `app/exemplars.json`, which `tools/synth-probe/exemplars-build.mjs`
+  distills from the synthetic corpus (never funnel rows — the index is
+  served to every visitor) and the nightly rebuilds. Examples ride in the
+  first USER turn so the cached system prompt never varies per ask; the
+  probe excludes a prompt's own prior answer (`EXEMPLARS=off` measures
+  without retrieval). Tune STOP / ALIAS / CLASS_WORDS there when the
+  funnel's `intent.exemplars` keys show off-subject picks.
 
 ## Adding a strategy
 
