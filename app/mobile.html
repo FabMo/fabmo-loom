@@ -74,6 +74,8 @@
     .seg { display: flex; gap: 6px; margin-top: 4px; }
     .seg button { flex: 1; min-height: 40px; padding: 6px 0; border-radius: 10px; font-weight: 600; }
     .seg button.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+    .slider.choice .seg button { font-size: 13px; padding: 6px 4px; line-height: 1.2; white-space: normal; min-width: 0; }
+    .slider.choice .muted { margin-top: 4px; }
     #assembleWrap .top span { color: var(--muted); font-size: 13px; }
     details.about { margin-top: 10px; font-size: 14px; }
     details.about summary { cursor: pointer; color: var(--muted); font-size: 13px; }
@@ -150,7 +152,7 @@
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.99</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.100</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>

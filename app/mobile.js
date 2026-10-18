@@ -466,6 +466,11 @@ function sizeControls(rec) {
   });
   return picked.filter(Boolean);
 }
+// a segment button shows the label up to its first dash or comma (the
+// clause after it is the explanation, shown under the row for the pick);
+// long clauses wrap rather than truncate
+const shortOption = (o) => (o.label ?? o.value).split(/\s+[—–-]\s+|,/)[0].trim();
+
 let sliderTimer = 0;
 function renderSliders() {
   const wrap = $('sliders');
@@ -482,6 +487,17 @@ function renderSliders() {
     wrap.appendChild(div);
   };
   sizes.forEach(c => slider(c));
+  // choice controls (joinery look, a glyph, a variant) as segmented pickers
+  const choices = (recipe.controls ?? []).filter(c => c.type === 'choice' && Array.isArray(c.options) && c.options.length);
+  for (const c of choices) {
+    const cur = String(controlValues[c.id] ?? c.default ?? c.options[0].value);
+    const div = document.createElement('div');
+    div.className = 'slider choice';
+    div.innerHTML = `<div class="top"><span>${escapeHtml(c.label ?? c.id)}</span></div>
+      <div class="seg">${c.options.map(o => `<button type="button" data-choice="${escapeHtml(c.id)}" data-value="${escapeHtml(o.value)}" class="${String(o.value) === cur ? 'on' : ''}" title="${escapeHtml(o.label ?? o.value)}">${escapeHtml(shortOption(o))}</button>`).join('')}</div>
+      <div class="muted" data-choice-note="${escapeHtml(c.id)}">${escapeHtml(c.options.find(o => String(o.value) === cur)?.label ?? '')}</div>`;
+    wrap.appendChild(div);
+  }
   if (counts.length) {
     const h = document.createElement('div');
     h.className = 'group';
@@ -489,6 +505,17 @@ function renderSliders() {
     wrap.appendChild(h);
     counts.forEach(c => slider(c, 'count'));
   }
+  wrap.onclick = (e) => {
+    const b = e.target.closest('button[data-choice]');
+    if (!b) return;
+    const id = b.dataset.choice;
+    controlValues[id] = b.dataset.value;
+    for (const o of wrap.querySelectorAll(`button[data-choice="${CSS.escape(id)}"]`)) o.classList.toggle('on', o === b);
+    const note = wrap.querySelector(`[data-choice-note="${CSS.escape(id)}"]`);
+    if (note) note.textContent = b.title;
+    persist();
+    runAndRender();
+  };
   wrap.oninput = (e) => {
     const inp = e.target.closest('input[type=range]');
     if (!inp) return;
