@@ -60,6 +60,8 @@
     #numbers { font-size: 13px; color: var(--muted); }
     #errors { color: var(--bad); font-size: 13px; white-space: pre-wrap; margin-top: 6px; }
     #errors:empty { display: none; }
+    #note { font-size: 13px; color: var(--navy); background: #eef4d9; border-left: 3px solid var(--lime); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+    #note:empty { display: none; }
     .slider { margin: 12px 0 2px; }
     .slider .top { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 2px; }
     .slider .top b { font-variant-numeric: tabular-nums; }
@@ -133,6 +135,7 @@
     <div id="view3d"><div id="weaveOverlay">weaving…</div></div>
     <div class="status"><span class="badge" id="badge">—</span><span id="numbers"></span></div>
     <div id="errors"></div>
+    <div id="note"></div>
     <div id="sliders"></div>
     <div class="slider" id="sheets" style="display:none"></div>
     <div class="slider" id="assembleWrap">
@@ -147,7 +150,7 @@
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.93</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.94</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>

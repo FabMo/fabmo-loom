@@ -216,11 +216,72 @@ async function runAndRender() {
   const seq = ++weaveSeq;
   setBadge('wait', 'computing…');
   $('weaveOverlay').classList.add('on');
-  const { result: r, sim } = await weave({ recipe, values: controlValues, terrains: {}, shop: shopForRun() });
+  setNote('');
+  let { result: r, sim } = await weave({ recipe, values: controlValues, terrains: {}, shop: shopForRun() });
   if (seq !== weaveSeq) return;   // a newer slider move superseded this one
+  // a count that no longer fits (12 drawers in a 16" tower) is not an
+  // error the person can read on a phone — it's a slider that needs to
+  // come down. Find the most that fit and say what happened.
+  if (!r.ok && isFitError(r.errors)) {
+    $('weaveOverlay').textContent = 'too many to fit — finding the most that do…';
+    const fit = await autoFitCounts(r.errors, seq);
+    $('weaveOverlay').textContent = 'weaving…';
+    if (seq !== weaveSeq) return;
+    if (fit) {
+      controlValues[fit.control.id] = fit.to;
+      syncSlider(fit.control.id, fit.to);
+      persist();
+      r = fit.result; sim = fit.sim;
+      const what = (fit.control.label ?? fit.control.id).replace(/\s*\(.*\)\s*$/, '').toLowerCase();
+      setNote(`${fit.from} ${what.includes('count') || what.includes('number') ? what.replace(/\b(count|number of)\b/g, '').trim() || 'of these' : what} won't fit at this size — showing ${fit.to}, the most that do. Make it bigger, then push the count back up.`);
+    }
+  }
   result = r; lastSim = sim;
   render();
 }
+
+// the compiler's "this many won't go in that space" family — the only
+// failures a lower count can cure (never bit-fit, overlap or envelope errors)
+const FIT_ERROR = /too short|too narrow|too small|too shallow|no room|not enough room|does not fit|don't fit|would be -?\d|negative/i;
+const isFitError = (errors = []) => errors.some(e => FIT_ERROR.test(String(e)));
+
+// Walk the count controls, the one the error names first, and for each
+// binary-search the largest value below the current one that verifies
+// (fewer drawers in the same height is monotone). Every probe is a real
+// weave in the worker; a newer slider move (seq) aborts the search.
+async function autoFitCounts(errors, seq) {
+  const text = errors.join(' ').toLowerCase();
+  const counts = countControls(recipe);
+  if (!counts.length) return null;
+  const words = (c) => `${c.id} ${c.label ?? ''}`.toLowerCase().split(/[^a-z]+/).filter(w => w.length > 2 && !['count', 'number', 'the'].includes(w));
+  const score = (c) => words(c).reduce((n, w) => n + (text.includes(w.replace(/s$/, '')) ? 1 : 0), 0);
+  const ranked = [...counts].sort((a, b) => score(b) - score(a));
+  const probe = async (c, n) => weave({ recipe, values: { ...controlValues, [c.id]: n }, terrains: {}, shop: shopForRun() });
+  for (const c of ranked) {
+    const cur = Number(controlValues[c.id] ?? c.default);
+    const min = Math.max(1, Number(c.min ?? 1));
+    if (!(cur > min)) continue;
+    const atMin = await probe(c, min);
+    if (seq !== weaveSeq) return null;
+    if (!atMin.result.ok) continue;   // even the fewest don't fit: not this control
+    let lo = min, hi = cur - 1, best = { n: min, ...atMin };
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const t = await probe(c, mid);
+      if (seq !== weaveSeq) return null;
+      if (t.result.ok) { best = { n: mid, ...t }; lo = mid; } else hi = mid - 1;
+    }
+    return { control: c, from: cur, to: best.n, result: best.result, sim: best.sim };
+  }
+  return null;
+}
+function syncSlider(id, v) {
+  const inp = document.querySelector(`#sliders input[data-id="${CSS.escape(id)}"]`);
+  if (inp) inp.value = String(v);
+  const b = document.querySelector(`#sliders b[data-for="${CSS.escape(id)}"]`);
+  if (b) b.textContent = fmt(v);
+}
+function setNote(text) { $('note').textContent = text; }
 
 // --------------------------------------------------------------- the view
 function setBadge(cls, text) { const b = $('badge'); b.className = `badge ${cls}`; b.textContent = text; }
@@ -493,9 +554,8 @@ async function generate() {
     $('aboutWrap').open = true;
     $('prompt').value = '';
     renderSliders();
-    const seq = ++weaveSeq;
-    const { result: r, sim } = await weave({ recipe, values: controlValues, terrains: {}, shop: shopForRun() });
-    if (seq === weaveSeq) { result = r; lastSim = sim; render(); if (r.ok && assemblyLayer) playIntro(); }
+    await runAndRender();
+    if (result?.ok && assemblyLayer) playIntro();
     persist();
     $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -549,6 +609,7 @@ $('reset').addEventListener('click', () => {
   try { localStorage.removeItem(STATE_KEY); } catch {}
   $('result').style.display = 'none';
   $('sliders').innerHTML = '';
+  setNote('');
   $('sheets').innerHTML = ''; $('sheets').style.display = 'none';
   $('about').textContent = ''; $('declined').innerHTML = '';
   $('clearPhoto').click();
