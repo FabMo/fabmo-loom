@@ -391,6 +391,15 @@ console.log('--- claims channel: declared claims vs the recipe ---');
   const furn = { version: 2, name: 'x', stock: { thickness: 0.5 }, margin: 0.375, controls: [], derived: [], shapes: [], assets: [], terrains: [], pipeline: [{ id: 'build', strategy: 'furniture_design', params: {} }] };
   const fclaims = checkClaims({ pieces: 6, mating: true, parts: [{ name: 'panel', opId: 'build' }] }, furn, 'Six panels that slot together.', []);
   if (!fclaims.issues.length) pass('furniture_design: pieces/mating/parts claims allowed'); else fail(`furniture claims: ${JSON.stringify(fclaims.issues)}`);
+  // the furniture_assembly guest lowers to the same interpreter — its
+  // panels are fitted parts too (every assembly build was being corrected
+  // for ten days: "parts made to fit each other" pushed into declined)
+  const asm = { ...furn, pipeline: [{ id: 'build', strategy: 'furniture_assembly', params: {} }] };
+  const aclaims = checkClaims({ pieces: 9, mating: true, parts: [{ name: 'panel', opId: 'build' }] }, asm, 'Nine panels that slot together.', []);
+  if (!aclaims.issues.length) pass('furniture_assembly: pieces/mating/parts claims allowed too'); else fail(`assembly claims: ${JSON.stringify(aclaims.issues)}`);
+  const notFurn = { ...furn, pipeline: [{ id: 'build', strategy: 'furniture_polish', params: {} }, { id: 'tag', strategy: 'tag_cutout', params: {} }] };
+  const nclaims = checkClaims({ mating: true, parts: [{ name: 'x', opId: 'tag' }] }, notFurn, 'x', []);
+  if (!nclaims.issues.length) pass('any furniture_* verb counts as furniture (family by name)'); else fail(`family: ${JSON.stringify(nclaims.issues)}`);
 }
 
 console.log('--- claims channel: in the loop ---');

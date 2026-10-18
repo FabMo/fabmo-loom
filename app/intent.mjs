@@ -34,7 +34,7 @@ export const ACTION_TOOL = {
             items: { type: 'object', properties: { name: { type: 'string' }, opId: { type: 'string' } }, required: ['name', 'opId'] },
           },
           dataSource: { type: 'string', enum: ['none', 'land-elevation', 'user-file'], description: 'terrain_relief carves public LAND elevation tiles. Underwater depth / bathymetry / lake-bottom data does NOT exist here — never promise it; decline it.' },
-          mating: { type: 'boolean', description: 'true claims two pieces are made to FIT each other (an inlay plug in its pocket, a hand-authored tenon in a mortise). Only furniture_design produces mating parts; any other mating claim is refused.' },
+          mating: { type: 'boolean', description: 'true claims two pieces are made to FIT each other (an inlay plug in its pocket, a hand-authored tenon in a mortise). Only the furniture verbs (furniture_design, furniture_assembly) produce mating parts; any other mating claim is refused.' },
         },
       },
       actions: {
@@ -861,7 +861,14 @@ export function observationText(obs) {
 // words are data here, never evidence.
 
 const CUTOUT_STRATEGIES = new Set(['tag_cutout', 'disc_cutout', 'shape_cutout']);
-const PART_MAKERS = new Set([...CUTOUT_STRATEGIES, 'furniture_design']);
+// every furniture verb (furniture_design, and the furniture_assembly guest
+// that lowers to the same interpreter) frees panels made to fit each other.
+// Matching the family by name, not one id: for ten days after
+// furniture_assembly shipped, every assembly build had its honest pieces /
+// parts / mating claims refused and "parts made to fit each other" pushed
+// into the user's declined list (the picture lane made it visible: 6/6).
+const FURNITURE_RE = /^furniture_/;
+const makesParts = (strategy) => CUTOUT_STRATEGIES.has(strategy) || FURNITURE_RE.test(strategy);
 const TWO_SIDED_RE = /\b(other side|both sides|two[- ]sided|double[- ]sided|flip (it|the board|the sign|the piece|the part|over)|flip-over|back side|reverse side|second face|back face)\b/i;
 const BATHY_RE = /\b(bathymetr\w*|underwater (depth|terrain|canyon)|lake ?bottom|lake ?bed|sea ?floor|seabed|ocean floor|water depth|depth of the (lake|bay|water)|underwater)\b/i;
 const PLUG_RE = /\b(matching|mating|walnut|maple|cherry|contrasting)\s+(plug|insert|inlay piece|inlay part)s?\b|\bplug (that|which) (fills|fits|drops)|\binlay plug|\bplug part\b/i;
@@ -871,7 +878,7 @@ export function checkClaims(claims, recipe, summary = '', declined = []) {
   const issues = [];
   const pipeline = recipe?.pipeline ?? [];
   const cutouts = pipeline.filter(o => CUTOUT_STRATEGIES.has(o.strategy));
-  const furniture = pipeline.some(o => o.strategy === 'furniture_design');
+  const furniture = pipeline.some(o => FURNITURE_RE.test(o.strategy));
   const terrain = pipeline.some(o => o.strategy === 'terrain_relief');
   const c = claims && typeof claims === 'object' ? claims : null;
   const push = (code, message, autoDecline) => issues.push({ code, message, ...(autoDecline ? { autoDecline } : {}) });
@@ -897,7 +904,7 @@ export function checkClaims(claims, recipe, summary = '', declined = []) {
     if (!part || typeof part !== 'object') continue;
     const op = pipeline.find(o => o.id === part.opId);
     if (!op) push('phantom-part', `claims.parts "${part.name}": no operation "${part.opId}" exists in the pipeline.`);
-    else if (!PART_MAKERS.has(op.strategy)) push('phantom-part', `claims.parts "${part.name}": operation "${part.opId}" is ${op.strategy}, which does not free a piece — only a cutout (tag/disc/shape) or furniture_design does.`);
+    else if (!makesParts(op.strategy)) push('phantom-part', `claims.parts "${part.name}": operation "${part.opId}" is ${op.strategy}, which does not free a piece — only a cutout (tag/disc/shape) or a furniture verb does.`);
   }
   if (PLUG_RE.test(summary) && cutouts.length < 2 && !furniture && !mentions(declined, /plug|inlay|insert|mating/i)) {
     push('phantom-plug', `the summary promises "${summary.match(PLUG_RE)[0]}", but there is ${cutouts.length ? 'only one cutout op' : 'no cutout op'} — a plug needs its own cutout of the same letters, and the catalog has no kerf/clearance fit. Decline the plug.`,
@@ -907,8 +914,8 @@ export function checkClaims(claims, recipe, summary = '', declined = []) {
     push('pieces', `claims.pieces ${c.pieces}, but one run frees at most ${cutouts.length} (one per cutout op). Say the user re-runs with the control for the rest, or add the cutouts.`);
   }
   if (c?.mating === true && !furniture) {
-    push('mating', 'claims.mating true: only furniture_design produces parts made to fit each other — nothing else here is fitted to anything. Decline the fit.',
-      { what: 'parts made to fit each other', why: 'only the furniture joinery strategy produces mating parts; other cutouts are independent outlines' });
+    push('mating', 'claims.mating true: only the furniture verbs produce parts made to fit each other — nothing else here is fitted to anything. Decline the fit.',
+      { what: 'parts made to fit each other', why: 'only the furniture joinery verbs produce mating parts; other cutouts are independent outlines' });
   }
   return { issues, declared: !!c && Object.keys(c).length > 0 };
 }
