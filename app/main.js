@@ -13,6 +13,7 @@ import { runIntentLoop, actionList, promptRecipeView, MODELS, DEFAULT_MODEL, isK
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
+import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
@@ -1168,20 +1169,20 @@ function addTurn(html, isErr = false) {
 // BYO-key path: straight to Anthropic from the page — the key never
 // touches our server.
 async function parseDirect(req, key) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(res.status === 401 ? 'that API key was rejected (401)' : `API error ${res.status}: ${body.slice(0, 120)}`);
-  }
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify(req),
+    });
+  } catch (e) { throw new Error(networkFailureMessage(e)); }
+  if (!res.ok) throw new Error(directFailureMessage(res.status, await res.text().catch(() => '')));
   return res.json();
 }
 
@@ -1189,20 +1190,26 @@ async function parseDirect(req, key) {
 // metered Claude-style — N prompts per 5-hour window, refills, never
 // accumulates. Running out is the moment the key box earns its keep.
 async function parseViaGuestPass(req, invite) {
-  const res = await fetch('/api/intent/loom', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
-    body: JSON.stringify({ req }),
-  });
-  const payload = await res.json().catch(() => ({}));
+  let res;
+  try {
+    res = await fetch('/api/intent/loom', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
+      body: JSON.stringify({ req }),
+    });
+  } catch (e) { throw new Error(networkFailureMessage(e)); }
+  // the relay answers JSON; nginx's own refusals (413 body too large, 502,
+  // 504) are HTML — those used to surface as a bare "request failed (413)"
+  const payload = await res.clone().json().catch(() => ({}));
   if (!res.ok) {
-    $('keyBox').open = true;
+    // the key box is the remedy only when the PASS is the problem
+    if ([401, 403, 429].includes(res.status)) $('keyBox').open = true;
     if (res.status === 429 && payload.reason === 'window') {
       renderInviteBar({ valid: true, remaining: 0, resetsAt: payload.resetsAt });
       throw new Error(`your guest pass is out of prompts — it refills at ${fmtTime(payload.resetsAt)}. Add your own API key below for uninterrupted use.`);
     }
     if (res.status === 403) renderInviteBar({ valid: false, reason: payload.reason });
-    throw new Error(payload.error ?? `guest-pass request failed (${res.status})`);
+    throw new Error(relayFailureMessage(res.status, payload, { imageBytes: promptImage?.data?.length ?? 0 }));
   }
   renderInviteBar({ valid: true, ...payload.invite });
   return payload.data;
@@ -1226,10 +1233,11 @@ function setPromptImage(img) {
 async function takePromptImage(file) {
   if (!file || !file.type.startsWith('image/')) return;
   try {
-    const { data, width, height } = await imageToDataUrl(file, 1568);
-    const comma = data.indexOf(',');
-    const media_type = /^data:(image\/\w+)/.exec(data)?.[1] ?? 'image/png';
-    setPromptImage({ media_type, data: data.slice(comma + 1), previewUrl: data, width, height });
+    // encoded to a byte budget (app/photo.mjs), not just a pixel size: a
+    // busy photo at 1568px can exceed the relay's request cap on its own
+    const img = await encodePhoto(file);
+    setPromptImage(img);
+    if (img.steps > 1) addTurn(`Picture attached at ${img.width}×${img.height}, ${kb(img.bytes)} — shrunk to fit the request limit.`);
   } catch (e) {
     addTurn(/hei[cf]/i.test(file.type + file.name) ? 'HEIC photos can\'t be read by the browser — export it as JPEG first.' : escapeHtml(e.message), true);
   }

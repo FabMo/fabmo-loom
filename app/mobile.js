@@ -23,6 +23,7 @@ import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { simulateJob } from './sim.mjs';
 import { startWeave, LOGO_PALETTE } from './weave.mjs';
+import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { loadToolLibrary } from '../ir/tools.js';
 import * as THREE from 'three';
 
@@ -88,65 +89,49 @@ $('saveKey').addEventListener('click', () => {
 });
 
 async function parseDirect(req, key) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(res.status === 401 ? 'that API key was rejected (401)' : `API error ${res.status}: ${body.slice(0, 120)}`);
-  }
+  let res;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify(req),
+    });
+  } catch (e) { throw new Error(networkFailureMessage(e)); }
+  if (!res.ok) throw new Error(directFailureMessage(res.status, await res.text().catch(() => '')));
   return res.json();
 }
 async function parseViaGuestPass(req, invite) {
-  const res = await fetch('/api/intent/loom', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
-    body: JSON.stringify({ req }),
-  });
-  const payload = await res.json().catch(() => ({}));
+  let res;
+  try {
+    res = await fetch('/api/intent/loom', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
+      body: JSON.stringify({ req }),
+    });
+  } catch (e) { throw new Error(networkFailureMessage(e)); }
+  // the relay answers JSON; nginx's own refusals (413 body too large, 502,
+  // 504) are HTML — those are the ones that used to read "request failed"
+  const payload = await res.clone().json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 429 && payload.reason === 'window') {
-      throw new Error(`your guest pass is out of prompts — it refills at ${new Date(payload.resetsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
+      throw new Error(`Your guest pass is out of prompts — it refills at ${new Date(payload.resetsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
     }
     if (res.status === 401 || res.status === 403) showAuth(true);
-    throw new Error(payload.error ?? `guest-pass request failed (${res.status})`);
+    throw new Error(relayFailureMessage(res.status, payload, { imageBytes: promptImage?.bytes ?? 0 }));
   }
   return payload.data;
 }
 
 // ------------------------------------------------------------------ photo
-// Fitted to 1568px on the longest side (the API's own ceiling) on a canvas,
+// Encoded to a byte BUDGET (app/photo.mjs: ≤1568px, JPEG quality and size
+// stepping down until the base64 fits under the relay's request cap),
 // held in memory for the session, never persisted.
-async function imageToDataUrl(file, maxDim = 1568) {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = await new Promise((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = () => rej(new Error('that file did not decode as an image'));
-      i.src = url;
-    });
-    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-    const w = Math.max(1, Math.round(img.width * scale));
-    const h = Math.max(1, Math.round(img.height * scale));
-    const cv = document.createElement('canvas');
-    cv.width = w; cv.height = h;
-    cv.getContext('2d').drawImage(img, 0, 0, w, h);
-    return { data: cv.toDataURL('image/jpeg', 0.85), width: w, height: h };
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
 async function takePhoto(file) {
   if (!file) return;
   try {
-    const { data, width, height } = await imageToDataUrl(file, 1568);
-    const comma = data.indexOf(',');
-    promptImage = { media_type: 'image/jpeg', data: data.slice(comma + 1), previewUrl: data, width, height };
-    $('thumb').src = data;
-    $('thumbMeta').textContent = `${width}×${height} · the picture decides the shape, your text decides the numbers`;
+    promptImage = await encodePhoto(file);
+    $('thumb').src = promptImage.previewUrl;
+    $('thumbMeta').textContent = `${promptImage.width}×${promptImage.height} · ${kb(promptImage.bytes)} · the picture decides the shape, your text decides the numbers`;
     $('thumbWrap').style.display = 'flex';
     setMsg('');
     updateBuildLabel();
