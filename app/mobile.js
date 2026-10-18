@@ -217,7 +217,9 @@ async function runAndRender() {
   setBadge('wait', 'computing…');
   $('weaveOverlay').classList.add('on');
   setNote('');
+  const tw0 = performance.now();
   let { result: r, sim } = await weave({ recipe, values: controlValues, terrains: {}, shop: shopForRun() });
+  console.debug(`[weave] ${r.ok ? 'ok' : 'refused'} in ${Math.round(performance.now() - tw0)} ms`);
   if (seq !== weaveSeq) return;   // a newer slider move superseded this one
   // a count that no longer fits (12 drawers in a 16" tower) is not an
   // error the person can read on a phone — it's a slider that needs to
@@ -237,7 +239,9 @@ async function runAndRender() {
     }
   }
   result = r; lastSim = sim;
+  const tr0 = performance.now();
   render();
+  console.debug(`[render] ${Math.round(performance.now() - tr0)} ms`);
 }
 
 // the compiler's "this many won't go in that space" family — the only
@@ -246,9 +250,14 @@ const FIT_ERROR = /too short|too narrow|too small|too shallow|no room|not enough
 const isFitError = (errors = []) => errors.some(e => FIT_ERROR.test(String(e)));
 
 // Walk the count controls, the one the error names first, and for each
-// binary-search the largest value below the current one that verifies
-// (fewer drawers in the same height is monotone). Every probe is a real
-// weave in the worker; a newer slider move (seq) aborts the search.
+// step the count DOWN one at a time until a value verifies. The cost is
+// lopsided (measured on the 10-drawer tower at 16"): a count that does
+// not fit is refused by the compiler's geometry check in ~3 ms, while a
+// count that fits is a full weave + verify, ~3 s. So a descent pays for
+// exactly one real weave — the answer — where a binary search paid for
+// every passing midpoint. Probes skip the 3D sim (wantSim:false, ~50 ms
+// but pointless for a candidate); the winner gets its sim on this thread.
+// A newer slider move (seq) abandons the search.
 async function autoFitCounts(errors, seq) {
   const text = errors.join(' ').toLowerCase();
   const counts = countControls(recipe);
@@ -256,22 +265,25 @@ async function autoFitCounts(errors, seq) {
   const words = (c) => `${c.id} ${c.label ?? ''}`.toLowerCase().split(/[^a-z]+/).filter(w => w.length > 2 && !['count', 'number', 'the'].includes(w));
   const score = (c) => words(c).reduce((n, w) => n + (text.includes(w.replace(/s$/, '')) ? 1 : 0), 0);
   const ranked = [...counts].sort((a, b) => score(b) - score(a));
-  const probe = async (c, n) => weave({ recipe, values: { ...controlValues, [c.id]: n }, terrains: {}, shop: shopForRun() });
+  const probe = async (c, n) => weave({ recipe, values: { ...controlValues, [c.id]: n }, terrains: {}, shop: shopForRun(), wantSim: false });
   for (const c of ranked) {
     const cur = Number(controlValues[c.id] ?? c.default);
     const min = Math.max(1, Number(c.min ?? 1));
-    if (!(cur > min)) continue;
-    const atMin = await probe(c, min);
-    if (seq !== weaveSeq) return null;
-    if (!atMin.result.ok) continue;   // even the fewest don't fit: not this control
-    let lo = min, hi = cur - 1, best = { n: min, ...atMin };
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      const t = await probe(c, mid);
+    for (let n = cur - 1; n >= min; n--) {
+      const t0 = performance.now();
+      const t = await probe(c, n);
+      console.debug(`[autofit] ${c.id}=${n} ${t.result.ok ? 'fits' : 'no'} in ${Math.round(performance.now() - t0)} ms`);
       if (seq !== weaveSeq) return null;
-      if (t.result.ok) { best = { n: mid, ...t }; lo = mid; } else hi = mid - 1;
+      if (!t.result.ok) {
+        if (!isFitError(t.result.errors)) break;   // a different failure appeared: not this control's problem
+        continue;
+      }
+      const pre = t.result.preview;
+      const ts0 = performance.now();
+      const sim = pre?.built?.length ? simulateJob(pre.built, pre.placement ?? { x: 0, y: 0 }, pre.stock, { analyticVee: true }) : null;
+      console.debug(`[autofit] sim on main thread ${Math.round(performance.now() - ts0)} ms, grid ${sim?.grid?.constructor?.name} ${sim?.cols}×${sim?.rows} dx ${sim?.dx}`);
+      return { control: c, from: cur, to: n, result: t.result, sim };
     }
-    return { control: c, from: cur, to: best.n, result: best.result, sim: best.sim };
   }
   return null;
 }
@@ -330,9 +342,13 @@ function render() {
   view3d ??= createView3D($('view3d'), { width: 1000, height: 1000 });
   const stock = pre?.stock ?? { w: 8, h: 2.5, thickness: recipe.stock?.thickness ?? 0.5 };
   const sim = lastSim ?? (pre?.built?.length ? simulateJob(pre.built, pre.placement ?? { x: 0, y: 0 }, stock, { analyticVee: true }) : null);
+  const t1 = performance.now();
   const fd = featureDepthOf(sim, stock);
+  const t2 = performance.now();
   view3d.update(sim, stock, 1, fd ? -fd : null);
+  const t3 = performance.now();
   syncAssembly(pre, stock);
+  console.debug(`[render-steps] featureDepth ${Math.round(t2 - t1)} ms · view3d.update ${Math.round(t3 - t2)} ms · assembly+fit ${Math.round(performance.now() - t3)} ms · grid ${sim?.cols}×${sim?.rows} dx ${sim?.dx} stock ${stock.w}×${stock.h}`);
 }
 const fmt = (n) => (Math.round(n * 100) / 100).toString();
 
@@ -645,5 +661,5 @@ async function loadGuests() {
     renderSliders();
     await runAndRender();
   }
-  window.loomMobile = { get recipe() { return recipe; }, get result() { return result; }, get values() { return controlValues; }, ready: true };   // test handle
+  window.loomMobile = { get recipe() { return recipe; }, get result() { return result; }, get values() { return controlValues; }, get view3d() { return view3d; }, get sim() { return lastSim; }, simulateJob, ready: true };   // test handle
 })();
