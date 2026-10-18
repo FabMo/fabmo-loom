@@ -31,6 +31,15 @@ probing.
    increment funnel evidence counts; a decline fitting no class opens a
    new class entry (notify-worthy).
 
+2b. **Corpus check runtime:** `test-corpus.mjs` replays in chunks of 100
+   rows, each a short-lived child process, `--workers` at a time (one per
+   CPU, max 4). Single-process it grew past 1.5 GB (the box has 3 GB) and
+   took 28 minutes at 900 rows, past the executor's 30-minute window —
+   2026-10-11..17 logged as "corpus regression" with an empty attention
+   note were timeouts.
+   `nightly.mjs` now gives the step 55 minutes, reports a timeout as its
+   own attention line (not a regression) and runs the night anyway.
+
 3. **Generate tonight's synthetic batch (25 prompts).**
    Write `runs/YYYY-MM-DD-prompts.json`: an array of
    `{ id, persona, prior, prompt, note?, asset? }` — same shape as
@@ -47,6 +56,12 @@ probing.
      SHIPPED (the same words must keep working) and 1–2 by-design
      declines (must keep declining).
 
+3b. **Pick tonight's pictures (free; network):**
+   `node photo-pick.mjs YYYY-MM-DD` → `runs/YYYY-MM-DD-photo-prompts.json`
+   and the pictures under `runs/photos/YYYY-MM-DD/`. See "The picture
+   lane" below. Idempotent per day (`--fresh` to re-pick); zero pictures
+   is an attention line, not a stop.
+
 4. **Probe live (~$3):**
    `node probe.mjs ./runs/YYYY-MM-DD-prompts.json ./runs/YYYY-MM-DD-results.jsonl`
    Each model call retries a dropped connection (`fetch failed`), 429 and
@@ -55,6 +70,12 @@ probing.
    fails is recorded as outcome `INFRA_ERROR` (`infra: true`) — the
    network, not Loom. Plain `ERROR` means Loom threw. Three consecutive
    INFRA_ERROR rows abort the batch.
+
+4b. **Probe the pictures (~$1.25 for six — three calls each, long answers):**
+   `node probe.mjs ./runs/YYYY-MM-DD-photo-prompts.json ./runs/YYYY-MM-DD-photo-results.jsonl`
+   Same runner; a row with `photo` rides the image into the request. Rows
+   record `furniture` (woven box + panel count), `sizeHonored` when the
+   text stated a size, and `assumedLine`.
 
 5. **Triage.** For every non-FULFILLED row (and every FULFILLED row
    whose prior said decline — possible overclaim: read the summary
@@ -69,10 +90,19 @@ probing.
    still count toward the "3+ rows ERRORED — infrastructure suspect"
    attention rule.
 
+5b. **Judge the pictures (vision; ~$0.40):** the meta model sees each
+   photo plus the factual record of the build and scores `subject`
+   (flat-panel / other-furniture / not-furniture), `fidelity` 0–3,
+   additions, whether the Assumed line names the guesses, and for
+   non-panel pictures whether the reinterpretation was honest →
+   `runs/YYYY-MM-DD-photo-judge.json`. `nightly.mjs` does this inline.
+
 6. **Grow the corpus:**
    `node corpus-add.mjs ./runs/YYYY-MM-DD-results.jsonl YYYY-MM-DD`
+   `node corpus-add.mjs ./runs/YYYY-MM-DD-photo-results.jsonl YYYY-MM-DD-photo`
    `node corpus-add.mjs ./runs/funnel-YYYY-MM-DD.jsonl funnel-YYYY-MM-DD`
-   (second one only when a funnel file was written)
+   (the last only when a funnel file was written; photo rows keep the
+   picture's title + credit and the lane's measurements, never the bytes)
 
 6b. **Refresh the fix-prompt queue (free):**
    `node autoprompt.mjs`
@@ -115,8 +145,8 @@ do not manufacture significance.
   as needed to identify the class (decline rows are kept verbatim by
   design — see INTENT.md's PII stance — but the ledger is the summary,
   not a second copy of the log).
-- Spend target ≈ $3–5/night on the shop key. If a batch would exceed
-  ~$10, stop and note it instead.
+- Spend target ≈ $3–5/night on the shop key (the picture lane adds
+  about $1.50 for six pictures). If a batch would exceed ~$10, stop and note it instead.
 
 ## Attended-session workflows (not nightly)
 
@@ -160,6 +190,44 @@ rows with claimIssues under `caughtByClaims`, not `overclaims`. Codes:
 faces, faces-text, dataSource, bathymetry, phantom-part, phantom-plug,
 pieces, mating. A NEW confident-but-false promise class = a new check in
 `checkClaims`, with a corpus sweep for precision before it ships.
+
+## The picture lane (2026-10-18)
+
+Loom builds from a photo of a piece of furniture plus (optionally) its
+overall size: the picture decides kind, structure and proportion, the
+text decides the numbers, every guess goes on an "Assumed:" line
+(`intent.mjs` PICTURE_RULE). The nightly measures that promise on
+pictures nobody curated.
+
+- **Sources.** `photo-pick.mjs` draws from a rotating wheel of Wikimedia
+  Commons furniture *categories* (Bookshelves, Nightstands, Workbenches,
+  Crates, Wooden chairs… — full-text search was far too loose) at 1200px,
+  CC/PD, credit and license kept with the row; plus up to 2 per night from
+  `photos.local/` (gitignored — drop real photos there, a sidecar
+  `<name>.txt` is the prompt text, e.g. the tape-measure numbers). Six
+  pictures a night by default (`--count`), seeded by the day, never the
+  same Commons file twice (`runs/photos/used.json`).
+- **Two kinds of row.** Every other Commons row states a plausible size
+  in the text ("Make it about 36 wide, 72 tall and 12 deep"): since nobody
+  measured the real piece, this is the one deterministic check of "text
+  decides the numbers" — `probe.mjs` records `sizeHonored` from the woven
+  box. The other rows send the picture alone and test the assume-and-say-so
+  path (`assumedLine`).
+- **Two judges.** The text triage classifies photo rows' declines and
+  failures against the ledger like any other row (it sees the title, not
+  the picture). The vision judge (meta model, Opus 4.8) sees the picture
+  and scores likeness: `subject`, `fidelity` 0–3, `additions`, `assumedOk`,
+  `honestDecline` for non-panel subjects. Noise in the wheel — an ornate
+  antique, a chair that needs curves — is deliberate: those rows measure
+  the honest-decline path, and the judge's `subject` keeps them out of the
+  fidelity average.
+- **Run-log line:** `photos: N (outcomes; k flat-panel subjects: f FULFILLED,
+  fidelity x/3; honest m/n; size honored a/b; Assumed line c/d)`. Rows join
+  the corpus under `<day>-photo/`; `autoprompt.mjs` reads them for briefs.
+- **Attended:** `node nightly.mjs --photos-only` runs just this lane (same
+  day's pictures again unless `photo-pick.mjs --fresh`); `--no-photos`
+  skips it. Image bytes are never logged, never committed, never sent
+  anywhere but the API.
 
 ## Autoprompting (2026-10-05)
 

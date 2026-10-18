@@ -11,3 +11,5 @@ tools/synth-probe/corpus.local.jsonl
 tools/synth-probe/results*.jsonl
 tools/synth-probe/runs/
 tools/synth-probe/funnel-cursor.json
+# real photos dropped in for the picture lane (photo-pick.mjs)
+tools/synth-probe/photos.local/

@@ -8,9 +8,19 @@
 // Usage: node probe.mjs [promptsFile] [outFile] [startIndex]
 //   promptsFile: .mjs exporting PROMPTS, or a .json array (default ./prompts.mjs)
 //   outFile:     results JSONL to append to (default ./results.jsonl)
+//
+// A prompt row may carry a PICTURE (photo-pick.mjs writes them):
+//   photo: { file, media_type, ... }  — file relative to this directory;
+//   it rides the request as an image block (the user's prompt text may be
+//   empty: Loom then uses its default "Build what is in this picture.").
+//   statedSize: [W, H, D]            — the text named a size; the row
+//   records sizeHonored = the woven furniture box matches it.
+// Photo rows record `furniture` (the woven assemblies' box + panel count)
+// and `assumedLine` (the "Assumed:" line the picture rule asks for).
 
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { FAKE_SVG } from './prompts.mjs';
+const HERE = new URL('./', import.meta.url).pathname;
 import { makeCallModel, INFRA_OUTCOME } from './model-call.mjs';
 
 const promptsPath = process.argv[2] ?? './prompts.mjs';
@@ -21,7 +31,7 @@ const PROMPTS = promptsPath.endsWith('.json')
 
 const LOOM = '/var/opt/apps/contributors/brian.o/fabmo-loom';
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
-const { runIntentLoop, actionList } = await import(`${LOOM}/app/intent.mjs`);
+const { runIntentLoop, actionList, DEFAULT_IMAGE_UTTERANCE } = await import(`${LOOM}/app/intent.mjs`);
 // LOOP=always|trouble|off — the closed loop is the default; 'off' is the
 // pre-loop one-shot behavior, kept so the two can be measured side by side
 const LOOP_MODE = ['always', 'trouble', 'off'].includes(process.env.LOOP) ? process.env.LOOP : 'always';
@@ -92,8 +102,23 @@ function syntheticGrids(recipe) {
   return grids;
 }
 
+// the picture, as the browser would send it: an image block, bytes never
+// recorded anywhere but the request (the row keeps the file name + credit)
+function loadImage(p) {
+  if (!p.photo?.file) return null;
+  const path = p.photo.file.startsWith('/') ? p.photo.file : `${HERE}${p.photo.file}`;
+  return { media_type: p.photo.media_type ?? 'image/jpeg', data: readFileSync(path).toString('base64') };
+}
+// the woven furniture box honors the size the TEXT stated (the picture
+// rule: pictures decide proportion, text decides numbers)
+const sizeHonored = (stated, box) => Array.isArray(stated) && Array.isArray(box) && box.length === 3
+  && stated.every((v, i) => Math.abs(box[i] - v) <= Math.max(0.5, 0.02 * v));
+
 async function probe(p) {
-  const rec = { id: p.id, persona: p.persona, prior: p.prior, prompt: p.prompt };
+  const image = loadImage(p);
+  const rec = { id: p.id, persona: p.persona, prior: p.prior, prompt: p.prompt || (image ? DEFAULT_IMAGE_UTTERANCE : p.prompt) };
+  if (p.photo) rec.photo = { ...p.photo };
+  if (p.statedSize) rec.statedSize = p.statedSize;
   const recipe = baseRecipe(p);
   rec.context = structuredClone(recipe);   // the starting document — makes the row a self-contained corpus candidate
   try {
@@ -102,7 +127,7 @@ async function probe(p) {
     let out;
     try {
       out = await runIntentLoop({
-        recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE,
+        recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE, image,
         call: callModel,
         weave: async (r) => weaveRec(r),
       });
@@ -151,6 +176,12 @@ async function probe(p) {
       rec.weaveWarnings = (r.warnings ?? []).slice(0, 6);
       rec.hasSbp = !!r.sbp;
       rec.pipeline = out.recipe.pipeline.map(o => o.strategy);
+      // flat-panel furniture reports its assembled box + panel count — the
+      // photo lane's deterministic measurements ride on it
+      const assemblies = (r.preview?.assemblies ?? []).filter(a => Array.isArray(a.box));
+      if (assemblies.length) rec.furniture = assemblies.map(a => ({ box: a.box.map(v => +(+v).toFixed(3)), panels: a.panels?.length ?? 0 }));
+      if (rec.statedSize) rec.sizeHonored = assemblies.some(a => sizeHonored(rec.statedSize, a.box));
+      if (image) rec.assumedLine = (out.summary ?? '').match(/assumed:[^\n]*/i)?.[0]?.slice(0, 300) ?? null;
     } catch (e) {
       rec.outcome = 'WEAVE_CRASH'; rec.error = String(e?.stack ?? e).slice(0, 800); return rec;
     }
@@ -183,9 +214,9 @@ const record = (r) => {
   // PROBE.md guardrail: 3 consecutive API failures abort the batch
   infraStreak = r.infra ? infraStreak + 1 : 0;
   if (infraStreak >= 3 && !aborted) { aborted = true; console.log('3 consecutive model calls failed — aborting the batch (infrastructure)'); }
-  const flag = r.infra ? ' (network/API — not a Loom result)'
+  const flag = (r.photo ? ' [photo]' : '') + (r.statedSize ? (r.sizeHonored ? ' size ✓' : ' size ✗') : '') + (r.infra ? ' (network/API — not a Loom result)'
     : r.prior === 'covered' && /DECLINED|PARTIAL|ALL_SKIPPED|CRASH|ERROR/.test(r.outcome) ? ' ⚠ prior-miss'
-    : r.prior === 'decline' && r.outcome === 'FULFILLED' ? ' ✓ better-than-expected' : '';
+    : r.prior === 'decline' && r.outcome === 'FULFILLED' ? ' ✓ better-than-expected' : '');
   const loop = r.loop ? ` [${r.loop.turns} call${r.loop.turns === 1 ? '' : 's'}${r.loop.fixes ? `, ${r.loop.fixes} fixes` : ''}${r.loop.summaryChanged ? ', summary revised' : ''}]` : '';
   console.log(`[${done}/${todo.length}] ${r.id}: ${r.outcome}${r.verified === false ? ' (verify FAIL)' : ''}${flag}${loop}`);
 };

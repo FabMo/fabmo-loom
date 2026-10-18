@@ -61,10 +61,13 @@ for (const f of readdirSync(RUNS).filter(f => /^\d{4}-\d\d-\d\d(-manual)?-triage
   const day = f.replace('-triage.json', '');
   let tri; try { tri = JSON.parse(readFileSync(RUNS + f, 'utf8')); } catch { continue; }
   const rows = new Map();
-  if (existsSync(`${RUNS}${day}-results.jsonl`))
-    for (const l of readFileSync(`${RUNS}${day}-results.jsonl`, 'utf8').split('\n').filter(Boolean)) {
+  // text rows and the night's picture rows (photo-pick.mjs lane) both feed triage
+  for (const f of [`${RUNS}${day}-results.jsonl`, `${RUNS}${day}-photo-results.jsonl`]) {
+    if (!existsSync(f)) continue;
+    for (const l of readFileSync(f, 'utf8').split('\n').filter(Boolean)) {
       try { const r = JSON.parse(l); rows.set(r.id, r); } catch { /* torn line */ }
     }
+  }
   for (const c of tri.classified ?? []) {
     if (!c?.class || !c.id) continue;
     const row = rows.get(c.id);

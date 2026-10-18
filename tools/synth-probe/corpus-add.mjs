@@ -61,6 +61,9 @@ for (const [idx, raw] of rows.entries()) {
     // the closed loop's record rides along for measurement (replay stays
     // turn-1 only — corrections came from a live model and aren't replayed)
     ...(raw.loop ? { loop: raw.loop, firstSummary: raw.firstSummary, revisedActions: raw.revisedActions ?? [] } : {}),
+    // picture rows: the photo's name + credit and the lane's measurements
+    // ride along (never the image bytes); replay stays text-only
+    ...(raw.photo ? { photo: raw.photo, statedSize: raw.statedSize, sizeHonored: raw.sizeHonored, furniture: raw.furniture, assumedLine: raw.assumedLine } : {}),
   };
   if (usesGuestStrategy(row, env) && !env.guestsLoaded) { guestless++; continue; }
   row.blessed = blessOf(replayRow(row, env));
