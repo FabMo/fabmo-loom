@@ -22,6 +22,7 @@ import { FONTS } from './fonts.mjs';
 import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { simulateJob } from './sim.mjs';
+import { startWeave, LOGO_PALETTE } from './weave.mjs';
 import { loadToolLibrary } from '../ir/tools.js';
 import * as THREE from 'three';
 
@@ -417,19 +418,22 @@ async function generate() {
   busy = true;
   setMsg('');
   $('build').disabled = true;
-  $('build').textContent = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
+  const firstLabel = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
+  $('build').textContent = firstLabel;
   $('result').style.display = 'block';
-  $('weaveOverlay').classList.add('on');
   setBadge('wait', 'thinking…');
+  // the loom at work, over the view, for as long as the model turn runs
+  const stopWeave = startWeave($('view3d'), firstLabel, LOGO_PALETTE);
+  const stage = (s) => { $('build').textContent = s; stopWeave.setLabel?.(s); };
   try {
     const parseContext = structuredClone(promptRecipeView(recipe));
     const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
     let calls = 0;
     const out = await runIntentLoop({
       recipe, utterance, shop: {}, model: currentModel(), image,
-      call: (req) => { if (calls++ > 0) $('build').textContent = calls === 2 ? 'checking the weave…' : 'checking again…'; return send(req); },
+      call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
-        $('build').textContent = 'weaving…';
+        stage('weaving…');
         const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
         if (rec.terrains?.length) return { ok: false, errors: ['terrain references are not available on the phone version — use the full app'], warnings: [], preview: { empty: true } };
         const w = await weave({ recipe: rec, values, terrains: {}, shop: shopForRun() });
@@ -466,10 +470,10 @@ async function generate() {
     }).catch(() => {});
   } catch (e) {
     setMsg(e.message ?? String(e));
-    $('weaveOverlay').classList.remove('on');
     if (!hasDesign()) $('result').style.display = 'none';
     else render();
   } finally {
+    stopWeave();
     busy = false;
     $('build').disabled = false;
     updateBuildLabel();

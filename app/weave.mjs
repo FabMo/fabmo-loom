@@ -13,14 +13,34 @@
 // Self-contained: startWeave(panel) drops an overlay into `panel`
 // (position:relative) and returns a stop() that removes it. Honors
 // prefers-reduced-motion with a static message.
+//
+// palette (optional): { warp: [colors cycled across the warp threads],
+// weft: [colors cycled across the picks], shuttle, bg (overlay wash),
+// pad (the via-pad holes and shuttle eye — the cloth's background) }.
+// The default is the original navy/sky/red; the phone page passes the
+// logo's navy / lime / grey (LOGO_PALETTE).
 
 const NAVY = '#1b2a6b', SKY = '#7ba3d4', RED = '#cc2229';
 
-export function startWeave(panel, label = 'weaving…') {
+// the current loom mark: navy threads, lime and grey weft, grey pads
+export const LOGO_PALETTE = {
+  warp: ['#23245c', '#23245c', '#c2c2c2'],
+  weft: ['#a3c93f', '#c2c2c2'],
+  shuttle: '#23245c',
+  bg: 'rgba(248,248,248,0.92)',
+  pad: '#f8f8f8',
+};
+
+export function startWeave(panel, label = 'weaving…', palette = {}) {
+  const WARP = palette.warp?.length ? palette.warp : [NAVY, SKY];
+  const WEFT = palette.weft?.length ? palette.weft : [RED];
+  const SHUTTLE = palette.shuttle ?? NAVY;
+  const BG = palette.bg ?? 'rgba(247,246,242,0.92)';
+  const PAD = palette.pad ?? 'rgba(247,246,242,1)';
   const overlay = document.createElement('div');
   overlay.style.cssText = `
     position: absolute; inset: 0; z-index: 20; border-radius: 12px;
-    background: rgba(247,246,242,0.92);
+    background: ${BG};
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
   `;
   const note = document.createElement('div');
@@ -41,7 +61,9 @@ export function startWeave(panel, label = 'weaving…') {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = W * dpr;
   canvas.height = H * dpr;
-  canvas.style.cssText = `width:${W}px; height:${H}px;`;
+  // fixed drawing size, fluid display: a phone narrower than 420px shows
+  // the whole loom scaled down rather than a cropped corner of it
+  canvas.style.cssText = `width:min(${W}px, 92%); aspect-ratio:${W}/${H}; height:auto;`;
   overlay.append(canvas, note);
   panel.append(overlay);
 
@@ -81,23 +103,23 @@ export function startWeave(panel, label = 'weaving…') {
   let raf = 0;
   const ease = (t) => 1 - Math.pow(1 - t, 3);
 
-  function weftStrip(y, frac) {
+  function weftStrip(y, frac, color) {
     if (frac <= 0) return;
     const x0 = 6, x1 = 6 + frac * (Wc - 12);
-    ctx.fillStyle = RED;
+    ctx.fillStyle = color;
     ctx.beginPath();
     ctx.roundRect(x0, y, x1 - x0, rowH, rowH / 2);
     ctx.fill();
   }
 
-  function overSegments(y, frac, parity, shadow) {
+  function overSegments(y, frac, parity, shadow, color) {
     const tip = 6 + frac * (Wc - 12);
     if (shadow) {
       ctx.shadowColor = 'rgba(30,30,50,0.35)';
       ctx.shadowBlur = 3;
       ctx.shadowOffsetY = 2.5 * dpr;
     }
-    ctx.fillStyle = RED;
+    ctx.fillStyle = color;
     for (let c = 0; c < COLS; c++) {
       if ((c + parity) % 2 !== 0) continue;
       const x = colX(c);
@@ -137,6 +159,7 @@ export function startWeave(panel, label = 'weaving…') {
 
     const yOf = (r) => fellY + rowPitch * ((t - r.born) / ROW_MS);
     const frOf = (r) => ease(Math.min(1, (t - r.born) / ROW_MS));
+    const colorOf = (r) => WEFT[r.parity % WEFT.length];
 
     // weft passes are clipped to the warp's extent so departing rows
     // slide off the end of the threads instead of floating past them
@@ -150,12 +173,12 @@ export function startWeave(panel, label = 'weaving…') {
     };
 
     // 1. weft under-pass
-    clipWeft(() => rows.forEach((r) => weftStrip(yOf(r), frOf(r))));
+    clipWeft(() => rows.forEach((r) => weftStrip(yOf(r), frOf(r), colorOf(r))));
 
     // 2. warp threads, alternating navy/sky, via-pad ends
     for (let c = 0; c < COLS; c++) {
       const x = colX(c);
-      const color = c % 2 ? SKY : NAVY;
+      const color = WARP[c % WARP.length];
       ctx.strokeStyle = color;
       ctx.lineWidth = warpW;
       ctx.lineCap = 'round';
@@ -168,25 +191,25 @@ export function startWeave(panel, label = 'weaving…') {
       ctx.beginPath();
       ctx.arc(x, 4, 11, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = 'rgba(247,246,242,1)';
+      ctx.fillStyle = PAD;
       ctx.beginPath();
       ctx.arc(x, 4, 4.6, 0, Math.PI * 2);
       ctx.fill();
     }
 
     // 3. weft over-pass — the crossings, with depth shadow
-    clipWeft(() => rows.forEach((r) => overSegments(yOf(r), frOf(r), r.parity, true)));
+    clipWeft(() => rows.forEach((r) => overSegments(yOf(r), frOf(r), r.parity, true, colorOf(r))));
 
     // the shuttle rides the youngest, still-weaving row
     const young = rows[rows.length - 1];
     if (young && (t - young.born) < ROW_MS) {
       const fr = frOf(young);
       const tip = Math.min(6 + fr * (Wc - 12), Wc - 8);
-      ctx.fillStyle = NAVY;
+      ctx.fillStyle = SHUTTLE;
       ctx.beginPath();
       ctx.arc(tip, yOf(young) + rowH / 2, 7, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = 'rgba(247,246,242,1)';
+      ctx.fillStyle = PAD;
       ctx.beginPath();
       ctx.arc(tip, yOf(young) + rowH / 2, 2.8, 0, Math.PI * 2);
       ctx.fill();

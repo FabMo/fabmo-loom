@@ -6,12 +6,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="theme-color" content="#f6f4ee">
+  <meta name="theme-color" content="#f3f3f4">
   <link rel="icon" type="image/jpeg" href="../assets/loom-logo.jpg">
   <style>
+    /* the loom mark's palette: navy threads, lime + grey weft, grey pads */
     :root {
-      --bg: #f6f4ee; --card: #ffffff; --ink: #1f1d18; --muted: #6b665c; --line: #e3e1d8;
-      --accent: #c8541a; --accent-ink: #ffffff; --ok: #2f7d4a; --bad: #b3261e; --soft: #f1ede3;
+      --navy: #23245c; --lime: #a3c93f; --grey: #c2c2c2;
+      --bg: #f3f3f4; --card: #ffffff; --ink: #1e1f3a; --muted: #5f6170; --line: #d2d3d6;
+      --accent: var(--navy); --accent-ink: #ffffff; --ok: #4b7a0b; --bad: #b3261e; --soft: #eef0f2;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; background: var(--bg); color: var(--ink);
@@ -20,7 +22,7 @@
     body { padding: max(12px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); max-width: 560px; margin: 0 auto; }
     header { display: flex; align-items: center; gap: 10px; padding: 6px 0 14px; }
     header img { width: 36px; height: 36px; border-radius: 8px; }
-    header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+    header h1 { font-size: 18px; margin: 0; font-weight: 650; color: var(--navy); }
     header .sub { font-size: 12px; color: var(--muted); }
     header a { margin-left: auto; font-size: 12px; color: var(--muted); text-decoration: none; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
@@ -32,35 +34,37 @@
     button.ghost { background: transparent; }
     button.small { padding: 8px 12px; min-height: 36px; font-size: 14px; border-radius: 10px; }
     .photoBtns button { flex: 1; font-weight: 600; }
-    .photoBtns button span { display: block; line-height: 0; margin-bottom: 6px; color: var(--accent); }
+    .photoBtns button span { display: block; line-height: 0; margin-bottom: 6px; color: var(--navy); }
+    .photoBtns button { border-bottom: 3px solid var(--lime); }
     #thumbWrap { display: none; align-items: center; gap: 12px; margin-top: 12px; }
     #thumb { width: 72px; height: 72px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
     #thumbWrap .meta { font-size: 13px; color: var(--muted); flex: 1; }
     textarea { width: 100%; font: inherit; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; resize: vertical; min-height: 64px; background: #fff; color: var(--ink); }
-    textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    textarea:focus { outline: 2px solid var(--lime); outline-offset: -1px; }
     label.lbl { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px 2px; }
     #build { margin-top: 10px; }
     #auth { display: none; }
     #auth input { width: 100%; font: inherit; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 8px 0; }
     #auth p { margin: 0 0 4px; font-size: 14px; color: var(--muted); }
     #result { display: none; }
-    #view3d { position: relative; border-radius: 12px; overflow: hidden; background: #fdfdfb; min-height: 200px; }
+    #view3d { position: relative; border-radius: 12px; overflow: hidden; background: #f8f8f8; min-height: 300px; border: 1px solid var(--line); }
     #view3d canvas { touch-action: none; }
     #weaveOverlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-      background: rgba(246,244,238,.72); font-weight: 600; color: var(--muted); backdrop-filter: blur(2px); }
+      background: rgba(248,248,248,.72); font-weight: 600; color: var(--muted); backdrop-filter: blur(2px); }
     #weaveOverlay.on { display: flex; }
     .status { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; font-size: 14px; }
     .badge { font-size: 12px; font-weight: 700; letter-spacing: .04em; padding: 3px 8px; border-radius: 999px; background: var(--soft); color: var(--muted); }
-    .badge.ok { background: #e4f3e9; color: var(--ok); }
+    .badge.ok { background: var(--lime); color: var(--navy); }
     .badge.bad { background: #fbe7e5; color: var(--bad); }
-    .badge.wait { background: #fff2e5; color: var(--accent); }
+    .badge.wait { background: var(--grey); color: var(--navy); }
     #numbers { font-size: 13px; color: var(--muted); }
     #errors { color: var(--bad); font-size: 13px; white-space: pre-wrap; margin-top: 6px; }
     #errors:empty { display: none; }
     .slider { margin: 12px 0 2px; }
     .slider .top { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 2px; }
     .slider .top b { font-variant-numeric: tabular-nums; }
-    input[type=range] { width: 100%; accent-color: var(--accent); height: 32px; margin: 0; }
+    input[type=range] { width: 100%; accent-color: var(--navy); height: 32px; margin: 0; }
+    #assemble { accent-color: var(--ok); }
     #assembleWrap { display: none; }
     #assembleWrap .top span { color: var(--muted); font-size: 13px; }
     details.about { margin-top: 10px; font-size: 14px; }
@@ -136,7 +140,7 @@
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.90</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.91</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>
