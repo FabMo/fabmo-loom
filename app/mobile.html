@@ -46,6 +46,12 @@
     #auth { display: none; }
     #auth input { width: 100%; font: inherit; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 8px 0; }
     #auth p { margin: 0 0 4px; font-size: 14px; color: var(--muted); }
+    #guestWrap { display: none; margin-top: 10px; }
+    #guestForm, #guestActions { display: none; margin-top: 8px; }
+    #guestForm input { width: 100%; font: inherit; font-size: 16px; border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 0 0 8px; }
+    #guestNote { font-size: 14px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
+    #guestNote:empty { display: none; }
+    #guestNote code { font-size: 12px; user-select: all; -webkit-user-select: all; }
     #result { display: none; }
     #view3d { position: relative; border-radius: 12px; overflow: hidden; background: #f8f8f8; min-height: 300px; border: 1px solid var(--line); }
     #view3d canvas { touch-action: none; }
@@ -131,6 +137,21 @@
       <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
       <button id="saveKey" class="small" type="button">Save key</button>
     </div>
+    <div id="guestWrap">
+      <button id="guestLink" class="small ghost" type="button">Guest link for a friend</button>
+      <div id="guestForm">
+        <input id="guestName" type="text" placeholder="who is it for? (optional)" autocomplete="off" enterkeyhint="done">
+        <div class="row">
+          <button id="guestMake" class="small" type="button">Make link &amp; copy</button>
+          <button id="guestCancel" class="small ghost" type="button">Cancel</button>
+        </div>
+      </div>
+      <div id="guestNote"></div>
+      <div class="row" id="guestActions">
+        <button id="guestCopy" class="small" type="button">Copy link</button>
+        <button id="guestShare" class="small" type="button">Share…</button>
+      </div>
+    </div>
   </section>
 
   <section class="card" id="result">
@@ -152,7 +173,7 @@
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.102</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.103</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>

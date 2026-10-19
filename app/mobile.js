@@ -87,6 +87,88 @@ $('saveKey').addEventListener('click', () => {
   $('apiKey').value = '';
   showAuth(false);
   setMsg('');
+  refreshGuestUI();
+});
+
+// ---- guest links: hand a friend a metered pass on the shop's key ----
+// Visible only when this browser holds an API key, because the server
+// accepts a mint only from the holder of ITS OWN key (that is what "my key"
+// means here: guests' calls bill to the shop key, exactly like every other
+// guest pass). The link is this very page with ?invite=…, so a texted link
+// opens the phone version.
+const GUEST_PASS = { perWindow: 4, windowHours: 1, days: 14 };
+let guestUrl = null;
+function refreshGuestUI() {
+  $('guestWrap').style.display = localStorage.getItem('loom:apiKey') ? 'block' : 'none';
+}
+function guestLinkFor(token) {
+  const u = new URL(location.href);
+  u.search = '';
+  u.hash = '';
+  u.searchParams.set('invite', token);
+  return u.toString();
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  // older WebViews: a selected, visible node + execCommand
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+$('guestLink').addEventListener('click', () => {
+  $('guestForm').style.display = 'block';
+  $('guestActions').style.display = 'none';
+  $('guestNote').textContent = '';
+  $('guestName').focus();
+});
+$('guestCancel').addEventListener('click', () => { $('guestForm').style.display = 'none'; });
+$('guestName').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('guestMake').click(); } });
+$('guestMake').addEventListener('click', async () => {
+  const key = localStorage.getItem('loom:apiKey');
+  if (!key) { showAuth(true); return; }
+  $('guestMake').disabled = true;
+  $('guestNote').textContent = 'making the link…';
+  try {
+    let res, payload;
+    try {
+      res = await fetch('/api/intent/invite', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': key },
+        body: JSON.stringify({ name: $('guestName').value.trim(), ...GUEST_PASS }),
+      });
+      payload = await res.json().catch(() => ({}));
+    } catch (e) { throw new Error(networkFailureMessage(e)); }
+    if (!res.ok || !payload.token) throw new Error(payload.error || `the server answered ${res.status}`);
+    guestUrl = guestLinkFor(payload.token);
+    const copied = await copyText(guestUrl);
+    const who = payload.invite?.name ? ` for ${payload.invite.name}` : '';
+    const until = payload.invite?.expires ? new Date(payload.invite.expires).toLocaleDateString() : '';
+    $('guestNote').innerHTML = `${copied ? 'Copied' : 'Link ready'}${who}: ${GUEST_PASS.perWindow} prompts an hour on this shop's key${until ? `, good until ${until}` : ''}. <code></code>`;
+    $('guestNote').querySelector('code').textContent = guestUrl;
+    $('guestForm').style.display = 'none';
+    $('guestActions').style.display = 'flex';
+    $('guestShare').style.display = navigator.share ? '' : 'none';
+    $('guestName').value = '';
+  } catch (e) {
+    $('guestNote').textContent = `Couldn't make a guest link: ${e.message}`;
+  } finally {
+    $('guestMake').disabled = false;
+  }
+});
+$('guestCopy').addEventListener('click', async () => {
+  if (!guestUrl) return;
+  const ok = await copyText(guestUrl);
+  $('guestCopy').textContent = ok ? 'Copied ✓' : 'Long-press the link to copy';
+  setTimeout(() => { $('guestCopy').textContent = 'Copy link'; }, 1800);
+});
+$('guestShare').addEventListener('click', async () => {
+  if (!guestUrl || !navigator.share) return;
+  try { await navigator.share({ title: 'Try Loom', text: 'Snap a photo of a piece of furniture and Loom turns it into a cut file. This link gives you a few prompts an hour:', url: guestUrl }); } catch {}
 });
 
 async function parseDirect(req, key) {
@@ -679,6 +761,7 @@ async function loadGuests() {
   const restored = loadState();
   updateBuildLabel();
   if (!haveAuth()) showAuth(true);
+  refreshGuestUI();
   const loaded = {};
   await Promise.all(FONTS.map(async (f) => {
     const res = await fetch(f.file);

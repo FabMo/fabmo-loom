@@ -6,13 +6,13 @@
 // every request).
 //
 //   node intent/invite-cli.mjs add "Ted @ MIT" [--days 7] [--until 2026-08-01]
-//                                  [--per-window 20] [--base URL]
+//                                  [--per-window 20] [--window-hours 5] [--base URL]
 //   node intent/invite-cli.mjs list
 //   node intent/invite-cli.mjs revoke <token-or-name>
 
 import fs from 'fs';
 import { execFileSync } from 'child_process';
-import { REGISTRY_FILE, loadRegistry, saveRegistry, newToken, newInvite, inviteStatus } from './invites.js';
+import { REGISTRY_FILE, loadRegistry, saveRegistry, newToken, newInvite, inviteStatus, windowLength } from './invites.js';
 
 const DEFAULT_BASE = 'https://labs.shopbottools.com/loom/';
 
@@ -51,11 +51,12 @@ if (cmd === 'add') {
     days: flags.days ? Number(flags.days) : undefined,
     until: flags.until,
     perWindow: flags['per-window'] ? Number(flags['per-window']) : undefined,
+    windowHours: flags['window-hours'] ? Number(flags['window-hours']) : undefined,
   });
   save(reg);
   const e = reg[token];
   console.log(`minted guest pass for ${e.name}`);
-  console.log(`  ${e.perWindow} prompts per 5-hour window · expires ${new Date(e.expires).toLocaleString()}`);
+  console.log(`  ${e.perWindow} prompts per ${windowLength(e) / 3600000}-hour window · expires ${new Date(e.expires).toLocaleString()}`);
   console.log(`  ${(flags.base ?? DEFAULT_BASE)}?invite=${token}`);
 } else if (cmd === 'list') {
   const reg = loadRegistry();

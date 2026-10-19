@@ -26,7 +26,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { buildParseRequest } from './step-schema.js';
-import { loadRegistry, saveRegistry, inviteStatus, consumeInvite, refundInvite, recordUsage } from './invites.js';
+import { loadRegistry, saveRegistry, inviteStatus, consumeInvite, refundInvite, recordUsage, newToken, newInvite } from './invites.js';
 
 const ENV_FILE = '/var/opt/apps/.intent.env';
 const FUNNEL_FILE = '/var/opt/apps/.intent-funnel.jsonl';
@@ -220,6 +220,39 @@ export function mountIntent(app) {
     }
   });
 
+  // Mint a guest pass from the app. The shop's own Anthropic key is the
+  // credential: whoever holds it may hand out metered access to it. The
+  // phone already sends that key to api.anthropic.com for BYO parses; here
+  // it travels only to this server (HTTPS), is compared in constant time,
+  // and is never stored or logged. Windows are hourly by default for these
+  // links (a trial someone texts around), capped so a typo can't mint a
+  // firehose.
+  app.post('/api/intent/invite', (req, res) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+    if (rateLimited(ip)) return res.status(429).json({ ok: false, error: 'Too many requests — wait a minute.' });
+    const key = readKey();
+    if (!key) return res.status(503).json({ ok: false, error: 'This server has no API key of its own, so it cannot host guest passes.' });
+    const given = Buffer.from(String(req.get('x-api-key') ?? ''));
+    const own = Buffer.from(key);
+    if (given.length !== own.length || !crypto.timingSafeEqual(given, own)) {
+      return res.status(403).json({ ok: false, error: 'Only the holder of this server\'s own Anthropic key can make guest links — the key saved in this browser is a different one.' });
+    }
+    const clampInt = (v, lo, hi, d) => (Number.isFinite(+v) && v !== '' && v != null ? Math.min(hi, Math.max(lo, Math.round(+v))) : d);
+    const { name, perWindow, windowHours, days } = req.body ?? {};
+    const nm = (clip(String(name ?? ''), 60) ?? '').trim() || `Guest ${new Date().toISOString().slice(0, 10)}`;
+    const reg = loadRegistry();
+    const token = newToken();
+    reg[token] = newInvite(nm, {
+      days: clampInt(days, 1, 90, 14),
+      perWindow: clampInt(perWindow, 1, 20, 4),
+      windowHours: clampInt(windowHours, 1, 24, 1),
+    });
+    reg[token].mintedBy = 'app';
+    saveRegistry(reg);
+    console.log(`[intent] guest pass minted from the app: ${nm} (${reg[token].perWindow}/${clampInt(windowHours, 1, 24, 1)}h, ${clampInt(days, 1, 90, 14)} days)`);
+    return res.json({ ok: true, token, invite: inviteStatus(reg[token]) });
+  });
+
   // Guest-pass status for the app's chip — never consumes a prompt.
   app.get('/api/intent/invite', (req, res) => {
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
@@ -246,5 +279,5 @@ export function mountIntent(app) {
     return res.json({ ok: true, queryId });
   });
 
-  console.log('[intent] /api/intent/step + /api/intent/loom + /api/intent/invite + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
+  console.log('[intent] /api/intent/step + /api/intent/loom + /api/intent/invite (GET status, POST mint) + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
 }

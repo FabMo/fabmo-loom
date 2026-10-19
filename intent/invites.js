@@ -1,8 +1,9 @@
 // Guest-pass invites — metered access to the shop's Anthropic key.
 //
 // An invite is a random token handed out as a link (?invite=lk_…). Each
-// token gets `perWindow` prompts per 5-hour window, Claude-style: the
-// window opens at the first prompt and unused prompts never accumulate.
+// token gets `perWindow` prompts per window (5 hours by default; a
+// per-invite `windowMs` overrides it — an hourly trial link), Claude-style:
+// the window opens at the first prompt and unused prompts never accumulate.
 // The window cap is the abuse bound; `expires` is the social contract
 // (end of a workshop, end of a trial).
 //
@@ -25,7 +26,7 @@ export function newToken() {
   return 'lk_' + crypto.randomBytes(12).toString('base64url');
 }
 
-export function newInvite(name, { days = 7, until, perWindow = 20 } = {}, now = Date.now()) {
+export function newInvite(name, { days = 7, until, perWindow = 20, windowHours } = {}, now = Date.now()) {
   const expires = until ? Date.parse(until) : now + days * 24 * 3600 * 1000;
   if (isNaN(expires)) throw new Error(`bad expiry date: ${until}`);
   return {
@@ -33,6 +34,8 @@ export function newInvite(name, { days = 7, until, perWindow = 20 } = {}, now = 
     created: new Date(now).toISOString(),
     expires: new Date(expires).toISOString(),
     perWindow,
+    // absent = WINDOW_MS (older registry entries have no field)
+    ...(windowHours > 0 ? { windowMs: Math.round(windowHours * 3600 * 1000) } : {}),
     revoked: false,
     windowStart: null,   // ms epoch of the window-opening prompt
     windowUsed: 0,
@@ -53,12 +56,17 @@ export function saveRegistry(reg, file = REGISTRY_FILE) {
   fs.writeFileSync(file, JSON.stringify(reg, null, 2) + '\n');
 }
 
+export function windowLength(entry) {
+  return entry?.windowMs > 0 ? entry.windowMs : WINDOW_MS;
+}
+
 function windowState(entry, now) {
-  const open = entry.windowStart != null && now - entry.windowStart < WINDOW_MS;
+  const len = windowLength(entry);
+  const open = entry.windowStart != null && now - entry.windowStart < len;
   return {
     open,
     used: open ? entry.windowUsed : 0,
-    resetsAt: open && entry.windowUsed > 0 ? entry.windowStart + WINDOW_MS : null,
+    resetsAt: open && entry.windowUsed > 0 ? entry.windowStart + len : null,
   };
 }
 
@@ -72,6 +80,7 @@ export function inviteStatus(entry, now = Date.now()) {
     valid: true,
     name: entry.name,
     perWindow: entry.perWindow,
+    windowMs: windowLength(entry),
     remaining: Math.max(0, entry.perWindow - w.used),
     resetsAt: w.resetsAt,
     expires: entry.expires,

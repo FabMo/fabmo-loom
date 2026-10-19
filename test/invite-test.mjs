@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { newInvite, newToken, inviteStatus, consumeInvite, refundInvite, recordUsage, loadRegistry, saveRegistry, WINDOW_MS } from '../intent/invites.js';
+import { newInvite, newToken, inviteStatus, consumeInvite, refundInvite, recordUsage, loadRegistry, saveRegistry, WINDOW_MS, windowLength } from '../intent/invites.js';
 
 let failures = 0;
 function check(label, got, want) {
@@ -68,6 +68,20 @@ rev.revoked = true;
 check('revoked consume refused', consumeInvite(rev, T0).ok, false);
 check('revoked reason', consumeInvite(rev, T0).reason, 'revoked');
 check('unknown token invalid', inviteStatus(undefined, T0).valid, false);
+
+console.log('per-invite window length (the hourly trial link)');
+const hourly = newInvite('texted link', { days: 14, perWindow: 4, windowHours: 1 }, T0);
+check('windowMs recorded', hourly.windowMs, HOUR);
+check('status reports the window length', inviteStatus(hourly, T0).windowMs, HOUR);
+check('default invites report the 5-hour window', inviteStatus(inv, T0).windowMs, WINDOW_MS);
+check('windowLength of a legacy entry (no field) is WINDOW_MS', windowLength({ perWindow: 20 }), WINDOW_MS);
+for (let i = 0; i < 4; i++) consumeInvite(hourly, T0 + i * 10 * 60 * 1000);
+let hr = consumeInvite(hourly, T0 + 50 * 60 * 1000);
+check('5th prompt inside the hour refused', hr.ok, false);
+check('…and it resets one hour after the first prompt', hr.resetsAt, T0 + HOUR);
+hr = consumeInvite(hourly, T0 + HOUR + 1);
+check('a minute past the hour the window reopens', hr.ok, true);
+check('fresh hourly window has 3 left after the opener', hr.remaining, 3);
 
 console.log('usage totals accumulate');
 recordUsage(inv, { input: 3200, output: 410 });
