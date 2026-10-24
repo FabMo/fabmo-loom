@@ -570,12 +570,26 @@ function applyFrame(r, frame, opId) {
   const t = frameTransformers(frame);
   for (const sub of (r.ops ?? [r])) {
     if (sub.target?.type === 'heightmap') {
-      return { error: `"${opId}" machines a 3D surface — surface targets can't mount into a frame yet (texture on a panel is a future move); engraving and outline text work today` };
+      // a pure translation (piece layout: rot 0) carries a heightmap by
+      // shifting its origin and mask — the verifier handles translated
+      // heightmaps itself and refuses only rotated ones. A rotated frame
+      // (a guest panel) still cannot mount one.
+      if (frame.rot) {
+        return { error: `"${opId}" machines a 3D surface — surface targets can't mount into a frame yet (texture on a panel is a future move); engraving and outline text work today` };
+      }
+      const hm = sub.target.heightmap;
+      sub.target = {
+        ...sub.target,
+        heightmap: { ...hm, originX: hm.originX + frame.cx, originY: hm.originY + frame.cy },
+        mask: sub.target.mask ? t.region(sub.target.mask) : sub.target.mask,
+      };
     }
     if (sub.moves) sub.moves = t.moves(sub.moves);
     if (sub.target?.rings) sub.target = { ...sub.target, rings: sub.target.rings.map(t.ring) };
     if (sub.previewRing) sub.previewRing = t.ring(sub.previewRing);
     if (sub.previewRegions) sub.previewRegions = sub.previewRegions.map(t.region);
+    if (sub.previewHoles) sub.previewHoles = sub.previewHoles.map(t.pt);
+    if (sub.previewTabs) sub.previewTabs = sub.previewTabs.map(t.pt);
     if (sub.previewVee) {
       sub.previewVee = {
         ...sub.previewVee,
@@ -595,6 +609,33 @@ function applyFrame(r, frame, opId) {
     };
   }
   return null;
+}
+
+// is every point of `inner` inside `outer`, at least `clearance` from its
+// edge? Brute force on the flattened rings (nesting decisions only — the
+// verifier re-proves the kerfs independently)
+function ringInsideRing(inner, outer, clearance) {
+  const n = outer.length;
+  const inside = (q) => {
+    let ok = false;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const a = outer[i], b = outer[j];
+      if ((a.y > q.y) !== (b.y > q.y) && q.x < ((b.x - a.x) * (q.y - a.y)) / (b.y - a.y) + a.x) ok = !ok;
+    }
+    return ok;
+  };
+  const dist = (q) => {
+    let best = Infinity;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const a = outer[i], b = outer[j];
+      const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy;
+      const t = L ? Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / L)) : 0;
+      best = Math.min(best, Math.hypot(q.x - (a.x + t * dx), q.y - (a.y + t * dy)));
+    }
+    return best;
+  };
+  for (const q of inner) if (!inside(q) || dist(q) < clearance) return false;
+  return true;
 }
 
 // every cut point the pipeline has produced so far — what a fit-derived
@@ -705,6 +746,58 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
  *                        by chipload for the matched bits.
  * @returns {{ ok, errors, warnings, report?, job?, sbp?, gcode?, preview }}
  */
+// ---- stacked assembly: a SET whose pieces glue up into one object ----
+// recipe.assembly {kind:'stack', align:'holes'|'center'}: every closed
+// piece becomes an assembly panel — its closing cutout's outline, with its
+// bores and any nested cutout as holes — lying where it is cut (sheet) and
+// stacked in pipeline order along the vertical (world, Y-up), one stock
+// thickness per layer, aligned on each piece's first bore hole (the dowel)
+// or on its outline's center. app/assembly3d.mjs then draws the stack
+// rising out of the board exactly as it draws furniture (a stacked-slice
+// stool, a laminated contour model, rings on a peg — 2026-10-19).
+const circleRing = (x, y, r, n = 36) => Array.from({ length: n }, (_, i) => ({ x: x + r * Math.cos((2 * Math.PI * i) / n), y: y + r * Math.sin((2 * Math.PI * i) / n) }));
+function buildStackAssembly(scopes, built, thickness, spec, warnings) {
+  const align = spec?.align === 'center' ? 'center' : 'holes';
+  const layers = [];
+  scopes.forEach((s, si) => {
+    if (!s.closed || s.absorbed) return;
+    const mine = built.filter(e => e.piece === si);
+    const cutouts = mine.filter(e => e.r.previewRing?.length >= 3 && !e.r.rib);
+    if (!cutouts.length) return;
+    const outer = cutouts[cutouts.length - 1];           // the closing cutout; earlier ones nested → holes
+    const ring = outer.r.previewRing;
+    const holes = cutouts.slice(0, -1).map(e => e.r.previewRing);
+    const bores = mine.flatMap(e => e.r.previewHoles ?? []).filter(h => h?.r > 0);
+    for (const h of bores) holes.push(circleRing(h.x, h.y, h.r));
+    let ax, ay;
+    if (align === 'holes' && bores.length) { ax = bores[0].x; ay = bores[0].y; }
+    else {
+      if (align === 'holes') warnings.push(`stack: piece ${layers.length + 1} ("${outer.op.id}") has no hole to line up on — stacked on its outline's center`);
+      const xs = ring.map(q => q.x), ys = ring.map(q => q.y);
+      ax = (Math.min(...xs) + Math.max(...xs)) / 2; ay = (Math.min(...ys) + Math.max(...ys)) / 2;
+    }
+    layers.push({ id: outer.op.id, ring, holes, ax, ay });
+  });
+  if (!layers.length) return null;
+  // world frame: the stack's footprint in X ∈ [0, W], Z ∈ [0, D] (the box
+  // contract the view centers on the stock); a ring point (a, b) of layer k
+  // lands at (a − ax + offX, k·t, ay − b + offZ)
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const L of layers) for (const q of L.ring) {
+    const X = q.x - L.ax, Z = L.ay - q.y;
+    minX = Math.min(minX, X); maxX = Math.max(maxX, X); minZ = Math.min(minZ, Z); maxZ = Math.max(maxZ, Z);
+  }
+  const offX = -minX, offZ = -minZ;
+  const panels = layers.map((L, k) => ({
+    id: L.id, thickness,
+    rings: [L.ring, ...L.holes],
+    sheet: { x: 0, y: 0, rot: 0 },                        // rings are already in the working frame
+    world: { origin: [offX - L.ax, k * thickness, L.ay + offZ], u: [1, 0, 0], v: [0, 0, -1] },
+    setup: 1, active: true,
+  }));
+  return { kind: 'stack', align, layers: panels.length, height: panels.length * thickness, box: [maxX - minX, panels.length * thickness, maxZ - minZ], panels };
+}
+
 export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}, placeAt = null) {
   const errors = [];
   const stock = recipe.stock;
@@ -772,6 +865,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
 
   // ---- run each strategy in local coords, growing the content bbox ----
   const built = [];
+  let opPieces = 0;   // pieces freed by verbs that free several (rib_lattice)
   const strategyWarnings = [];
   // assembled-view data: an entry (guest furniture) may return `assembly`
   // alongside its ops — flat panels with sheet placements and world poses.
@@ -787,19 +881,114 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // the INGREDIENTS LIST — what the shop must have on hand to cut this
   // (see mergeIngredients below): ops contribute sheets and hardware
   const ingredients = [];
+  // ---- PIECE SCOPES: a cutout frees a piece and ENDS it ----
+  // The ops after a cutout belong to the NEXT piece. Each piece runs in
+  // its own content context — content-fit checks, self-sizing and
+  // centering defaults read only their own piece — authored about the
+  // origin like the first, and layoutPieces() moves any later piece that
+  // lands on an earlier one off to the side once the pipeline has run.
+  // The first scope IS ctx, untouched: a one-piece recipe behaves exactly
+  // as before. A cutout right after a cutout is tried against the closed
+  // piece first — enclosing it is nesting (a ring from a disc), not a
+  // second piece. Framed ops ride with the piece that published the frame.
+  const newScopeCtx = () => ({
+    ...ctx, contentBBox: null, contentRings: [], contentOwners: [], priorCutouts: [], opBoxes: [], edgeOps: new Set(), cutoutsAhead: 0,
+  });
+  const scopes = [{ ctx, closed: false, shapeIds: new Set() }];
+  let scope = scopes[0];
+  const scopeOfOp = new Map();   // op id → scope index
+  // ---- PIECE LAYOUT, incremental: a piece is placed the moment its
+  // cutout closes it. Every piece is authored about the origin, so a later
+  // piece usually lands ON the first: such a piece slides into a row to
+  // the right of everything placed so far (wrapping to a row above when
+  // the shop's width is declared); a piece authored clear of the others
+  // stays exactly where it was put. The whole piece moves — moves,
+  // declared targets, previews, its content record, the shapes it
+  // referenced — by one translation (frameTransformers, rot 0), so a
+  // later cutout's nesting test sees pieces where they really are and
+  // the verifier's footprint-overlap gate, unchanged, still proves that
+  // no two kerfs touch.
+  const gap = Number.isFinite(recipe.pieceGap) && recipe.pieceGap > 0 ? recipe.pieceGap : 0.5;
+  const limits = [shop?.machineW, shop?.materialW].filter(v => v > 0);
+  const limitW = limits.length ? Math.min(...limits) - 2 * (recipe.margin ?? 0.375) : Infinity;
+  const unionBox = (a, b) => (!b ? a : !a
+    ? { ...b }
+    : { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) });
+  const touches = (a, b) => a.minX < b.maxX + gap && b.minX < a.maxX + gap && a.minY < b.maxY + gap && b.minY < a.maxY + gap;
+  const shiftBox = (b, dx, dy) => ({ minX: b.minX + dx, minY: b.minY + dy, maxX: b.maxX + dx, maxY: b.maxY + dy });
+  const livePlaced = () => scopes.filter(s => s.placed && !s.absorbed);
+  const extent = () => livePlaced().reduce((a, s) => unionBox(a, s.ctx.contentBBox), null);
+  const shiftedShapes = new Set();
+  // The first row keeps the authored centerline (pieces sit about the
+  // origin like the first one). A WRAPPED row has a floor — the top of
+  // everything below it plus the gap — and every piece in it stands ON that
+  // floor, never centered on a row line: pieces in a set vary in height
+  // (a stacked-slice stool's ellipses shrink to a waist and grow again),
+  // and a taller piece centered on the row's line reaches down into the
+  // row below (21-slice stool, 2026-10-19: slices 11 and 20 overlapped).
+  let row = null;   // the overflow row: { minX, maxX, cy | floorY, wrapped }
+  const placeScope = (s) => {
+    const b = s.ctx.contentBBox;
+    if (!b || s.absorbed || s.placed) return;
+    s.placed = true;
+    const others = livePlaced().filter(o => o !== s);
+    if (!others.length || !others.some(o => touches(o.ctx.contentBBox, b))) return;
+    const ext = extent();
+    const w = b.maxX - b.minX;
+    const first = others[0].ctx.contentBBox;
+    if (!row) row = { minX: ext.minX, maxX: ext.maxX, cy: (first.minY + first.maxY) / 2, wrapped: false };
+    if (!row.wrapped) row.maxX = Math.max(row.maxX, ext.maxX);
+    if (row.maxX > row.minX && row.maxX - row.minX + gap + w > limitW) {
+      row = { minX: ext.minX, maxX: ext.minX - gap, floorY: ext.maxY + gap, wrapped: true };
+    }
+    const dx = row.maxX + gap - b.minX;
+    const dy = row.wrapped ? row.floorY - b.minY : row.cy - (b.minY + b.maxY) / 2;
+    row.maxX = b.maxX + dx;
+    const idx = scopes.indexOf(s);
+    for (const e of built) {
+      if (e.piece !== idx) continue;
+      const fe = applyFrame(e.r, { cx: dx, cy: dy, rot: 0 }, e.op.id);
+      if (fe) errors.push(`piece ${idx + 1} (op "${e.op.id}"): ${fe.error}`);
+      const prev = e.r.pieceShift ?? { dx: 0, dy: 0 };
+      e.r.pieceShift = { dx: prev.dx + dx, dy: prev.dy + dy };
+    }
+    // an assembly this piece published (rib_lattice, furniture) lies where
+    // the piece now lies: its sheet poses are additive, the rings stay
+    for (const a of assemblies) {
+      if (scopeOfOp.get(a.opId) !== idx) continue;
+      for (const pn of a.panels ?? []) pn.sheet = { ...(pn.sheet ?? {}), x: (pn.sheet?.x ?? 0) + dx, y: (pn.sheet?.y ?? 0) + dy };
+    }
+    const mv = (q) => ({ ...q, x: q.x + dx, y: q.y + dy });
+    s.ctx.contentBBox = shiftBox(b, dx, dy);
+    s.ctx.contentRings = (s.ctx.contentRings ?? []).map(ring => ring.map(mv));
+    s.ctx.opBoxes = (s.ctx.opBoxes ?? []).map(ob => ({ ...ob, bbox: shiftBox(ob.bbox, dx, dy) }));
+    for (const so of shapeOutlines) {
+      if (!s.shapeIds.has(so.id) || shiftedShapes.has(so.id)) continue;
+      shiftedShapes.add(so.id);
+      so.rings = so.rings.map(ring => ring.map(mv));
+    }
+  };
   for (const op of recipe.pipeline) {
     const entry = CATALOG[op.strategy];
     if (!entry) { errors.push(`unknown strategy "${op.strategy}"`); continue; }
     const p = resolveParams(entry, op, controlValues, vars, errors, strategyWarnings);
     if (errors.length) break;
+    // which piece this op belongs to: any op after a closed piece opens
+    // the next one. (A cutout that then encloses earlier pieces whole
+    // ABSORBS them — nesting — see below.)
+    if (!op.frame && scope.closed) {
+      scope = { ctx: newScopeCtx(), closed: false, shapeIds: new Set() };
+      scopes.push(scope);
+    }
+    const sctx = op.frame ? ctx : scope.ctx;
     // fit-derived shapes lower HERE, at first reference: the content
-    // machined so far is exactly what they must wrap. This must run BEFORE
-    // the undrawn gate below — a fit over a not-yet-drawn shape only
-    // reveals itself as undrawn once resolved (it sat in `pending`, not in
-    // `shapes`, so the gate cannot see it earlier).
+    // machined so far (in THIS piece) is exactly what they must wrap. This
+    // must run BEFORE the undrawn gate below — a fit over a not-yet-drawn
+    // shape only reveals itself as undrawn once resolved (it sat in
+    // `pending`, not in `shapes`, so the gate cannot see it earlier).
     for (const v of Object.values(p)) {
       if (typeof v !== 'string' || !bs.pending.has(v)) continue;
-      const e = bs.resolve(v, ctx);
+      const e = bs.resolve(v, sctx);
       if (e) { errors.push(`op "${op.id}": ${e.error}`); break; }
     }
     if (errors.length) break;
@@ -831,17 +1020,87 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     }
     // who is running: content outlines are attributed to their op, so a
     // refused cutout can name the op that pokes out of it
-    (frame ? frame.ctx : ctx).opId = op.id;
-    // cutouts still to come after this op: a cutout that is not the last
-    // one and cannot enclose the content is a slot or a second piece, and
-    // its refusal says that instead of "enlarge the outline"
-    if (!frame) ctx.cutoutsAhead = recipe.pipeline.slice(recipe.pipeline.indexOf(op) + 1)
+    const cutoutsAhead = recipe.pipeline.slice(recipe.pipeline.indexOf(op) + 1)
       .filter(o => !o.frame && CATALOG[o.strategy]?.wrapsContent).length;
-    const r = entry.run(p, frame ? frame.ctx : ctx);
+    const arm = (c) => {
+      c.opId = op.id;
+      // cutouts still to come after this op: a cutout that is not the last
+      // one and cannot enclose the content is a slot, and its refusal says
+      // that instead of "enlarge the outline"
+      c.cutoutsAhead = cutoutsAhead;
+    };
+    arm(frame ? frame.ctx : scope.ctx);
+    let r = entry.run(p, frame ? frame.ctx : scope.ctx);
+    // NESTING: a cutout that encloses earlier finished pieces WHOLE —
+    // their content and their outlines — absorbs them into this piece
+    // (a ring from a disc; a plate around through-slots cut before it;
+    // a tag around the drop-outs it frees). The cutout is re-run against
+    // the merged content and only a clean run merges — its own fit check
+    // decides. Anything else stays a separate piece, kept clear by the
+    // layout below. Returns the merged run's result, or null.
+    const tryAbsorb = (victims) => {
+      if (!victims.length) return null;
+      // the victims' own outlines must sit INSIDE this one with a kerf of
+      // clearance — a bbox match is not nesting when the outlines coincide
+      // (two identical half-circles each with a label: the fit check
+      // passes on the labels alone, and the two kerfs would cut the same
+      // path). Cutout rings are the built entries' previewRing.
+      const all = [...victims, scope];
+      const m = {
+        ...scope.ctx,
+        contentBBox: all.reduce((a, s) => {
+          const b = s.ctx.contentBBox;
+          return !b ? a : !a ? { ...b } : { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) };
+        }, null),
+        contentRings: all.flatMap(s => s.ctx.contentRings ?? []),
+        contentOwners: all.flatMap(s => s.ctx.contentOwners ?? []),
+        priorCutouts: all.flatMap(s => s.ctx.priorCutouts ?? []),
+        opBoxes: all.flatMap(s => s.ctx.opBoxes ?? []),
+        edgeOps: new Set(all.flatMap(s => [...(s.ctx.edgeOps ?? [])])),
+      };
+      arm(m);
+      const r2 = entry.run(p, m);
+      if (r2.error || r2.skip) return null;
+      const outer = (r2.ops ?? [r2]).map(s => s.previewRing).filter(Boolean).pop();
+      if (!outer) return null;
+      const newTool = (r2.ops ?? [r2]).find(s => s.previewRing)?.tool?.diameter ?? 0.25;
+      for (const v of victims) {
+        for (const e of built) {
+          if (!v.ctx.priorCutouts?.includes(e.op.id) || !e.r.previewRing) continue;
+          const clearance = (newTool + (e.r.tool?.diameter ?? 0.25)) / 2 + 0.02;
+          if (!ringInsideRing(e.r.previewRing, outer, clearance)) return null;
+        }
+      }
+      const si = scopes.indexOf(scope);
+      for (const v of victims) {
+        v.absorbed = true;
+        const vi = scopes.indexOf(v);
+        for (const e of built) if (e.piece === vi) e.piece = si;
+        for (const [k, val] of scopeOfOp) if (val === vi) scopeOfOp.set(k, si);
+        for (const id of v.shapeIds) scope.shapeIds.add(id);
+      }
+      Object.assign(scope.ctx, { contentBBox: m.contentBBox, contentRings: m.contentRings, contentOwners: m.contentOwners, priorCutouts: m.priorCutouts, opBoxes: m.opBoxes, edgeOps: m.edgeOps });
+      return r2;
+    };
+    const closedPieces = () => scopes.filter(s => s !== scope && s.closed && !s.absorbed && s.ctx.contentBBox);
+    if (!frame && entry.wrapsContent && r.error && !scope.ctx.contentBBox) {
+      // a cutout with nothing of its own (a self-sizing tag straight after
+      // the slots it should surround): before refusing, see whether it is
+      // the outline AROUND the earlier pieces
+      const r2 = tryAbsorb(closedPieces());
+      if (r2) r = r2;
+    }
     // a strategy may SKIP itself (blank text on an optional caption):
     // the op contributes nothing, the rest of the pipeline still builds
     if (r.skip) { strategyWarnings.push(`op "${op.id}": ${r.skip}`); continue; }
     if (r.error) { errors.push(`op "${op.id}": ${r.error}`); break; }
+    if (!frame && entry.wrapsContent && r.bbox) {
+      // the bbox test nominates the pieces this outline encloses whole
+      const rb = r.bbox;
+      const inside = (a) => a.minX >= rb.minX - 1e-6 && a.minY >= rb.minY - 1e-6 && a.maxX <= rb.maxX + 1e-6 && a.maxY <= rb.maxY + 1e-6;
+      const r2 = tryAbsorb(closedPieces().filter(s => inside(s.ctx.contentBBox)));
+      if (r2) r = r2;
+    }
     if (frame) {
       // panel-local extent accumulates BEFORE the transform (that is what
       // the next framed op on this panel must compose against)
@@ -854,7 +1113,12 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
             }
           : { ...lb };
         if (lb.maxX - lb.minX > frame.w + 1e-6 || lb.maxY - lb.minY > frame.h + 1e-6) {
-          strategyWarnings.push(`op "${op.id}": the content (${(lb.maxX - lb.minX).toFixed(1)}" × ${(lb.maxY - lb.minY).toFixed(1)}") overflows the "${op.frame}" panel (${frame.w}" × ${frame.h}") — it will cross the panel's own cuts and be refused`);
+          // REFUSED, not warned: thin engraving strokes crossing the
+          // panel's own kerf only graze it (under the verifier's sliver
+          // tolerance), so the footprint gate alone let a 9" carve on a
+          // 6" model seat through (field report 2026-10-19)
+          errors.push(`op "${op.id}": the content (${(lb.maxX - lb.minX).toFixed(1)}" × ${(lb.maxY - lb.minY).toFixed(1)}") overflows the "${op.frame}" panel (${frame.w}" × ${frame.h}") — it would cross the panel's own cuts; make it smaller (letterHeight) or mount it on a bigger panel`);
+          break;
         }
       }
       const fe = applyFrame(r, frame, op.id);
@@ -862,40 +1126,81 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     }
     if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
     if (r.setups) setups.push({ opId: op.id, ...r.setups });
-    for (const f of r.frames ?? []) frames[f.id] = { ...f };
+    for (const f of r.frames ?? []) frames[f.id] = { ...f, publisher: op.id };
     for (const ing of r.ingredients ?? []) addIngredient(ingredients, ing, op.id);
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
     // pocket + a smaller-bit rest pass = two tools); each sub-op carries
     // its own tool, moves, and declared target
+    // Framed content machines BEFORE its publisher: spliced in ahead of
+    // the publisher's first sub-op, though it sits later in the pipeline.
+    // Two reasons. The panel is untouched stock under the V-bit, not a
+    // tabbed island (a carve posted after the release profiles cut a
+    // part held by four 0.08" tabs — field report 2026-10-19). And it is
+    // one mount per tool: V-bit, then the endmill for everything else,
+    // instead of endmill → V-bit → endmill. Pipeline order is kept among
+    // framed ops (each lands after the previous insertion).
+    let at = built.length;
+    if (frame?.publisher) {
+      const i = built.findIndex(e => e.op.id === frame.publisher);
+      if (i >= 0) at = i;
+    }
+    // the piece this op belongs to (framed content: its publisher's)
+    const pieceIdx = frame ? (scopeOfOp.get(frame.publisher) ?? 0) : scopes.indexOf(scope);
+    if (!frame) scopeOfOp.set(op.id, pieceIdx);
     for (const sub of (r.ops ?? [r])) {
-      built.push({ op, r: sub });
+      built.splice(at++, 0, { op, r: sub, piece: pieceIdx });
       for (const w of sub.warnings ?? []) strategyWarnings.push(`op "${op.id}": ${w}`);
     }
-    // cutouts already made (a later cutout that cannot enclose them is the
-    // several-pieces-in-one-job case, and its refusal says so by name)
-    if (entry.wrapsContent && !frame) (ctx.priorCutouts ??= []).push(op.id);
+    const pctx = scopes[pieceIdx].ctx;
+    // a cutout closes the piece: the ops after it are the next one
+    if (entry.wrapsContent && !frame) {
+      (pctx.priorCutouts ??= []).push(op.id);
+      scope.closed = true;
+    }
+    // a verb that frees SEVERAL pieces itself (rib_lattice): it closes the
+    // piece like a cutout, but the count is its own, not the scope's
+    if (entry.freesPieces && !frame) {
+      scope.closed = true;
+      scope.multi = true;
+      opPieces += Math.max(0, Math.round(+r.pieces || 0));
+    }
+    // shapes this piece references move with it when it is laid out
+    if (!frame) for (const v of Object.values(p)) if (typeof v === 'string' && bs.shapes[v]) scope.shapeIds.add(v);
     // per-op extents: a pinned tag that no longer contains the content
     // names the op that sticks out
-    if (r.bbox) (ctx.opBoxes ??= []).push({ id: op.id, bbox: r.bbox });
-    ctx.contentBBox = ctx.contentBBox
+    if (r.bbox) (pctx.opBoxes ??= []).push({ id: op.id, bbox: r.bbox });
+    pctx.contentBBox = pctx.contentBBox
       ? {
-          minX: Math.min(ctx.contentBBox.minX, r.bbox.minX), minY: Math.min(ctx.contentBBox.minY, r.bbox.minY),
-          maxX: Math.max(ctx.contentBBox.maxX, r.bbox.maxX), maxY: Math.max(ctx.contentBBox.maxY, r.bbox.maxY),
+          minX: Math.min(pctx.contentBBox.minX, r.bbox.minX), minY: Math.min(pctx.contentBBox.minY, r.bbox.minY),
+          maxX: Math.max(pctx.contentBBox.maxX, r.bbox.maxX), maxY: Math.max(pctx.contentBBox.maxY, r.bbox.maxY),
         }
       : { ...r.bbox };
+    if (!frame && scope.closed) placeScope(scope);
   }
   // shapes resolved mid-pipeline (fit chains) join the construction
   // preview — on failure too, so a bad fit still shows where it landed
   for (const [id, sh] of Object.entries(bs.shapes)) {
     if (!outlined.has(id)) addOutline(id, sh);
   }
+
+  // a trailing open piece (content after the last cutout, or the piece a
+  // failure interrupted) is placed too, so the preview never piles it on
+  // the first piece
+  placeScope(scope);
+  const pieces = scopes.filter(s => s.closed && !s.absorbed && !s.multi).length + opPieces;
+  const allBBox = extent();
+  if (recipe.assembly?.kind === 'stack' && !errors.length) {
+    const asm = buildStackAssembly(scopes, built, stock.thickness, recipe.assembly, strategyWarnings);
+    if (asm) assemblies.push({ opId: 'assembly', ...asm });
+  }
+
   if (errors.length || !built.length) {
     // degrade gracefully: the JOB is refused, but the user still gets a
     // picture. Preview whatever built before the failure plus the
     // construction shapes — a fit conflict then shows WHERE.
     // diagnostic extent = built content UNION the shapes section, so a
     // misplaced shape and the content it missed are both in frame
-    let bb = ctx.contentBBox ? { ...ctx.contentBBox } : null;
+    let bb = allBBox ? { ...allBBox } : null;
     if (shapeOutlines.length) {
       bb ??= { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
       for (const so of shapeOutlines) for (const ring of so.rings) for (const q of ring) {
@@ -904,7 +1209,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
       }
     }
     if (!bb) {
-      return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [...shapesWarnings, ...strategyWarnings], preview: { empty: true } };
+      return { ok: false, errors: errors.length ? errors : ['nothing to machine'], warnings: [...shapesWarnings, ...strategyWarnings], pieces, preview: { empty: true } };
     }
     const margin = recipe.margin ?? 0.375;
     const failStock = {
@@ -920,6 +1225,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
       ok: false,
       errors: errors.length ? errors : ['nothing to machine'],
       warnings: [...shapesWarnings, ...strategyWarnings],
+      pieces,
       preview: { built, placement: failPlace, stock: failStock, shapeOutlines, failed: true },
     };
   }
@@ -927,7 +1233,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // ---- stock auto-sizes to the content: minimum board, quarter-inch
   // rounded, margins included. "Doesn't fit" cannot happen; the user is
   // told the minimum stock they must fixture instead.
-  const b = ctx.contentBBox;
+  const b = allBBox;
   const w = b.maxX - b.minX, h = b.maxY - b.minY;
   const margin = recipe.margin ?? 0.375;
   const roundQ = (x) => Math.ceil((x - 1e-9) / 0.25) * 0.25;
@@ -1123,6 +1429,8 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     errors: report.errors,
     warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
     report, job, composed, rationale, ingredients,
+    // separate pieces this one run frees (nested cutouts count once)
+    pieces,
     preview: { built, placement, stock: autoStock, shapeOutlines, assemblies, setups },
   };
   if (report.ok) {

@@ -871,6 +871,9 @@ function dragOps() {
     if (op.params?.edgeTreatment === true || op.params?.edgeTreatment === 'true') continue;
     let g = byId.get(op.id);
     if (!g) byId.set(op.id, g = { opId: op.id, rings: [], bbox: null });
+    // a later piece laid out beside the first was translated as a whole;
+    // its posX/posY stay piece-local, so a drop subtracts the shift
+    if (r.pieceShift) g.shift = r.pieceShift;
     const rings = ringsOf(r);
     g.rings.push(...rings);
     // a single-result op carries its block bbox (the exact point posX/posY
@@ -950,8 +953,8 @@ const endDrag = (commit) => (e) => {
   // its automatic placement
   const rnd = (v) => { const r = Math.round(v * 1000) / 1000; return r === 0 ? 0.001 : r; };
   op.params ??= {};
-  op.params.posX = rnd((d.g.bbox.minX + d.g.bbox.maxX) / 2 + d.dx);
-  op.params.posY = rnd((d.g.bbox.minY + d.g.bbox.maxY) / 2 + d.dy);
+  op.params.posX = rnd((d.g.bbox.minX + d.g.bbox.maxX) / 2 + d.dx - (d.g.shift?.dx ?? 0));
+  op.params.posY = rnd((d.g.bbox.minY + d.g.bbox.maxY) / 2 + d.dy - (d.g.shift?.dy ?? 0));
   // a self-sizing cutout AFTER the dragged op would chase the content and
   // re-center it (a tag_cutout badge re-wraps the moved name — the drag
   // reads as a no-op). Pin every such wrapper at its CURRENT geometry, so
@@ -971,9 +974,10 @@ const endDrag = (commit) => (e) => {
     if (!unset('posX') || !unset('posY')) continue;   // already pinned or authored
     const bb = builtRingBBox(w.id);
     if (!bb) continue;
+    const shift = (result?.preview?.built ?? []).find((e) => e.op.id === w.id)?.r.pieceShift ?? { dx: 0, dy: 0 };
     w.params ??= {};
-    w.params.posX = rnd((bb.minX + bb.maxX) / 2);
-    w.params.posY = rnd((bb.minY + bb.maxY) / 2);
+    w.params.posX = rnd((bb.minX + bb.maxX) / 2 - shift.dx);
+    w.params.posY = rnd((bb.minY + bb.maxY) / 2 - shift.dy);
     if (entry.wrapsContent === 'sized') {   // tag_cutout also self-SIZES
       // ceil, not round: a pinned tag must never come out a half-thou
       // SMALLER than the content it was wrapping when pinned

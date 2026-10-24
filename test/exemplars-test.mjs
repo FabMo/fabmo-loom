@@ -92,6 +92,12 @@ t('request: exemplars ride in the first user turn ahead of the ask, system untou
   assert.equal(typeof none.messages[0].content, 'string');
 });
 
+t('stemmer keeps words whose stem is another real token (dining ≠ DIN rail)', () => {
+  assert.deepEqual(tokens('A dining chair cut from plywood'), ['dining', 'chair']);
+  assert.deepEqual(tokens('DIN rail bracket'), ['din', 'rail', 'bracket']);
+  assert.deepEqual(tokens('string art board'), ['string', 'art']);
+});
+
 const REAL = new URL('../app/exemplars.json', import.meta.url).pathname;
 if (existsSync(REAL)) {
   t('real index: every row is a verified first-turn build with operations', () => {

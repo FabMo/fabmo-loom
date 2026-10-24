@@ -3,7 +3,7 @@
 //
 // Usage: node live-retest.mjs hex-trivet chess-board cribbage
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { PROMPTS, FAKE_SVG } from './prompts.mjs';
 import { makeCallModel } from './model-call.mjs';
 
@@ -55,6 +55,9 @@ for (const id of ids) {
   const tu = data.content?.find(b => b.type === 'tool_use');
   if (!tu || data.stop_reason === 'max_tokens') { console.log('  STILL TRUNCATED/EMPTY'); continue; }
   const out = applyActions(recipe, tu.input);
+  // DUMP=<dir>: keep the woven recipe for offline replay (a failing live
+  // row is reproducible with runRecipe alone, no second model call)
+  if (process.env.DUMP) writeFileSync(`${process.env.DUMP}/${id}.recipe.json`, JSON.stringify({ prompt: p.prompt, payload: tu.input, recipe: out.recipe }, null, 1));
   console.log(`  summary: ${tu.input.summary}`);
   console.log(`  pipeline: ${out.recipe.pipeline.map(o => o.strategy).join(', ') || '(none)'}`);
   console.log(`  patterns: ${(out.recipe.shapes ?? []).filter(s => s.pattern).map(s => `${s.id}=pattern(${JSON.stringify(s.pattern)})`).join('; ') || '(none)'}`);

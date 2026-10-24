@@ -27,6 +27,7 @@ import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { buildParseRequest } from './step-schema.js';
 import { loadRegistry, saveRegistry, inviteStatus, consumeInvite, refundInvite, recordUsage, newToken, newInvite } from './invites.js';
+import { LoomJobs, validateJobInput } from './loom-jobs.js';
 
 const ENV_FILE = '/var/opt/apps/.intent.env';
 const FUNNEL_FILE = '/var/opt/apps/.intent-funnel.jsonl';
@@ -34,6 +35,7 @@ const MAX_UTTERANCE = 2000;       // chars; a shop request is a sentence or two
 const MAX_CONTEXT_BYTES = 64 * 1024;
 const RATE_LIMIT = { windowMs: 60_000, max: 12 };  // per IP
 const RELAY_MAX_TOKENS = 16000;   // ceiling on what a relayed request may ask for (thinking models spend part of it reasoning)
+const RELAY_TIMEOUT_MS = 240_000; // give up (and refund the prompt) before nginx's 300s proxy_read_timeout abandons us
 
 function readKey() {
   try {
@@ -198,7 +200,9 @@ export function mountIntent(app) {
       client ??= new Anthropic({ apiKey: key });
       let response;
       try {
-        response = await client.messages.create(clamped);
+        // one deadline across the SDK's retries: nginx stops waiting at 300s and
+        // the phone would see a 504 while we finished and billed the call (2026-10-19)
+        response = await client.messages.create(clamped, { signal: AbortSignal.timeout(RELAY_TIMEOUT_MS) });
       } catch (err) {
         // the guest got nothing — give the prompt back (fresh read: other
         // requests may have advanced the registry while we awaited)
@@ -214,10 +218,94 @@ export function mountIntent(app) {
       const s = inviteStatus(entry2);
       return res.json({ ok: true, data: response, invite: { name: entry2.name, remaining: s.remaining, resetsAt: s.resetsAt, expires: s.expires } });
     } catch (err) {
-      const status = err?.status >= 400 && err?.status < 600 ? 502 : 500;
-      console.error('[intent] loom relay failed:', err?.message ?? err);
-      return res.status(status).json({ ok: false, error: 'The AI call failed — your prompt was not counted. Try again.' });
+      const timedOut = err?.name === 'APIUserAbortError' || err?.name === 'TimeoutError' || err?.name === 'AbortError';
+      const status = timedOut ? 504 : err?.status >= 400 && err?.status < 600 ? 502 : 500;
+      console.error('[intent] loom relay failed:', timedOut ? `timed out after ${RELAY_TIMEOUT_MS / 1000}s` : (err?.message ?? err));
+      return res.status(status).json({ ok: false, error: timedOut
+        ? `The model took longer than ${Math.round(RELAY_TIMEOUT_MS / 60000)} minutes — your prompt was not counted. Try again; a shorter ask or note helps.`
+        : 'The AI call failed — your prompt was not counted. Try again.' });
     }
+  });
+
+  // ---- server-side turns: the phone posts the whole ask and comes back ----
+  // intent/loom-jobs.js runs the closed loop (draft → weave/verify → fix) in
+  // a worker thread. The per-call relay above needed the phone open for the
+  // whole turn; a backgrounded or closed Safari tab lost the design and the
+  // in-flight call was still billed and counted (2026-10-19). One prompt per
+  // ask here — the loop's two or three model calls are the server's business.
+  const jobs = new LoomJobs({
+    onDone: ({ token, usage }) => {
+      const reg = loadRegistry();
+      if (!reg[token]) return;
+      recordUsage(reg[token], { input: usage?.input_tokens, output: usage?.output_tokens });
+      saveRegistry(reg);
+    },
+    onFailed: ({ token }) => {
+      const reg = loadRegistry();   // the guest got nothing — give the prompt back
+      if (!reg[token]) return;
+      refundInvite(reg[token]);
+      saveRegistry(reg);
+    },
+  });
+  {
+    const orphans = jobs.takeOrphans();
+    if (orphans.length) {
+      const reg = loadRegistry();
+      for (const o of orphans) if (reg[o.token]) refundInvite(reg[o.token]);
+      saveRegistry(reg);
+      console.log(`[intent] ${orphans.length} Loom build(s) were interrupted by the restart — prompts refunded`);
+    }
+  }
+
+  app.post('/api/intent/loom/job', (req, res) => {
+    try {
+      const key = readKey();
+      if (!key) {
+        return res.status(503).json({ ok: false, error: 'Guest passes are not available on this server (no API key configured). Add your own key in the AI account settings.' });
+      }
+      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
+      if (rateLimited(ip)) {
+        return res.status(429).json({ ok: false, error: 'Too many requests — wait a minute.' });
+      }
+      const token = req.get('x-loom-invite');
+      const reg = loadRegistry();
+      const entry = token ? reg[token] : null;
+      if (!entry) {
+        return res.status(401).json({ ok: false, error: 'Prompting here needs a guest-pass link or your own API key.' });
+      }
+      const v = validateJobInput(req.body);
+      if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
+      if (jobs.busy()) {
+        return res.status(503).json({ ok: false, reason: 'busy', error: 'Loom is building for several people right now — try again in a minute. Your prompt was not counted.' });
+      }
+      const take = consumeInvite(entry);
+      if (!take.ok) {
+        if (take.reason === 'window') {
+          return res.status(429).json({ ok: false, reason: 'window', resetsAt: take.resetsAt, error: 'This guest pass is out of prompts for now.' });
+        }
+        return res.status(403).json({ ok: false, reason: take.reason, error: take.reason === 'expired' ? 'This guest pass has expired.' : 'This guest pass was revoked.' });
+      }
+      saveRegistry(reg);   // meter before the spend; onFailed refunds
+      const id = jobs.start({ token, input: v.input, key });
+      const s = inviteStatus(entry);
+      console.log(`[intent] loom build ${id} started for ${entry.name}${v.input.image ? ' (with a picture)' : ''}`);
+      return res.status(202).json({ ok: true, job: id, invite: { name: entry.name, remaining: s.remaining, resetsAt: s.resetsAt, expires: s.expires } });
+    } catch (err) {
+      console.error('[intent] loom build start failed:', err?.message ?? err);
+      return res.status(500).json({ ok: false, error: 'The server could not start the build — try again.' });
+    }
+  });
+
+  // the phone polls this, or comes back to it later; only the pass that
+  // started a build can see it, and finished builds are kept for a day
+  app.get('/api/intent/loom/job/:id', (req, res) => {
+    const token = req.get('x-loom-invite');
+    const v = token ? jobs.get(String(req.params.id), token) : null;
+    res.set('cache-control', 'no-store');
+    if (!v) return res.status(404).json({ ok: false, error: 'That build is no longer on the server (builds are kept for a day) — ask again.' });
+    const entry = loadRegistry()[token];
+    const s = entry ? inviteStatus(entry) : null;
+    return res.json({ ok: true, ...v, invite: s ? { name: entry.name, remaining: s.remaining, resetsAt: s.resetsAt, expires: s.expires } : null });
   });
 
   // Mint a guest pass from the app. The shop's own Anthropic key is the
@@ -269,15 +357,15 @@ export function mountIntent(app) {
   app.post('/api/intent/log', (req, res) => {
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress;
     if (rateLimited(ip)) return res.status(429).json({ ok: false });
-    const { app: clientApp, utterance, intent, usage, context } = req.body ?? {};
+    const { app: clientApp, utterance, intent, usage, context, image } = req.body ?? {};   // image = { attached, width, height } — pixel size only, never bytes
     if (typeof utterance !== 'string' || !intent || typeof intent !== 'object') {
       return res.status(400).json({ ok: false });
     }
     const token = req.get('x-loom-invite');
     const invite = token ? loadRegistry()[token]?.name : undefined;
-    const queryId = appendFunnel({ source: 'browser', app: clientApp, invite, utterance, intent, usage, context });
+    const queryId = appendFunnel({ source: 'browser', app: clientApp, invite, utterance, intent, usage, context, image });
     return res.json({ ok: true, queryId });
   });
 
-  console.log('[intent] /api/intent/step + /api/intent/loom + /api/intent/invite (GET status, POST mint) + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
+  console.log('[intent] /api/intent/step + /api/intent/loom (+ /job) + /api/intent/invite (GET status, POST mint) + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
 }

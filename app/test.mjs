@@ -13,7 +13,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, buildVars, buildShapes, ingredientLines } from './runtime.mjs';
-import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError, checkClaims, claimCorrections } from './intent.mjs';
+import { applyActions, buildParseRequest, buildObservation, observationText, observationTroubled, buildReviseRequest, runIntentLoop, IntentError, checkClaims, claimCorrections, imageSize, buildSystemPrompt, ACTION_TOOL } from './intent.mjs';
+import { rasterRings, encodePngGray, toBase64, snapshotWeave } from './snapshot.mjs';
 import { simulateJob, surfaceAt } from './sim.mjs';
 import { FONTS } from './fonts.mjs';
 import { pathToRegions, expandTemplate } from './shape.mjs';
@@ -400,6 +401,61 @@ console.log('--- claims channel: declared claims vs the recipe ---');
   const notFurn = { ...furn, pipeline: [{ id: 'build', strategy: 'furniture_polish', params: {} }, { id: 'tag', strategy: 'tag_cutout', params: {} }] };
   const nclaims = checkClaims({ mating: true, parts: [{ name: 'x', opId: 'tag' }] }, notFurn, 'x', []);
   if (!nclaims.issues.length) pass('any furniture_* verb counts as furniture (family by name)'); else fail(`family: ${JSON.stringify(nclaims.issues)}`);
+}
+
+console.log('--- picture of the cut (v0.110): likeness from a photo ---');
+{
+  // rasterizer: a 4×3 part with a 1×1 pocket — pixel shades where they belong
+  const sq = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 3 }, { x: 0, y: 3 }];
+  const well = [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }];
+  const ras = rasterRings([{ rings: [sq], shade: 'part' }, { rings: [well], shade: 'pocket' }], { w: 200 });
+  const px = (x, y) => ras.pixels[Math.round(ras.h - 12 - y * ras.scale) * ras.w + Math.round(12 + x * ras.scale)];
+  if (ras.w === 200 && px(1.5, 1.5) === 70 && px(3, 2.5) === 205 && ras.pixels[0] === 255) pass(`raster ${ras.w}×${ras.h}: pocket 70, part 205, board 255 (y flipped)`);
+  else fail(`raster shades: pocket ${px(1.5, 1.5)} part ${px(3, 2.5)} board ${ras.pixels[0]} size ${ras.w}×${ras.h}`);
+  const png = encodePngGray(ras.pixels, ras.w, ras.h);
+  const dims = imageSize({ media_type: 'image/png', data: toBase64(png) });
+  if (dims?.w === ras.w && dims?.h === ras.h && png[0] === 0x89) pass(`PNG (${png.length} bytes, stored deflate) decodes to ${dims.w}×${dims.h}`);
+  else fail(`png dims ${JSON.stringify(dims)}`);
+  // a weave with a cutout and a pocket snapshots; a plain text engraving snapshots its V-carve regions; an empty recipe does not
+  const cow = {
+    ...structuredClone(EMPTY_RECIPE),
+    shapes: [{ id: 'body', path: 'M -4 0 C -4 -2 4 -2 4 0 C 4 2 -4 2 -4 0 Z' }, { id: 'spot', path: 'M 0 0 C 1 -0.8 2 -0.8 2 0 C 2 0.8 1 0.8 0 0 Z' }],
+    pipeline: [
+      { id: 'spot', strategy: 'pocket_shape', params: { shape: 'spot', depth: 0.1, toolDiameter: 0.125 } },
+      { id: 'cut', strategy: 'shape_cutout', params: { shape: 'body', tabs: true } },
+    ],
+  };
+  const wr = run(cow);
+  const snap = snapshotWeave(wr);
+  if (wr.ok && snap && snap.parts === 1 && snap.marks === 1 && imageSize(snap)?.w === snap.w) pass(`cutout + pocket → snapshot ${snap.w}×${snap.h}, 1 part, 1 mark`);
+  else fail(`snapshot: ok=${wr.ok} ${JSON.stringify(snap && { w: snap.w, h: snap.h, parts: snap.parts, marks: snap.marks })}`);
+  if (snapshotWeave(run(structuredClone(EMPTY_RECIPE))) === null) pass('empty weave → no snapshot'); else fail('empty weave produced a snapshot');
+  // the prompt: the photo-likeness rule rides only with a picture; "observed" leads the schema
+  const withPic = buildSystemPrompt(structuredClone(EMPTY_RECIPE), {}, { hasImage: true });
+  const noPic = buildSystemPrompt(structuredClone(EMPTY_RECIPE), {}, { hasImage: false });
+  if (/A LIKENESS FROM THE PICTURE/.test(withPic) && /PICTURE OF THE CUT/.test(withPic) && !/A LIKENESS FROM THE PICTURE/.test(noPic)) pass('photo-likeness rule only when a picture is attached; text-only likeness still declines');
+  else fail('photo-likeness rule placement');
+  if (Object.keys(ACTION_TOOL.input_schema.properties)[0] === 'observed') pass('"observed" is the FIRST schema field — notes before geometry'); else fail('observed not first');
+  // the loop: with a picture, the second look's tool_result carries the picture of the cut as an image block
+  const pngHdr = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.from([0, 0, 1, 44, 0, 0, 1, 144, 8, 2, 0, 0, 0])]);
+  const image = { media_type: 'image/png', data: pngHdr.toString('base64') };
+  const build = { observed: ['head down', 'big patch on the shoulder'], summary: 'A cow drawn from the photo.', claims: { pieces: 1 }, actions: [
+    { kind: 'set_shape', shape: { id: 'body', path: 'M -4 0 C -4 -2 4 -2 4 0 C 4 2 -4 2 -4 0 Z' } },
+    { kind: 'set_shape', shape: { id: 'spot', path: 'M 0 0 C 1 -0.8 2 -0.8 2 0 C 2 0.8 1 0.8 0 0 Z' } },
+    { kind: 'add_operation', operation: { id: 'spot', strategy: 'pocket_shape', params: { shape: 'spot', depth: 0.1, toolDiameter: 0.125 } } },
+    { kind: 'add_operation', operation: { id: 'cut', strategy: 'shape_cutout', params: { shape: 'body', tabs: true } } },
+  ], declined: [] };
+  const mk = (payload) => ({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'tool_use', id: 't', name: 'apply_recipe_actions', input: payload }] });
+  let calls = 0; let seen = null;
+  const res = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out this cow', image, call: async (r) => { calls++; if (r.messages.length > 1) seen = r.messages[2].content[0]; return mk(calls === 1 ? build : { summary: 'Looked: the patch sits where the photo has it.', claims: { pieces: 1 }, actions: [], declined: [] }); }, weave: async (r) => run(r) });
+  const blocks = Array.isArray(seen?.content) ? seen.content : null;
+  const img = blocks?.find(b => b.type === 'image'), txt = blocks?.find(b => b.type === 'text');
+  if (seen?.type === 'tool_result' && img?.source?.media_type === 'image/png' && /PICTURE OF THE CUT: attached as the image/.test(txt?.text ?? '') && imageSize(img.source)?.w === res.turns[0].snapshot?.w)
+    pass(`second look's tool_result carries the picture of the cut (${res.turns[0].snapshot.w}×${res.turns[0].snapshot.h}) beside the text`);
+  else fail(`snapshot in loop: ${JSON.stringify({ type: seen?.type, blocks: blocks?.map(b => b.type), snap: res.turns[0]?.snapshot })}`);
+  calls = 0; seen = null;
+  await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out a cow', call: async (r) => { calls++; if (r.messages.length > 1) seen = r.messages[2].content[0]; return mk(calls === 1 ? build : { summary: 'ok', claims: { pieces: 1 }, actions: [], declined: [] }); }, weave: async (r) => run(r) });
+  if (typeof seen?.content === 'string' && !/PICTURE OF THE CUT/.test(seen.content)) pass('no picture attached → tool_result stays plain text (no snapshot)'); else fail('snapshot leaked into a text-only turn');
 }
 
 console.log('--- claims channel: in the loop ---');
@@ -2831,7 +2887,23 @@ console.log('--- guest mount: register, weave, verify ---');
     if (bb.maxY - bb.minY > (bb.maxX - bb.minX) * 1.5) {
       pass(`frame rotation baked into the content (${(bb.maxX - bb.minX).toFixed(2)}" wide × ${(bb.maxY - bb.minY).toFixed(2)}" tall)`);
     } else fail(`content not rotated: ${(bb.maxX - bb.minX).toFixed(2)} × ${(bb.maxY - bb.minY).toFixed(2)}`);
+    // sequencing: the carve lands BEFORE the publisher's sub-ops though
+    // it is last in the pipeline (solid stock under the V-bit, one mount
+    // per tool)
+    const order = rf.job.operations.map(o => o.name);
+    const iPad = order.findIndex(n => n.includes('pad@')), iCarve = order.findIndex(n => n.startsWith('carve'));
+    if (iPad >= 0 && iCarve >= 0 && iCarve < iPad && rf.report.stats.toolchangeCount === 2) {
+      pass(`framed content machines before its publisher, one mount per tool (${order.join(' → ')})`);
+    } else fail(`framed op order wrong: ${order.join(' → ')} mounts=${rf.report?.stats?.toolchangeCount}`);
   }
+  // overflow: content wider than the 4" face is refused outright (a thin
+  // stroke across a kerf only grazes the overlap gate — not good enough)
+  const tooWide = structuredClone(fr.recipe);
+  tooWide.pipeline.at(-1).params.letterHeight = 3;   // "MMM" ≈ 9" wide
+  const rtw = run(tooWide);
+  if (!rtw.ok && rtw.errors.some(e => e.includes('overflows the "face"') && e.includes('letterHeight'))) {
+    pass('oversize framed content REFUSED, error names the frame and the fix');
+  } else fail(`oversize framed content: ok=${rtw.ok} ${rtw.errors?.join(' | ')}`);
   // unknown frame: refused, names what exists
   const badFrame = structuredClone(fr.recipe);
   badFrame.pipeline.at(-1).frame = 'lid';
@@ -4238,7 +4310,7 @@ console.log('--- cutout content-fit: exact fits, scoped edge grace, refusals tha
   });
   const asCut = run(slotted('shape_cutout', { toolDiameter: 0.125 }));
   const am = asCut.errors?.[0] ?? '';
-  if (!asCut.ok && /^op "slot_l": the content so far pokes outside that shape: op "recess"/.test(am) && /A cutout frees the WHOLE part/.test(am) && /use pocket_shape with this shape and depth = the stock thickness/.test(am))
+  if (!asCut.ok && /^op "slot_l": the content so far pokes outside that shape: op "recess"/.test(am) && /A cutout frees a WHOLE piece/.test(am) && /use pocket_shape with this shape and depth = the stock thickness/.test(am))
     pass('a cutout used as an interior slot is refused with the verb that does it (pocket_shape at full depth)');
   else fail(`slot-as-cutout refusal: ${am}`);
   const asPocket = run(slotted('pocket_shape', { depth: 0.5, toolDiameter: 0.125 }));
@@ -4246,11 +4318,12 @@ console.log('--- cutout content-fit: exact fits, scoped edge grace, refusals tha
   else fail(`slot-as-pocket: ${asPocket.errors?.join(' | ')}`);
   // the model reads the whole reason (errors are no longer clipped at 300)
   const obsText = observationText(buildObservation({ applied: [], skipped: [], recipe: slotted('shape_cutout', {}) }, asCut));
-  if (obsText.includes('decline cutting the set in one run')) pass('the observation carries the full refusal to the second look');
+  if (obsText.includes('the app lays the pieces out side by side in one run')) pass('the observation carries the full refusal to the second look');
   else fail('observation clipped the refusal');
 
-  // a SECOND loose piece beside the first (tangram, pauldron plates): still
-  // refused — one job frees one piece — but now it says so
+  // a SECOND loose piece beside the first (tangram, pauldron plates): since
+  // v0.104 a cutout ENDS its piece, so two cutouts authored apart are two
+  // pieces in one job — they stay where they were put and both verify
   const twoPieces = run({
     ...structuredClone(EMPTY_RECIPE),
     shapes: [{ id: 'a', path: 'M -3 -1 L -1 -1 L -1 1 L -3 1 Z' }, { id: 'b', path: 'M 1 -1 L 3 -1 L 3 1 L 1 1 Z' }],
@@ -4259,10 +4332,9 @@ console.log('--- cutout content-fit: exact fits, scoped edge grace, refusals tha
       { id: 'cut_b', strategy: 'shape_cutout', params: { shape: 'b' } },
     ],
   });
-  const tm = twoPieces.errors?.[0] ?? '';
-  if (!twoPieces.ok && /^op "cut_b": the content so far pokes outside that shape: the earlier cutout "cut_a" lies outside it/.test(tm) && /one job frees one piece/.test(tm))
-    pass('side-by-side second cutout: still refused (by design), naming the earlier cutout and the one-piece-per-job rule');
-  else fail(`two-piece refusal: ${tm}`);
+  if (twoPieces.ok && twoPieces.sbp && twoPieces.pieces === 2 && !twoPieces.preview.built.some(e => e.r.pieceShift))
+    pass('side-by-side second cutout: two pieces in one job, authored apart → left where they are, verified (was refused by design)');
+  else fail(`two pieces: ok=${twoPieces.ok} pieces=${twoPieces.pieces} ${twoPieces.errors?.join(' | ')}`);
   // …a multi-island shape handed to ONE cutout no longer fails mysteriously
   const islands = run({
     ...structuredClone(EMPTY_RECIPE),
@@ -4282,8 +4354,445 @@ console.log('--- cutout content-fit: exact fits, scoped edge grace, refusals tha
       { id: 'ring', strategy: 'disc_cutout', params: { diameter: 3, tabs: true } },
     ],
   });
-  if (nested.ok) pass('nested cutouts (a ring: inner disc, then the outer one around it) still verify');
-  else fail(`nested cutouts: ${nested.errors?.join(' | ')}`);
+  if (nested.ok && nested.pieces === 1) pass('nested cutouts (a ring: inner disc, then the outer one around it) still verify — and count as ONE piece');
+  else fail(`nested cutouts: ok=${nested.ok} pieces=${nested.pieces} ${nested.errors?.join(' | ')}`);
+}
+
+console.log('--- piece scopes: several separate pieces in one job (multi-part-set) ---');
+{
+  const ringBox = (r, id) => {
+    const bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    for (const { op, r: sub } of r.preview?.built ?? []) {
+      if (op.id !== id || !sub.previewRing) continue;
+      for (const q of sub.previewRing) {
+        bb.minX = Math.min(bb.minX, q.x); bb.maxX = Math.max(bb.maxX, q.x);
+        bb.minY = Math.min(bb.minY, q.y); bb.maxY = Math.max(bb.maxY, q.y);
+      }
+    }
+    return bb;
+  };
+  // the stacking-ring toy, authored the natural way: every ring about the
+  // origin, bore then disc, bore then disc — each piece's content fits ITS
+  // disc, and the pieces slide into a row
+  const rings = (n) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: Array.from({ length: n }, (_, i) => [
+      { id: `hole${i}`, strategy: 'bore_hole', params: { diameter: 0.6, depth: 0.5, toolDiameter: 0.25 } },
+      { id: `ring${i}`, strategy: 'disc_cutout', params: { diameter: 4.5 - 0.5 * i, tabs: true } },
+    ]).flat(),
+  });
+  const r6 = run(rings(6));
+  if (r6.ok && r6.sbp && r6.pieces === 6) {
+    const boxes = Array.from({ length: 6 }, (_, i) => ringBox(r6, `ring${i}`));
+    const apart = boxes.every((a, i) => boxes.every((b, j) => j <= i || a.maxX + 0.25 <= b.minX || b.maxX + 0.25 <= a.minX));
+    const inOrder = boxes.every((b, i) => i === 0 || b.minX > boxes[i - 1].maxX);
+    const holesInside = Array.from({ length: 6 }, (_, i) => {
+      const h = r6.preview.built.find(e => e.op.id === `hole${i}`)?.r.previewHoles?.[0];
+      const b = boxes[i];
+      return h && h.x > b.minX && h.x < b.maxX && h.y > b.minY && h.y < b.maxY;
+    }).every(Boolean);
+    if (apart && inOrder && holesInside) pass(`six stacking rings in one job: 6 pieces, laid out in a row, every hole inside its own ring (board ${r6.preview.stock.w}" × ${r6.preview.stock.h}")`);
+    else fail(`ring layout: apart=${apart} inOrder=${inOrder} holesInside=${holesInside} ${JSON.stringify(boxes.map(b => [b.minX.toFixed(2), b.maxX.toFixed(2)]))}`);
+    const overlaps = r6.report.errors.filter(e => /overlap/i.test(e));
+    if (!overlaps.length) pass('verifier footprint-overlap gate: clean on the laid-out set (the gate is unchanged and still the proof)');
+    else fail(`overlap: ${overlaps.join(' | ')}`);
+  } else fail(`six rings: ok=${r6.ok} pieces=${r6.pieces} ${r6.errors?.join(' | ')}`);
+  // single-piece recipes are untouched: the first piece never moves
+  const one = run(rings(1));
+  const b0 = ringBox(one, 'ring0');
+  if (one.ok && one.pieces === 1 && Math.abs(b0.minX + b0.maxX) < 1e-6 && !one.preview.built.some(e => e.r.pieceShift)) pass('one piece: centered on the origin exactly as before, no shift recorded');
+  else fail(`one piece: ok=${one.ok} pieces=${one.pieces} center=${((b0.minX + b0.maxX) / 2).toFixed(3)}`);
+
+  // the name puzzle: a tray with letter wells, then the lift-out letters as
+  // their own pieces (shape cutouts standing alone after the tray's cutout)
+  const puzzle = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'bar', path: 'M -0.3 -0.8 L 0.3 -0.8 L 0.3 0.8 L -0.3 0.8 Z' }, { id: 'dot', path: 'M -0.6 0 A 0.6 0.6 0 1 1 0.6 0 A 0.6 0.6 0 1 1 -0.6 0 Z' }],
+    pipeline: [
+      { id: 'wells', strategy: 'pocket_text', params: { text: 'LIAM', letterHeight: 1.75, depth: 0.25 } },
+      { id: 'tray', strategy: 'tag_cutout', params: { buffer: 0.75, cornerRadius: 1 } },
+      { id: 'piece_i', strategy: 'shape_cutout', params: { shape: 'bar', tabs: true } },
+      { id: 'piece_o', strategy: 'shape_cutout', params: { shape: 'dot', tabs: true } },
+    ],
+  });
+  if (puzzle.ok && puzzle.sbp && puzzle.pieces === 3) {
+    const tray = ringBox(puzzle, 'tray'), bi = ringBox(puzzle, 'piece_i'), bo = ringBox(puzzle, 'piece_o');
+    if (bi.minX > tray.maxX && bo.minX > bi.maxX) pass(`tray + two loose pieces in one job: 3 pieces, the pieces beside the tray (tray to ${tray.maxX.toFixed(2)}", bar from ${bi.minX.toFixed(2)}", dot from ${bo.minX.toFixed(2)}")`);
+    else fail(`puzzle layout: tray ${JSON.stringify(tray)} bar ${JSON.stringify(bi)} dot ${JSON.stringify(bo)}`);
+    // the shapes section preview follows its piece (the construction outline
+    // of "bar" is drawn where the piece landed, not at the origin)
+    const so = puzzle.preview.shapeOutlines.find(s => s.id === 'bar');
+    const sx = so.rings[0].reduce((a, q) => a + q.x, 0) / so.rings[0].length;
+    if (Math.abs(sx - (bi.minX + bi.maxX) / 2) < 0.05) pass('a referenced shape\'s construction outline moves with its piece');
+    else fail(`shape outline left behind: shape center x=${sx.toFixed(2)}, piece center x=${((bi.minX + bi.maxX) / 2).toFixed(2)}`);
+  } else fail(`puzzle: ok=${puzzle.ok} pieces=${puzzle.pieces} ${puzzle.errors?.join(' | ')}`);
+
+  // a piece's content-fit check reads only ITS piece: the second disc is
+  // too small for its OWN hole and the refusal names that hole — not the
+  // first piece's content
+  const tight = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'h1', strategy: 'bore_hole', params: { diameter: 0.5, depth: 0.5, toolDiameter: 0.25 } },
+      { id: 'd1', strategy: 'disc_cutout', params: { diameter: 4 } },
+      { id: 'h2', strategy: 'bore_hole', params: { diameter: 0.7, depth: 0.5, toolDiameter: 0.25 } },
+      { id: 'd2', strategy: 'disc_cutout', params: { diameter: 0.6 } },
+    ],
+  });
+  const tmsg = tight.errors?.[0] ?? '';
+  if (!tight.ok && /^op "d2": a 0.6" disc is too small for the content so far/.test(tmsg) && /op "h2"/.test(tmsg) && !/"h1"|"d1"/.test(tmsg))
+    pass('content-fit is per piece: the second disc is refused against ITS hole only, the first piece is not mentioned');
+  else fail(`per-piece fit: ok=${tight.ok} ${tmsg}`);
+  // …and the failure preview still lays the finished pieces apart
+  const d1 = ringBox(tight, 'd1');
+  const h2 = tight.preview.built.find(e => e.op.id === 'h2')?.r.previewHoles?.[0];
+  if (h2 && h2.x > d1.maxX) pass('on failure the half-built second piece previews beside the first, not on top of it');
+  else fail(`failure preview: hole2 at ${JSON.stringify(h2)} disc1 to ${d1.maxX}`);
+
+  // the slot-as-cutout slip is still caught — by the fit check when content
+  // precedes it, and otherwise it is honestly two pieces that claims.pieces
+  // will count against the model's "one tray"
+  const slotFirst = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'slot', path: 'M -1.5 -0.15 L -0.9 -0.15 L -0.9 0.15 L -1.5 0.15 Z' }],
+    pipeline: [
+      { id: 'slot_l', strategy: 'shape_cutout', params: { shape: 'slot', toolDiameter: 0.125 } },
+      { id: 'plate', strategy: 'tag_cutout', params: { width: 4, height: 2.5, posX: 0.001, posY: 0.001 } },
+    ],
+  });
+  // the tag encloses the slot cutout whole, so it NESTS it — the slot's
+  // drop-out is waste like a ring's inner disc, and the plate is one piece
+  // with a through-slot: physically exactly right, and counted as 1
+  if (slotFirst.ok && slotFirst.pieces === 1) pass('a slot cutout enclosed by the tag that follows nests (one plate with a through-slot), pieces = 1');
+  else fail(`slot-first: ok=${slotFirst.ok} pieces=${slotFirst.pieces} ${slotFirst.errors?.[0]}`);
+
+  // the row wraps when the shop declares its width — two rows, nothing past the limit
+  // rows = bands of boxes that overlap in Y (a wrapped row stands on a
+  // shared floor, so its pieces' centers differ when their heights do)
+  const bands = (boxes) => {
+    const out = [];
+    for (const b of [...boxes].sort((p, q) => p.minY - q.minY)) {
+      const band = out.find(g => b.minY < g.maxY && b.maxY > g.minY);
+      if (band) { band.minY = Math.min(band.minY, b.minY); band.maxY = Math.max(band.maxY, b.maxY); band.boxes.push(b); }
+      else out.push({ minY: b.minY, maxY: b.maxY, boxes: [b] });
+    }
+    return out;
+  };
+  const wrapped = quiet(() => runRecipe(rings(6), controlDefaults(rings(6)), FONT_SHELF, {}, { machineW: 18, machineH: 18 }));
+  if (wrapped.ok && wrapped.pieces === 6) {
+    const boxes = Array.from({ length: 6 }, (_, i) => ringBox(wrapped, `ring${i}`));
+    const rows = bands(boxes);
+    if (rows.length === 2 && wrapped.preview.stock.w <= 18 && !wrapped.warnings.some(w => /cutting area/.test(w)))
+      pass(`declared 18" machine: the six rings wrap into ${rows.length} rows on a ${wrapped.preview.stock.w}" × ${wrapped.preview.stock.h}" board`);
+    else fail(`wrap: rows=${rows.length} board=${wrapped.preview.stock.w}×${wrapped.preview.stock.h} warn=${wrapped.warnings.filter(w => /cutting area/.test(w)).join(' | ')}`);
+  } else fail(`wrap: ok=${wrapped.ok} ${wrapped.errors?.join(' | ')}`);
+
+  // pieces that SHRINK then GROW (a stacked-slice stool's ellipses, waist in
+  // the middle) under a narrow machine: a wrapped row stands on its floor,
+  // so a taller later piece grows UP, never down into the row below
+  // (21-slice stool, 2026-10-19: centered rows put slice 20 over slice 11)
+  const waisted = [4, 3.5, 3, 2.5, 2, 2.5, 3, 3.5, 4];
+  const stool = {
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.75 },
+    pipeline: waisted.map((d, i) => [
+      { id: `dowel${i}`, strategy: 'bore_hole', params: { diameter: 0.5, depth: 0.75, toolDiameter: 0.25 } },
+      { id: `slice${i}`, strategy: 'disc_cutout', params: { diameter: d, tabs: true } },
+    ]).flat(),
+  };
+  const st = quiet(() => runRecipe(stool, controlDefaults(stool), FONT_SHELF, {}, { machineW: 12, machineH: 48 }));
+  if (st.ok && st.pieces === waisted.length) {
+    const boxes = waisted.map((_, i) => ringBox(st, `slice${i}`));
+    const rows = bands(boxes);
+    const stacked = rows.every((g, i) => i === 0 || g.minY >= rows[i - 1].maxY + 0.5 - 1e-6);
+    const onFloor = rows.slice(1).every(g => g.boxes.every(b => Math.abs(b.minY - g.minY) < 1e-6));
+    const overlaps = st.report.errors.filter(e => /overlap|graze/i.test(e));
+    if (rows.length >= 3 && stacked && onFloor && !overlaps.length && st.preview.stock.w <= 12)
+      pass(`shrink-then-grow slices under a 12" machine: ${rows.length} rows, every wrapped row stands on its floor, a gap between rows, no overlap (board ${st.preview.stock.w}" × ${st.preview.stock.h}")`);
+    else fail(`waisted stack: rows=${rows.length} stacked=${stacked} onFloor=${onFloor} overlaps=${overlaps.join(' | ')} board=${st.preview.stock.w}×${st.preview.stock.h}`);
+  } else fail(`waisted stack: ok=${st.ok} pieces=${st.pieces} ${st.errors?.join(' | ')}`);
+
+  // ---- stacked assembly: the pieces of a set that glue up into one object ----
+  // recipe.assembly {kind:'stack'} → one assembly entry whose panels are the
+  // pieces' outlines (bores as holes), stacked in pipeline order one stock
+  // thickness per layer, every piece's first hole on the stack axis
+  const stacked = { ...rings(6), assembly: { kind: 'stack' } };
+  const sa = run(stacked);
+  const asm = sa.preview?.assemblies?.find(a => a.kind === 'stack');
+  if (sa.ok && asm && asm.panels.length === 6) {
+    const t = stacked.stock.thickness;
+    const levels = asm.panels.every((pn, k) => Math.abs(pn.world.origin[1] - k * t) < 1e-9);
+    const twoRings = asm.panels.every(pn => pn.rings.length === 2 && pn.rings[0].length > 8 && pn.rings[1].length > 8);
+    // the hole ring's center, mapped through the world pose, must land on ONE axis for every layer
+    const axis = asm.panels.map(pn => {
+      const h = pn.rings[1];
+      const cx = h.reduce((a, q) => a + q.x, 0) / h.length, cy = h.reduce((a, q) => a + q.y, 0) / h.length;
+      return { X: pn.world.origin[0] + cx * pn.world.u[0], Z: pn.world.origin[2] + cy * pn.world.v[2] };
+    });
+    const aligned = axis.every(a => Math.abs(a.X - axis[0].X) < 1e-6 && Math.abs(a.Z - axis[0].Z) < 1e-6);
+    const flat = asm.panels.every(pn => pn.sheet.x === 0 && pn.sheet.y === 0 && pn.sheet.rot === 0 && pn.thickness === t && pn.active);
+    const box = Math.abs(asm.box[0] - 4.5) < 1e-6 && Math.abs(asm.box[1] - 6 * t) < 1e-9 && Math.abs(asm.box[2] - 4.5) < 1e-6 && asm.height === 6 * t;
+    if (levels && twoRings && aligned && flat && box) pass(`stack assembly: 6 ring panels one thickness apart, holes on one axis, footprint box ${asm.box.map(v => +v.toFixed(2)).join('×')} (largest ring × height)`);
+    else fail(`stack: levels=${levels} twoRings=${twoRings} aligned=${aligned} flat=${flat} box=${JSON.stringify(asm.box)}`);
+    if (!sa.warnings.some(w => /no hole to line up/.test(w))) pass('stack: every ring has its hole — no alignment warning');
+    else fail(`stack warned: ${sa.warnings.filter(w => /line up/.test(w)).join(' | ')}`);
+  } else fail(`stack: ok=${sa.ok} assemblies=${JSON.stringify(sa.preview?.assemblies?.map(a => a.kind))} ${sa.errors?.join(' | ')}`);
+  if (!(run(rings(6)).preview?.assemblies?.length)) pass('no assembly declared: a plain set previews flat on the board only');
+  else fail('a plain set grew an assembly');
+  // discs without holes: align "holes" falls back to centers with a warning; align "center" is silent
+  const plain = (n, align) => ({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 }, assembly: { kind: 'stack', ...(align ? { align } : {}) },
+    pipeline: Array.from({ length: n }, (_, i) => ({ id: `d${i}`, strategy: 'disc_cutout', params: { diameter: 3 - 0.5 * i, tabs: true } })),
+  });
+  const noHoles = run(plain(3));
+  const centered = run(plain(3, 'center'));
+  const nh = noHoles.preview?.assemblies?.[0], ce = centered.preview?.assemblies?.[0];
+  if (noHoles.ok && nh?.panels.length === 3 && noHoles.warnings.filter(w => /no hole to line up/.test(w)).length === 3 && centered.ok && ce?.panels.length === 3 && !centered.warnings.some(w => /line up/.test(w)))
+    pass('stack of hole-less discs: align "holes" warns per piece and stacks on centers; align "center" stacks silently');
+  else fail(`hole-less stack: nh=${nh?.panels.length} warns=${noHoles.warnings.filter(w => /line up/.test(w)).length} ce=${ce?.panels.length} ceWarns=${centered.warnings.filter(w => /line up/.test(w)).length}`);
+  // the actions that set it
+  const setA = applyActions(rings(6), { actions: [{ kind: 'set_assembly', assembly: { kind: 'stack' } }] });
+  const badA = applyActions(rings(6), { actions: [{ kind: 'set_assembly', assembly: { kind: 'pile' } }, { kind: 'set_assembly', assembly: { kind: 'stack', align: 'left' } }] });
+  const remA = applyActions(setA.recipe, { actions: [{ kind: 'remove_assembly' }, { kind: 'remove_assembly' }] });
+  if (setA.recipe.assembly?.kind === 'stack' && setA.applied.length === 1 && /stack in pipeline order/.test(setA.applied[0])
+      && badA.skipped.length === 2 && !badA.recipe.assembly
+      && !remA.recipe.assembly && remA.applied.length === 1 && remA.skipped.length === 1)
+    pass('set_assembly / remove_assembly: applied, bad kind and bad align skipped by name, double remove skipped');
+  else fail(`assembly actions: set=${JSON.stringify(setA.applied)} bad=${JSON.stringify(badA.skipped)} rem=${JSON.stringify([remA.applied, remA.skipped])}`);
+  // the second look hears about the stack
+  const obsS = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: stacked }, sa, stacked));
+  if (/assembled preview: the pieces stack 6 high, 3" tall, lined up on their holes/.test(obsS)) pass('observation: "the pieces stack 6 high, 3\" tall, lined up on their holes"');
+  else fail(`stack observation missing: ${obsS.split('\n').find(l => /WEAVE/.test(l))}`);
+
+  // ---- rib_lattice: a form from interlocking slotted ribs (waffle construction) ----
+  const lattice = (profile, extra = {}) => ({
+    ...structuredClone(EMPTY_RECIPE), name: 'lattice', stock: { thickness: 0.5 },
+    pipeline: [{ id: 'form', strategy: 'rib_lattice', params: { profile, height: 10, ribsX: 4, ribsY: 3, ...extra } }],
+  });
+  const TAPER = { stations: [{ h: 0, w: 14, d: 11 }, { h: 1, w: 9, d: 7 }] };
+  const WAIST = { stations: [{ h: 0, w: 14, d: 11 }, { h: 0.67, w: 9, d: 7 }, { h: 1, w: 13, d: 10 }] };
+  const lt = run(lattice(TAPER));
+  const la = lt.preview?.assemblies?.find(a => a.kind === 'lattice');
+  if (lt.ok && lt.pieces === 7 && la?.panels.length === 7) {
+    const xr = la.panels.filter(pn => /^X/.test(pn.id)), yr = la.panels.filter(pn => /^Y/.test(pn.id));
+    const poses = xr.every(pn => pn.world.u.join() === '0,0,1' && pn.world.v.join() === '0,1,0') && yr.every(pn => pn.world.u.join() === '1,0,0' && pn.world.v.join() === '0,1,0');
+    const box = Math.abs(la.box[0] - 14) < 1e-6 && la.box[1] === 10 && Math.abs(la.box[2] - 11) < 1e-6;
+    // X ribs stand at evenly spaced planes half a spacing in from the edge
+    const planes = xr.map(pn => +(pn.world.origin[0] - 0.25).toFixed(3));
+    const spaced = planes.join() === '1.75,5.25,8.75,12.25';
+    if (poses && box && la.crossings === 8 && spaced) pass(`rib_lattice taper: 7 ribs (4 × 3), 8 crossings, X ribs on planes ${planes.join('/')}, Y ribs across, box ${la.box.map(v => +v.toFixed(1)).join('×')}, VERIFIED`);
+    else fail(`lattice: poses=${poses} box=${JSON.stringify(la.box)} crossings=${la.crossings} planes=${planes.join(',')}`);
+    // the center X rib carries a slot from the top down to the half-lap split (mid-height, 5")
+    const x2 = la.panels.find(pn => pn.id === 'X2');
+    const sy = -x2.world.origin[1], sx = 5.5 - x2.world.origin[2];   // D/2 − origin z
+    const floor = x2.rings[0].filter(q => Math.abs(q.x - sx) < 0.3 && Math.abs(q.y - (sy + 5)) < 0.08);   // the floor's corners sit ±0.255 from the slot center
+    if (floor.length) pass('rib_lattice: the center X rib has a slot floor at mid-height where the center Y rib crosses it (half-lap from the top)');
+    else fail(`lattice slot: no ring point near (${sx.toFixed(2)}, ${(sy + 5).toFixed(2)}) on X2`);
+    if (!lt.report.errors.some(e => /overlap|intrud/.test(e))) pass('rib_lattice: no rib overlaps another on the sheet and no cut intrudes a rib (verifier clean)');
+    else fail(`lattice verifier: ${lt.report.errors.join(' | ')}`);
+    const cc = checkClaims({ pieces: 7 }, lattice(TAPER), 'built', [], 7);
+    if (!cc.issues.length) pass('claims.pieces 7 on a rib_lattice (no cutout ops) is accepted — the verb counts its ribs');
+    else fail(`lattice claims: ${cc.issues.map(i => i.message).join(' | ')}`);
+    const obsL = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: lattice(TAPER) }, lt, lattice(TAPER)));
+    if (/7 separate pieces freed/.test(obsL) && /4 × 3 ribs slotted at 8 crossings, 10" tall on a 14" × 11" footprint/.test(obsL)) pass('observation: "7 separate pieces freed … 4 × 3 ribs slotted at 8 crossings, 10\" tall"');
+    else fail(`lattice observation: ${obsL.split('\n').find(l => /WEAVE/.test(l))}`);
+  } else fail(`lattice taper: ok=${lt.ok} pieces=${lt.pieces} panels=${la?.panels.length} ${lt.errors?.join(' | ')}`);
+  // the waist limit is refused by name, both ways it bites
+  const lw = run(lattice(WAIST));
+  if (!lw.ok && /waist pinches the form so far that ribs X1 .* would split into a top and a bottom piece/.test(lw.errors[0])) pass(`rib_lattice waist: refused by name — "${lw.errors[0].slice(0, 90)}…"`);
+  else fail(`lattice waist: ok=${lw.ok} ${lw.errors?.[0]}`);
+  const lw2 = run(lattice(WAIST, { ribsX: 2, ribsY: 2 }));
+  if (!lw2.ok && /pinched into 2 separate heights/.test(lw2.errors[0])) pass('rib_lattice waist, 2 × 2: a crossing with two heights is refused by name');
+  else fail(`lattice waist 2x2: ok=${lw2.ok} ${lw2.errors?.[0]}`);
+  // a pinched waist that keeps the ribs meeting once but thins an OUTER
+  // cheek to less than the stock: the notch is opened to the rib's edge
+  // there (open-sided), the split moves into the longest stretch where both
+  // ribs keep full cheeks, the job verifies (the 2026-10-24 photo stool:
+  // 14 × 18 × 14 hourglass, 3/4" ply, 2 × 2 ribs, waist 82%)
+  const STOOL = { stations: [{ h: 0, w: 13.02, d: 13.02 }, { h: 0.5, w: 11.48, d: 11.48 }, { h: 0.85, w: 13.44, d: 13.44 }, { h: 1, w: 14, d: 14 }] };
+  const ls = run({ ...lattice(STOOL, { height: 18, ribsX: 2, ribsY: 2 }), stock: { thickness: 0.75 } });
+  const lsa = ls.preview?.assemblies?.find(a => a.kind === 'lattice');
+  if (ls.ok && ls.pieces === 4 && lsa?.crossings === 4 && !ls.report.errors.length) {
+    // scan a rib's outline at a height: the |a| extents where it has material
+    const scan = (pn, h) => { const ring = pn.rings[0], xs = ring.map(q => q.x), ys = ring.map(q => q.y); const cx = (Math.min(...xs) + Math.max(...xs)) / 2, yy = Math.min(...ys) + h; const hits = []; for (let i = 0; i < ring.length; i++) { const a = ring[i], b = ring[(i + 1) % ring.length]; if ((a.y <= yy) !== (b.y <= yy)) hits.push(a.x + ((yy - a.y) * (b.x - a.x)) / (b.y - a.y)); } return hits.map(v => v - cx).sort((u, v) => u - v); };
+    const x1 = lsa.panels.find(pn => pn.id === 'X1'), y1 = lsa.panels.find(pn => pn.id === 'Y1');
+    const slotWall = 3.5 - 0.38;   // outer ribs stand 3.5" off centre; the slot's inner wall is half a slot (0.76"/2) nearer
+    // X ribs are notched from the top, Y ribs from the bottom: whichever
+    // direction took the open side is cut back to the slot's inner wall at
+    // its open end, and the other keeps a stock-thick cheek beside its slot
+    const openX = scan(x1, 16), openY = scan(y1, 2);
+    const cutBack = (hits) => hits.length === 2 && Math.abs(Math.abs(hits[0]) - slotWall) < 0.05 && Math.abs(hits[1] - slotWall) < 0.05;
+    const cheeked = (hits) => hits.length === 6 && hits[5] - hits[4] >= 0.75 - 1e-6 && hits[1] - hits[0] >= 0.75 - 1e-6;
+    const closedX = scan(x1, 16), closedY = scan(y1, 2);
+    if ((cutBack(openX) && cheeked(closedY)) || (cutBack(openY) && cheeked(closedX))) pass(`rib_lattice waist, open-sided notches: the 3/4" stool builds (4 ribs, 4 crossings, VERIFIED) — the outer ribs in one direction are cut back to the slot wall where the waist thins their cheek (${cutBack(openX) ? 'X ribs, from the waist to the top' : 'Y ribs, from the floor to the waist'}), the other direction keeps stock-thick cheeks`);
+    else fail(`lattice stool notches: X1@16 ${openX.map(v => v.toFixed(2)).join(' ')} | Y1@2 ${openY.map(v => v.toFixed(2)).join(' ')}`);
+  } else fail(`lattice stool: ok=${ls.ok} pieces=${ls.pieces} crossings=${lsa?.crossings} ${ls.errors?.join(' | ')} ${ls.report?.errors?.join(' | ')}`);
+  const lb = run(lattice(TAPER, { toolDiameter: 0.75 }));
+  if (!lb.ok && /wider than the 0.510" slot/.test(lb.errors[0])) pass('rib_lattice: a bit wider than the slot is refused');
+  else fail(`lattice bit: ${lb.errors?.[0]}`);
+  const lrect = run(lattice({ stations: [{ h: 0, w: 12, d: 12 }, { h: 1, w: 8, d: 8 }] }, { section: 'rect' }));
+  if (lrect.ok && lrect.pieces === 7 && lrect.preview.assemblies[0].crossings === 12) pass('rib_lattice rect section: a tapered box, every rib crosses every other (12 crossings), VERIFIED');
+  else fail(`lattice rect: ok=${lrect.ok} crossings=${lrect.preview?.assemblies?.[0]?.crossings} ${lrect.errors?.[0]}`);
+  // the sheet wraps under a declared shop width; a stack declaration ignores rib outlines
+  const lnarrow = quiet(() => runRecipe(lattice(TAPER), controlDefaults(lattice(TAPER)), FONT_SHELF, {}, { machineW: 30, machineH: 48 }));
+  if (lnarrow.ok && lnarrow.preview.stock.w <= 30 && lnarrow.preview.stock.h > 12) pass(`rib_lattice under a 30" machine: ribs wrap into rows (board ${lnarrow.preview.stock.w}" × ${lnarrow.preview.stock.h}"), VERIFIED`);
+  else fail(`lattice wrap: ok=${lnarrow.ok} board=${lnarrow.preview?.stock?.w}×${lnarrow.preview?.stock?.h} ${lnarrow.errors?.[0]}`);
+  const lstack = run({ ...lattice(TAPER), assembly: { kind: 'stack' } });
+  if (lstack.ok && !lstack.preview.assemblies.some(a => a.kind === 'stack')) pass('a stack declaration does not try to stack rib outlines');
+  else fail(`lattice+stack: ok=${lstack.ok} kinds=${lstack.preview?.assemblies?.map(a => a.kind)}`);
+  const sysL = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
+  if (/rib_lattice/.test(sysL) && /RIB \/ WAFFLE \/ EGG-CRATE FORM/.test(sysL)) pass('the model is told about rib_lattice: catalog doc + the waffle rule');
+  else fail('rib_lattice missing from the system prompt');
+
+  // ---- rib_chair: a chair as sliced side ribs + slats (2026-10-24, Brian: "what's missing to replicate cushiony chairs in wood") ----
+  console.log('--- rib_chair ---');
+  {
+    const CLUB = [
+      { y: 0, z: 0 }, { y: 34, z: 0, arc: 'convex' }, { y: 36, z: 3, slats: true }, { y: 24, z: 7, slats: true }, { y: 17, z: 9, slats: true },
+      { y: 16, z: 26, slats: true }, { y: 24, z: 27 }, { y: 24, z: 30, slats: true }, { y: 0, z: 30 }, { y: 0, z: 25, arc: 'concave', r: 14 }, { y: 0, z: 5 }];
+    const chair = (outline, extra = {}, t = 0.75) => ({ ...structuredClone(EMPTY_RECIPE), name: 'chair', stock: { thickness: t },
+      pipeline: [{ id: 'chair', strategy: 'rib_chair', params: { outline, width: 28, ribs: 5, slatSpacing: 2.5, slatDepth: 2.5, toolDiameter: 0.25, tabs: true, ...extra } }] });
+    const shop = { machineW: 48, machineH: 96, materialW: 48, materialH: 96 };
+    const rc = quiet(() => runRecipe(chair(CLUB), controlDefaults(chair(CLUB)), FONT_SHELF, TERRAIN_FIXTURE, shop));
+    const ca = rc.preview?.assemblies?.find(a => a.kind === 'rib_chair');
+    const su = rc.preview?.setups?.[0];
+    if (rc.ok && rc.pieces === 27 && ca?.ribs === 5 && ca?.slats === 22 && ca.panels.length === 27 && su?.count === 3 && su.current === 1 && !rc.report.errors.length) {
+      pass(`rib_chair club chair: 5 ribs + 22 slats = 27 pieces over ${su.count} sheets (sheet 1 cuts ${su.groups[0].length}), VERIFIED, assembled box ${ca.box.map(v => +v.toFixed(1)).join('×')}`);
+      // the pose contract: every slat's outer edge lies ON the side silhouette and its inner edge inside it
+      const toWorld = (pn, q) => [0, 1, 2].map(k => pn.world.origin[k] + q.x * pn.world.u[k] + q.y * pn.world.v[k]);
+      const rib = ca.panels.find(pn => pn.id === 'R1');
+      const sil = ca.silhouette.map(q => ({ x: q.z, y: q.y }));   // the un-notched silhouette in (z, y) — a slat's inner edge passes through the rib's notch
+      const distToSil = (z, y) => { let best = Infinity; for (let i = 0; i < sil.length; i++) { const a = sil[i], b = sil[(i + 1) % sil.length]; const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy || 1; const tt = Math.max(0, Math.min(1, ((z - a.x) * dx + (y - a.y) * dy) / L2)); best = Math.min(best, Math.hypot(z - (a.x + tt * dx), y - (a.y + tt * dy))); } return best; };
+      const inSil = (z, y) => { let inside = false; for (let i = 0, j = sil.length - 1; i < sil.length; j = i++) { const a = sil[i], b = sil[j]; if ((a.y > y) !== (b.y > y) && z < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside; } return inside; };
+      let onEdge = 0, inside = 0, bad = [];
+      for (const pn of ca.panels.filter(x => /^S/.test(x.id))) {
+        const pts = pn.rings[0].map(q => toWorld(pn, q));
+        const xs = pts.map(w => w[0]);
+        if (Math.min(...xs) < -0.02 || Math.max(...xs) > 28.02) bad.push(`${pn.id} spans x ${Math.min(...xs).toFixed(2)}..${Math.max(...xs).toFixed(2)}`);
+        const ds = pts.map(w => distToSil(w[2], w[1]));
+        const near = ds.filter(d => d < 0.03).length;
+        if (near >= 2) onEdge++;
+        if (pts.every((w, i) => ds[i] < 0.03 || inSil(w[2], w[1]))) inside++;
+        else bad.push(`${pn.id} pokes out of the silhouette`);
+      }
+      if (onEdge === 22 && inside === 22 && !bad.length) pass('rib_chair poses: all 22 slats span the full width, sit with their outer edge on the silhouette and the rest inside the rib (turned-on-the-sheet pieces included)');
+      else fail(`rib_chair poses: onEdge=${onEdge} inside=${inside} ${bad.slice(0, 3).join(' | ')}`);
+      const w1 = rc.warnings.find(w => /need 3 sheets/.test(w));
+      if (w1 && /sheet 1: .* pieces/.test(w1) && /bind setup to a control/.test(w1)) pass('rib_chair: the sheet-count warning names each sheet\'s pieces and the setup control');
+      else fail(`rib_chair sheet warning: ${rc.warnings.filter(w => /sheet/.test(w)).join(' | ').slice(0, 200)}`);
+    } else fail(`rib_chair club: ok=${rc.ok} pieces=${rc.pieces} ribs=${ca?.ribs} slats=${ca?.slats} panels=${ca?.panels?.length} setups=${JSON.stringify(su)} ${rc.errors?.join(' | ')} ${rc.report?.errors?.join(' | ')}`);
+    const rc2 = quiet(() => runRecipe(chair(CLUB, { setup: 2 }), controlDefaults(chair(CLUB)), FONT_SHELF, TERRAIN_FIXTURE, shop));
+    const ca2 = rc2.preview?.assemblies?.find(a => a.kind === 'rib_chair');
+    if (rc2.ok && rc2.preview.setups[0].current === 2 && ca2.panels.filter(pn => pn.active).length === rc2.preview.setups[0].groups[1].length && rc2.preview.built.length === rc2.preview.setups[0].groups[1].length)
+      pass(`rib_chair setup 2: cuts only sheet 2's ${rc2.preview.built.length} pieces, the rest ghosted in the assembled view, VERIFIED`);
+    else fail(`rib_chair setup 2: ok=${rc2.ok} built=${rc2.preview?.built?.length} active=${ca2?.panels?.filter(pn => pn.active).length}`);
+    // a thin wing drops slats by name instead of cutting the rib in two
+    const THIN = [{ y: 0, z: 0 }, { y: 40, z: 0, slats: true }, { y: 40, z: 1.5, slats: true }, { y: 20, z: 1.5, slats: true }, { y: 16, z: 24, slats: true }, { y: 0, z: 24 }, { y: 0, z: 20 }, { y: 16, z: 20 }, { y: 18, z: 4 }, { y: 0, z: 4 }];
+    const rt = quiet(() => runRecipe(chair(THIN), controlDefaults(chair(THIN)), FONT_SHELF, TERRAIN_FIXTURE, shop));
+    if (rt.ok && rt.warnings.some(w => /dropped — only [\d.]+" of rib behind it/.test(w)) && rt.pieces > 5) pass(`rib_chair thin back: slats on the 1.5" back are dropped by name (rib behind them too thin), the seat's stay — ${rt.pieces} pieces, VERIFIED`);
+    else fail(`rib_chair thin: ok=${rt.ok} pieces=${rt.pieces} ${rt.errors?.join(' | ')} ${rt.warnings.filter(w => /dropped/.test(w)).slice(0, 2).join(' | ')}`);
+    const r3 = quiet(() => runRecipe(chair([{ y: 0, z: 0 }, { y: 10, z: 10 }]), controlDefaults(chair(CLUB)), FONT_SHELF, TERRAIN_FIXTURE, shop));
+    const r4 = quiet(() => runRecipe(chair(CLUB, { width: 1 }), controlDefaults(chair(CLUB)), FONT_SHELF, TERRAIN_FIXTURE, shop));
+    if (!r3.ok && /outline needs at least 3/.test(r3.errors[0]) && !r4.ok && /cannot hold two/.test(r4.errors[0])) pass('rib_chair refusals: a 2-point outline and a 1" wide chair are refused by name');
+    else fail(`rib_chair refusals: ${r3.errors?.[0]} | ${r4.errors?.[0]}`);
+    const sysC = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
+    if (/rib_chair/.test(sysC) && /SLICED \/ RIBBED CHAIR/.test(sysC) && /cushioned, upholstered, padded/.test(sysC)) pass('the model is told about rib_chair: catalog doc + the sliced-chair rule (cushioned / upholstered asks route here)');
+    else fail('rib_chair prompt rule missing');
+    const obsC = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: chair(CLUB) }, rc, chair(CLUB)));
+    if (/assembled preview: 5 side ribs across 28" with 22 slats notched into each, 36(\.\d+)?" tall × 30" deep/.test(obsC)) pass('observation: "5 side ribs across 28\" with 22 slats notched into each, 36\" tall × 30\" deep"');
+    else fail(`rib_chair observation: ${obsC.split('\n').find(l => /WEAVE/.test(l))}`);
+  }
+
+  // ---- a picture's proportion reaches the second look (2026-10-24: the same photo of a portrait sign wove portrait/3 lines, then landscape/2 lines) ----
+  {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.from([0, 0, 1, 44, 0, 0, 1, 144, 8, 2, 0, 0, 0])]);   // 300 × 400
+    const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xc0, 0, 17, 8, 0x03, 0x00, 0x04, 0x00, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);   // SOF0 height 768 width 1024
+    const szP = imageSize({ media_type: 'image/png', data: png.toString('base64') }), szJ = imageSize({ media_type: 'image/jpeg', data: jpg.toString('base64') });
+    if (szP?.w === 300 && szP?.h === 400 && szJ?.w === 1024 && szJ?.h === 768 && imageSize({ data: 'AAAA' }) === null) pass('imageSize: PNG 300 × 400 and JPEG 1024 × 768 read from their headers; junk → null');
+    else fail(`imageSize: png=${JSON.stringify(szP)} jpg=${JSON.stringify(szJ)}`);
+    const pic = { media_type: 'image/png', data: png.toString('base64') };
+    const reqP = buildParseRequest(structuredClone(EMPTY_RECIPE), '', { image: pic }), reqT = buildParseRequest(structuredClone(EMPTY_RECIPE), 'a sign');
+    if (!('temperature' in reqP) && !('temperature' in reqT) && /LETTERING IN THE PICTURE/.test(reqP.system) && /SAME LINE BREAKS/.test(reqP.system) && !/LETTERING IN THE PICTURE/.test(reqT.system))
+      pass('picture turns carry the lettering rule (line breaks, relative sizes, orientation), text turns do not — and no request sets temperature (Claude 5 rejects it)');
+    else fail(`picture request: temp=${reqP.temperature}/${reqT.temperature} rule=${/LETTERING IN THE PICTURE/.test(reqP.system)}`);
+    const reqPhone = buildParseRequest(structuredClone(EMPTY_RECIPE), '', { image: pic, client: 'phone' });
+    if (/THIS CLIENT CANNOT DRAW/.test(reqPhone.system) && /NEVER author a shape with "draw"/.test(reqPhone.system) && !/THIS CLIENT CANNOT DRAW/.test(reqP.system))
+      pass('client "phone": the model is told there is no sketch dialog — draw shapes are out, the likeness is a decline; other clients keep the draw slot');
+    else fail(`phone client rule: phone=${/CANNOT DRAW/.test(reqPhone.system)} desktop=${/CANNOT DRAW/.test(reqP.system)}`);
+    const weaveLike = (w, h, pinned = false) => ({ ok: true, errors: [], warnings: [], preview: { stock: { w, h, thickness: 0.5, pinned } }, report: { stats: { targets: [] } } });
+    const obsL = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: EMPTY_RECIPE }, weaveLike(19.5, 20.25), EMPTY_RECIPE, { picture: { w: 300, h: 400 } }));
+    const obsOk = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: EMPTY_RECIPE }, weaveLike(12, 19.5), EMPTY_RECIPE, { picture: { w: 300, h: 400 } }));
+    const obsPin = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: EMPTY_RECIPE }, weaveLike(19.5, 20.25, true), EMPTY_RECIPE, { picture: { w: 300, h: 400 } }));
+    const obsNo = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: EMPTY_RECIPE }, weaveLike(19.5, 20.25), EMPTY_RECIPE));
+    if (/PICTURE vs BOARD: the picture is portrait \(300 × 400 px, 0\.75:1\); the auto-sized board came out about square \(19\.5" × 20\.25", 0\.96:1\) — if the picture shows ONE flat piece/.test(obsL)
+      && /PICTURE vs BOARD: the picture is portrait .*; the auto-sized board came out portrait \(12" × 19\.5"/.test(obsOk) && !/ONE flat piece/.test(obsOk)
+      && !/PICTURE vs BOARD/.test(obsPin) && !/PICTURE vs BOARD/.test(obsNo))
+      pass('observation: "PICTURE vs BOARD: the picture is portrait …; the board came out about square … ONE flat piece … should keep the picture\'s proportion" — silent when they agree, when the blank is pinned, or without a picture');
+    else fail(`picture observation: ${obsL.split('\n').find(l => /PICTURE/.test(l))} | ok-case nudge=${/ONE flat piece/.test(obsOk)} pin=${/PICTURE vs BOARD/.test(obsPin)} none=${/PICTURE vs BOARD/.test(obsNo)}`);
+  }
+
+  // a chamfered rim declares a HEIGHTMAP target — a later piece carrying one
+  // translates it (origin + mask shift), the verifier checks it in place
+  const chamfered = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    pipeline: [
+      { id: 'h0', strategy: 'bore_hole', params: { diameter: 0.6, depth: 0.5, toolDiameter: 0.25 } },
+      { id: 'r0', strategy: 'disc_cutout', params: { diameter: 4, chamfer: 0.08, tabs: true } },
+      { id: 'h1', strategy: 'bore_hole', params: { diameter: 0.6, depth: 0.5, toolDiameter: 0.25 } },
+      { id: 'r1', strategy: 'disc_cutout', params: { diameter: 3, chamfer: 0.08, tabs: true } },
+    ],
+  });
+  if (chamfered.ok && chamfered.sbp && chamfered.pieces === 2) {
+    const hmT = chamfered.report.stats.targets.filter(t => t.type === 'heightmap');
+    if (hmT.length === 2 && hmT.every(t => !t.gouges && !t.maskViolations)) pass(`chamfered rims on both pieces: the second piece's heightmap target moved with it (${hmT.length} surface targets, clean)`);
+    else fail(`chamfer targets: ${JSON.stringify(hmT)}`);
+  } else fail(`chamfered second piece: ok=${chamfered.ok} pieces=${chamfered.pieces} ${chamfered.errors?.join(' | ')}`);
+
+  // NESTING is general: a plate whose cutout comes LAST absorbs the slot
+  // cutouts authored before it (even with a recess in between) — one
+  // piece with through-slots, not a plate plus two loose offcuts
+  const slotted2 = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'slotA', path: 'M -1.5 -0.15 L -0.9 -0.15 L -0.9 0.15 L -1.5 0.15 Z' }, { id: 'slotB', path: 'M 0.9 -0.15 L 1.5 -0.15 L 1.5 0.15 L 0.9 0.15 Z' }],
+    pipeline: [
+      { id: 'slot_l', strategy: 'shape_cutout', params: { shape: 'slotA', toolDiameter: 0.125 } },
+      { id: 'slot_r', strategy: 'shape_cutout', params: { shape: 'slotB', toolDiameter: 0.125 } },
+      { id: 'recess', strategy: 'pocket_shape', params: { shape: 'circle', diameter: 1, depth: 0.1 } },
+      { id: 'plate', strategy: 'tag_cutout', params: { width: 4, height: 2.5, posX: 0.001, posY: 0.001 } },
+    ],
+  });
+  if (slotted2.ok && slotted2.pieces === 1 && !slotted2.preview.built.some(e => e.r.pieceShift)) pass('two slot cutouts, a recess, then the plate: the plate absorbs all three — ONE piece, nothing moved');
+  else fail(`absorb: ok=${slotted2.ok} pieces=${slotted2.pieces} shifted=${slotted2.preview?.built?.filter(e => e.r.pieceShift).map(e => e.op.id)} ${slotted2.errors?.join(' | ')}`);
+  // nesting needs a KERF of clearance: two IDENTICAL half-circle outlines,
+  // each with its own label, are two pieces (the bbox matches and the
+  // labels fit, but the kerfs would coincide) — the second slides aside
+  const halfPath = 'M -2 0 A 2 2 0 0 1 2 0 Z';
+  const halves = run({
+    ...structuredClone(EMPTY_RECIPE), stock: { thickness: 0.5 },
+    shapes: [{ id: 'hA', path: halfPath }, { id: 'hB', path: halfPath }],
+    pipeline: [
+      { id: 'lab_a', strategy: 'vcarve_text', params: { text: '1/2', letterHeight: 0.4, posY: 0.8 } },
+      { id: 'half_a', strategy: 'shape_cutout', params: { shape: 'hA' } },
+      { id: 'lab_b', strategy: 'vcarve_text', params: { text: '1/2', letterHeight: 0.4, posY: 0.8 } },
+      { id: 'half_b', strategy: 'shape_cutout', params: { shape: 'hB' } },
+    ],
+  });
+  if (halves.ok && halves.pieces === 2 && halves.preview.built.some(e => e.op.id === 'half_b' && e.r.pieceShift)) pass('identical outlines do not nest: two half-circles → 2 pieces, the second laid beside the first, verified');
+  else fail(`identical halves: ok=${halves.ok} pieces=${halves.pieces} ${halves.errors?.join(' | ').slice(0, 200)}`);
+  // …and the claims gate compares the model's count to the weave's, both ways
+  const over = checkClaims({ pieces: 1 }, rings(6), '', [], r6.pieces);
+  if (over.issues.some(i => i.code === 'pieces' && /frees 6 separate pieces/.test(i.message) && /pocket_shape at full depth/.test(i.message))) pass('claims.pieces 1 vs 6 woven: refused, naming the slot-as-cutout fix and the count');
+  else fail(`claims over: ${JSON.stringify(over.issues)}`);
+  const under = checkClaims({ pieces: 2 }, { pipeline: [{ strategy: 'disc_cutout' }, { strategy: 'disc_cutout' }] }, '', [], 1);
+  if (under.issues.some(i => i.code === 'pieces' && /nests it/.test(i.message))) pass('claims.pieces 2 vs 1 woven (a ring): refused, explaining nesting');
+  else fail(`claims under: ${JSON.stringify(under.issues)}`);
+  const exact = checkClaims({ pieces: 6 }, rings(6), '', [], 6);
+  if (!exact.issues.some(i => i.code === 'pieces')) pass('claims.pieces 6 vs 6 woven: clean');
+  else fail(`claims exact: ${JSON.stringify(exact.issues)}`);
+
+  // the observation tells the model how many pieces one run frees
+  const obs = observationText(buildObservation({ applied: [], skipped: [], recipe: rings(6) }, r6));
+  if (/6 separate pieces freed in this one run/.test(obs)) pass('observation: "6 separate pieces freed in this one run" rides to the second look');
+  else fail(`observation lacks the piece count: ${obs.split('\n').find(l => l.startsWith('WEAVE'))}`);
 
   // pinned tag: every op bigger than the tag is listed with the scale that
   // fits — and applying that number fixes it (reserved-parking-sign)

@@ -9,6 +9,7 @@
 // DOM-free and side-effect-free: usable from tests, the browser app, or
 // a future server proxy.
 
+import { snapshotWeave } from './snapshot.mjs';
 import { CATALOG, catalogDoc } from './catalog.mjs';
 import { expandTemplate } from './shape.mjs';
 import { buildVars, buildShapes, ingredientLines } from './runtime.mjs';
@@ -23,13 +24,18 @@ export const ACTION_TOOL = {
   input_schema: {
     type: 'object',
     properties: {
+      observed: {
+        type: 'array',
+        description: 'ONLY when a picture is attached and this call builds from it: 4–10 short notes naming the CONCRETE features seen in the picture that the geometry below follows — pose, proportions, which parts are visible, where each marking / window / opening / detail sits and roughly how big. Write these FIRST; the actions must follow them, and the second look checks the cut against them.',
+        items: { type: 'string' },
+      },
       summary: { type: 'string', description: 'One sentence, user-facing, of what was done (and what was declined).' },
       claims: {
         type: 'object',
         description: 'What this job PHYSICALLY delivers — the app checks every field against the recipe and refuses what it cannot substantiate (the verifier cannot see these). Fill it on every call that builds.',
         properties: {
           faces: { type: 'string', enum: ['top', 'both'], description: '"top" = one face, one setup — every Loom job. "both" claims the back face is machined too: there is no flip or second setup in the catalog, so it is refused — decline back-face work instead.' },
-          pieces: { type: 'integer', description: 'how many separate finished pieces ONE run of this job frees from the board — each needs its own cutout op (furniture_design counts its panels). 0 = engraving only, nothing cut free. A run never yields more than its cutouts: "24 numbered fronts" is 1 piece per run, re-run with the control.' },
+          pieces: { type: 'integer', description: 'how many separate finished pieces ONE run of this job frees from the board — each needs its own cutout op, and a cutout ends its piece (the ops after it are the next piece; furniture_design counts its panels, rib_lattice its ribs). 0 = engraving only, nothing cut free. A run never yields more than its cutouts: "24 numbered fronts" from ONE text control is 1 piece per run, re-run with the control; six different ornaments, each with its own cutout, are 6.' },
           parts: {
             type: 'array', description: 'each distinct KIND of piece by name with the cutout op that frees it — a "plug"/"insert"/"mating part" named here without such an op is refused',
             items: { type: 'object', properties: { name: { type: 'string' }, opId: { type: 'string' } }, required: ['name', 'opId'] },
@@ -43,7 +49,7 @@ export const ACTION_TOOL = {
         items: {
           type: 'object',
           properties: {
-            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'set_shape', 'remove_shape', 'set_terrain', 'remove_terrain', 'add_operation', 'set_operation', 'remove_operation'] },
+            kind: { type: 'string', enum: ['set_name', 'set_thickness', 'add_control', 'set_control', 'remove_control', 'set_derived', 'remove_derived', 'set_shape', 'remove_shape', 'set_terrain', 'remove_terrain', 'set_assembly', 'remove_assembly', 'add_operation', 'set_operation', 'remove_operation'] },
             name: { type: 'string', description: 'set_name: the new recipe/app name' },
             thickness: { type: 'number', description: 'set_thickness: the stock material thickness, inches (through-cuts use it)' },
             control: {
@@ -70,6 +76,13 @@ export const ACTION_TOOL = {
                 params: { type: 'object', description: 'literal values, or {"ctrl":"controlId"} bindings' },
                 after: { type: 'string', description: 'optional op id to insert after (add_operation)' },
                 frame: { type: 'string', description: 'mount this operation INSIDE a frame published by an EARLIER operation (a furniture panel id like "seat"): the content is authored panel-local — it centers on that panel\'s face, place/posX/posY compose within the panel — and rides the panel wherever it nests, at any rotation. Omit for ordinary shared-frame operations.' },
+              },
+            },
+            assembly: {
+              type: 'object', description: 'set_assembly: how the SEPARATE PIECES of this job go together once cut, for the assembled 3D preview (the pieces rise out of the board and stack up). kind "stack": the pieces stack in PIPELINE ORDER, bottom piece first, one stock thickness per layer — glued-up/laminated slices (a stacked-slice stool, a contour-layer topographic model), rings on a peg. align "holes" (default): each piece\'s FIRST bore hole lines up on the stack axis (the dowel); "center": the outlines are centered on each other (no holes needed). Pieces freed by cutouts only — furniture_design previews its own assembly.',
+              properties: {
+                kind: { type: 'string', enum: ['stack'] },
+                align: { type: 'string', enum: ['holes', 'center'] },
               },
             },
             terrain: {
@@ -231,9 +244,23 @@ export function promptRecipeView(recipe) {
 // they want): the model's eyes, with the division of labour spelled out —
 // the picture decides WHAT and in what proportion, the text decides the
 // numbers. Same stance as the furniture app's Weave box.
-const PICTURE_RULE = `- FROM A PICTURE: the user attached an image of what they want. Read it like a shop designer handed a photo and a tape-measure note. The PICTURE decides kind, structure and proportion (a 5-bay cube unit two rows high; a plaque with a name over a symbol; a bench with a stretcher). The TEXT decides the numbers — perspective makes pixel measurement worthless, so never derive a dimension from the picture when the user stated one; use it for RATIOS scaled to the stated size, and when nothing is stated choose real-world sizes and SAY in the summary that they are guesses. Reinterpret into this catalog, don't transcribe: a dowelled or face-framed cabinet becomes a furniture_design in tenoned panels; add what the picture hides but the piece needs (a back, a stretcher) and name the addition in the summary. A recognizable likeness, a logo or lettering style in the picture still cannot be traced from it (the likeness rule above holds — offer draw or an SVG upload); turned legs, carved or profiled moulding, upholstery and hardware go to declined, but a SILHOUETTE is not freeform: a shaped side (a chair or bench side with its wing, arm and legs, a bracket, a scrolled apron) is a panel "outline" of a dozen points and arcs traced from the picture's side view, and rounded corners, coved feet, arched aprons and toe kicks, scalloped shelf fronts, cloud-lift rails and ROUND or OVAL tops are corner cuts with "arc", edge "profiles" and a panel "shape" — but a FLAT band, face frame or plinth where the picture shows moulding or a base is furniture_assembly's trim / face_frame / plinth (build it and say so). Finish the summary with one line starting "Assumed:" listing every number or part you guessed, specific enough to check with a tape measure.`;
+// The phone page has no sketch dialog: a `draw` shape authored there is a
+// size slider with nothing behind it and a job that verifies without the
+// drawing (2026-10-24: a sign's melon illustration became a dangling
+// "Melon drawing width" control). Say so, and the likeness is a decline.
+const NO_DRAW_RULE = `- THIS CLIENT CANNOT DRAW: the user is on the phone page, which has no sketch dialog — NEVER author a shape with "draw" here (there would be no Draw button, only a dead slider and a job that silently omits it). A hand-drawn likeness, illustration or logo is a decline on this client; say in its "why" that the full Loom app on a computer can take a sketch of it (or an SVG), and build the rest.`;
 
-export function buildSystemPrompt(recipe, shop = {}, { hasImage = false } = {}) {
+// A likeness FROM A PHOTO is not the freehand likeness the rule above
+// refuses: with the subject in view the model can name what makes it
+// recognizable and draw from those notes (2026-10-24: a grazing cow from a
+// USDA photo, notes-first, verified first try on 2 of 2 Opus samples —
+// the big shoulder patch where the photo has it; the text-only "bull"
+// decline that wrote the rule stands, since nothing is in view there).
+const PHOTO_LIKENESS_RULE = `- A LIKENESS FROM THE PICTURE: when the subject the user wants IS IN THE ATTACHED PICTURE (an animal, a vehicle, a building, a person's silhouette, a plant), the likeness rule's "never freehand" does NOT apply — you can see it. Work in two steps in ONE call: first fill "observed" with the concrete features that make THIS subject recognizable (its pose; the line of its back, neck, roof, hull; which legs, wheels, windows, doors are visible and where; the tail, ears, chimney, mast; where each marking or opening sits and roughly how big), THEN author the geometry from those notes, not from a generic idea of the subject. The outline is ONE closed set_shape path in inches centered on the origin (25–60 smooth segments, C/Q béziers and lines; no feature or gap narrower than the bit can cut — merge near and far legs into sturdy masses; nothing dangling thin), cut with shape_cutout; markings, spots, windows, doors and siding are pocket_shape ops on their own set_shape paths placed where the picture has them, at least 0.5" across, 0.3" inside the outline, never overlapping each other — a marking INSIDE another marking (an eye in a dark patch, a pane in a window) is a HOLE in the outer one: set_shape difference {of: outer, minus: inner}, pocket the difference, not both. The observation of your build includes a PICTURE OF THE CUT rendered by the app from the real geometry: on the second look, compare it with the photo as a stranger would — is the pose right, the proportions, the big marking in the right place — and fix the outline or a marking that reads wrong, saying what you changed. Say in the summary that the likeness was drawn from the photo's features and name the three strongest.`;
+
+const PICTURE_RULE = `- FROM A PICTURE: the user attached an image of what they want. Read it like a shop designer handed a photo and a tape-measure note. The PICTURE decides kind, structure and proportion (a 5-bay cube unit two rows high; a plaque with a name over a symbol; a bench with a stretcher). The TEXT decides the numbers — perspective makes pixel measurement worthless, so never derive a dimension from the picture when the user stated one; use it for RATIOS scaled to the stated size, and when nothing is stated choose real-world sizes and SAY in the summary that they are guesses. Reinterpret into this catalog, don't transcribe: a dowelled or face-framed cabinet becomes a furniture_design in tenoned panels; add what the picture hides but the piece needs (a back, a stretcher) and name the addition in the summary. A recognizable likeness, a logo or lettering style in the picture still cannot be traced from it (the likeness rule above holds — offer draw or an SVG upload); turned legs, carved or profiled moulding, upholstery and hardware go to declined, but a SILHOUETTE is not freeform: a shaped side (a chair or bench side with its wing, arm and legs, a bracket, a scrolled apron) is a panel "outline" of a dozen points and arcs traced from the picture's side view, and rounded corners, coved feet, arched aprons and toe kicks, scalloped shelf fronts, cloud-lift rails and ROUND or OVAL tops are corner cuts with "arc", edge "profiles" and a panel "shape" — but a FLAT band, face frame or plinth where the picture shows moulding or a base is furniture_assembly's trim / face_frame / plinth (build it and say so). LETTERING IN THE PICTURE (a sign, plaque, menu board, label, house number): transcribe it line by line in reading order and keep the SAME LINE BREAKS — one text op per written line with the same words on it, never merging two lines into one or splitting one in two; keep the relative letter sizes (a headline twice the body stays twice) and the sign's ORIENTATION — a sign taller than wide must weave into a board taller than wide, so size the letters (the longest line sets the width) and the gaps so the text block has the picture's proportion; the observation reports the board's proportion against the picture's, and a mismatch on a single sign is yours to fix on the second look. Finish the summary with one line starting "Assumed:" listing every number or part you guessed, specific enough to check with a tape measure.`;
+
+export function buildSystemPrompt(recipe, shop = {}, { hasImage = false, canDraw = true } = {}) {
   // the user's declared physical limits (app settings, not the recipe) —
   // grounding the model in what the shop can actually cut turns "make it
   // fit my machine" from a guess into arithmetic
@@ -267,6 +294,9 @@ RULES:
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals. EVERY number param accepts a plain number, a {"ctrl":"id"} binding, or an arithmetic string over control/derived ids — "{slotW/2}" or bare "slotW/2" (a slot's cornerRadius, a ring's diameter, a hole count). Arithmetic is + - * / ( ) plus floor() ceil() round() abs() sqrt() min(a,b) max(a,b); use floor/round where a whole number is wanted (count: "floor((w - 2)/spacing) + 1"). The param's own min/max still clamp the result.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
+- SEVERAL SEPARATE PIECES IN ONE JOB (a set of ornaments, stacking rings, puzzle pieces, lift-out letters beside their tray) is NOT a decline: a cutout frees a piece and ENDS it, so write the pieces one after another — each piece's content ops, then its own cutout — all authored about the origin exactly as if each were alone (a stacking ring = bore_hole then disc_cutout; the next ring = bore_hole then disc_cutout again). The app lays the pieces out side by side and verifies the whole board; claims.pieces counts them. Do NOT pin pieces apart with posX/posY to avoid each other, and do not fall back to "one piece per run, pick it with a control" unless the user asks for that. When the pieces GLUE UP INTO ONE OBJECT — stacked or laminated slices (a sliced stool, a vase, a contour-layer topo model), rings that go on a peg — also set_assembly {kind:"stack"}: the assembled preview then shows the pieces rising from the board and stacking up in pipeline order, one stock thickness per layer, lined up on each piece's first hole (align "center" when there are no holes). Author the BOTTOM piece first, and give every slice its dowel hole.
+- A RIB / WAFFLE / EGG-CRATE FORM (flat ribs standing in two directions, slotted into each other — a "sliced" stool, lamp body, vase, plinth, sculpture base) is ONE rib_lattice op, never hand-authored cutouts: describe the form as profile stations of width × depth against height, pick ribsX/ribsY, bind height and the counts to controls. It frees every rib itself (claims.pieces = ribsX + ribsY) and previews its own assembly (no set_assembly). Its waist limit is in its doc: when it refuses, use fewer ribs or soften the waist and say so.
+- A SLICED / RIBBED CHAIR, ARMCHAIR, LOUNGE CHAIR, BENCH or SOFA SECTION — and ANY ask for a cushioned, upholstered, padded or "comfortable" chair in wood (a wingback, a club chair, a reading chair) — is ONE rib_chair op, never hand-authored side panels or a furniture_design: give the SIDE SILHOUETTE as outline points (y up from the floor, z from the back, like profile_chair, arcs for the wing sweep and rolled arm), flag the seat, the back's front and the arm tops with "slats":true, bind width / ribs / slatSpacing to controls (claims.pieces = ribs + slats, read the count from the observation). It frees every rib and slat itself and previews its own assembly (no set_assembly, no cutouts). Dropped-slat warnings name where the silhouette is too thin — thicken the material behind that surface and say so.
 - A GEOMETRIC or SYMBOLIC outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield, arrow, cloud, chevron, crescent, gear, cross, simple leaf…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc. (But NOT a recognizable likeness — see the next rule.)
 - A RECOGNIZABLE, REPRESENTATIONAL subject is the ONE kind of outline you must NEVER freehand: a specific animal (a bull, an eagle), a person or face, a vehicle, a building, a brand/team LOGO, the map of a real place. You author outlines from a handful of geometric primitives, and a likeness needs visual detail you cannot see — so a hand-drawn one is a blob that passes every toolpath check yet looks nothing like the subject, which is WORSE than nothing (a naive user just sees a bad drawing and gets frustrated). DECLINE that part — what: the drawing (e.g. "a bull outline"); why: "I build shapes from geometry (circles, stars, hearts, arches), so I can't reliably freehand a recognizable bull — it would come out as a blob." Then in the SUMMARY, give the real paths forward AND head off the wrong one: the user can DRAW it themselves (set_shape draw — see the DRAWN SHAPES rule; best when they have the picture in their head, not in a file) or UPLOAD the artwork as an SVG or image (set_shape asset) — either becomes a shape, and a name inside it or a cutout of it then composes normally — while MORE DESCRIPTION WILL NOT HELP, because you don't turn words into pictures; the outline has to come from their hand or a file. Never author a substitute blob to seem helpful: if the likeness is the whole point (a cutout OF the bull), decline the AUTHORED shape and offer the drawn one. The line: if recognizing it would take more than a few arcs/béziers, or leans on detail you can't see, don't author it — a drawn or uploaded outline beats a bad one you invented.
 - DRAWN SHAPES — a HAND-DRAWN, sketched, traced, or tablet/stylus outline is NOT a decline: set_shape draw {of:"<name>", width:…} is an outline the USER sketches in the app (authoring it puts a Draw “<name>” button at the top of the panel; mouse or tablet pen), and it is an ordinary shape from then on — shape_cutout of it, pocket_shape it, bore_hole along it, fit content inside it. Size it with width (uniform), or with maxWidth + maxHeight to scale the sketch down evenly until it just fits that box (aspect kept — the right sizing when the part must stay within a window, like a 3.5×2.5 badge). Author it EVEN THOUGH NOTHING IS DRAWN YET: the ops referencing it skip with a "waiting on the drawing" note while the rest of the recipe (typed text, controls, other cutouts) previews normally, and the moment the user draws, everything referencing it weaves. So build the WHOLE app in one pass and say in the summary which name to draw. Redrawing under the same name re-weaves every op that uses it — that is the PER-PERSON / per-part shape input (each nametag its own drawn outline, same typed-name machinery). Prefer draw over declining whenever the outline lives in the user's hand rather than in a file; prefer an SVG asset when they already have the file; prefer a glyph or an authored path when it's a standard symbol or plain geometry.
@@ -287,7 +317,7 @@ RULES:
 - If the recipe is empty and the user asks for an app, also set_name it.
 - CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
-${STANCE_RULE}${hasImage ? `\n${PICTURE_RULE}` : ''}
+${STANCE_RULE}${hasImage ? `\n${PICTURE_RULE}\n${PHOTO_LIKENESS_RULE}` : ''}${canDraw ? '' : `\n${NO_DRAW_RULE}`}
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices. When the build's INGREDIENTS (in your second look) need more than one stock thickness or any bought hardware, one chip must let the user say what they don't have ("I only have 3/4\" plywood — redesign for one thickness", "no drawer slides — use wood runners"): the ingredients list is a question to the shop, not an order.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -333,6 +363,43 @@ export function withAutoToolChoice(req) {
 // type nothing.
 export const DEFAULT_IMAGE_UTTERANCE = 'Build what is in this picture.';
 
+// Pixel size of a base64 picture (jpeg / png / gif / webp) read from its
+// header, for the observation's proportion check — no plumbing: every path
+// that carries the picture to the model carries the bytes. Browser-safe
+// (atob + DataView, no Buffer). null when unreadable.
+export function imageSize(image) {
+  try {
+    if (!image?.data) return null;
+    const bin = atob(image.data.slice(0, 262144));   // 192 KB covers any JPEG header incl. an EXIF thumbnail
+    const b = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+    const dv = new DataView(b.buffer);
+    const ascii = (i, n) => String.fromCharCode(...b.subarray(i, i + n));
+    const ok = (w, h) => (w > 0 && h > 0 ? { w, h } : null);
+    if (b[0] === 0x89 && ascii(1, 3) === 'PNG') return ok(dv.getUint32(16), dv.getUint32(20));
+    if (ascii(0, 3) === 'GIF') return ok(dv.getUint16(6, true), dv.getUint16(8, true));
+    if (ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') {
+      const tag = ascii(12, 4);
+      if (tag === 'VP8X') return ok(1 + (b[24] | (b[25] << 8) | (b[26] << 16)), 1 + (b[27] | (b[28] << 8) | (b[29] << 16)));
+      if (tag === 'VP8L') { const bits = dv.getUint32(21, true); return ok(1 + (bits & 0x3fff), 1 + ((bits >>> 14) & 0x3fff)); }
+      if (tag === 'VP8 ') return ok(dv.getUint16(26, true) & 0x3fff, dv.getUint16(28, true) & 0x3fff);
+      return null;
+    }
+    if (b[0] === 0xff && b[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const m = b[i + 1];
+        if (m === 0xff) { i++; continue; }
+        if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { i += 2; continue; }
+        if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return ok(dv.getUint16(i + 7), dv.getUint16(i + 5));   // SOFn: height then width
+        i += 2 + dv.getUint16(i + 2);
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
 // image (optional): { media_type: 'image/jpeg'|'image/png'|'image/gif'|
 // 'image/webp', data: <base64, no data: prefix> }. It rides as the first
 // content block of the first user turn, so every revise turn (which
@@ -340,7 +407,7 @@ export const DEFAULT_IMAGE_UTTERANCE = 'Build what is in this picture.';
 // exemplars (optional): rows from pickExemplars() — past verified builds
 // for a similar ask. They ride in the FIRST USER TURN, before the ask, so
 // the system prompt (cached across calls) does not vary per request.
-export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null, exemplars = null } = {}) {
+export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null, exemplars = null, client = null } = {}) {
   const text = (utterance ?? '').trim() || (image ? DEFAULT_IMAGE_UTTERANCE : utterance);
   const examples = exemplarBlock(exemplars);
   const content = image || examples
@@ -352,11 +419,16 @@ export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, sh
     : text;
   const req = {
     model,
+    // NO temperature: the Claude 5 models reject it ("`temperature` is
+    // deprecated for this model" — three live picture jobs failed on it,
+    // 2026-10-24). Run-to-run spread on a picture turn (the same photo wove
+    // a portrait 3-line sign, then a landscape 2-line one) is handled by the
+    // LETTERING rule and the PICTURE vs BOARD observation instead.
     // generous: geometry-heavy builds (multi-shape recipes, big edits)
     // were hitting 2000 and truncating mid-action-list, which reads as a
     // silent half-build — the app also surfaces stop_reason max_tokens
     max_tokens: 8000,
-    system: buildSystemPrompt(recipe, shop, { hasImage: !!image }),
+    system: buildSystemPrompt(recipe, shop, { hasImage: !!image, canDraw: client !== 'phone' }),   // client: 'phone' = the mobile page (no sketch dialog)
     messages: [{ role: 'user', content }],
     tools: [ACTION_TOOL],
     tool_choice: { type: 'tool', name: 'apply_recipe_actions' },
@@ -627,6 +699,20 @@ export function applyActions(recipe, payload) {
         applied.push(`terrain "${t.id}" (${entry.query ?? `${t.south}..${t.north}, ${t.west}..${t.east}`})`);
         break;
       }
+      case 'set_assembly': {
+        const sa = a.assembly;
+        if (sa?.kind !== 'stack') { skipped.push('set_assembly: kind must be "stack"'); break; }
+        if (sa.align != null && !['holes', 'center'].includes(sa.align)) { skipped.push('set_assembly: align is "holes" or "center"'); break; }
+        next.assembly = { kind: 'stack', ...(sa.align ? { align: sa.align } : {}) };
+        applied.push(`assembly: the pieces stack in pipeline order (lined up on ${sa.align === 'center' ? 'their centers' : 'their holes'})`);
+        break;
+      }
+      case 'remove_assembly': {
+        if (!next.assembly) { skipped.push('remove_assembly: no assembly is set'); break; }
+        delete next.assembly;
+        applied.push('removed the assembly (pieces preview flat on the board only)');
+        break;
+      }
       case 'remove_terrain': {
         next.terrains ??= [];
         const used = next.pipeline.some((o) => o.params && o.params.terrain === a.id);
@@ -790,7 +876,7 @@ const clip = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n - 1
 
 // What the app did with a turn's actions, as data. weaveResult is a
 // runRecipe() result or null (no weave available / not run).
-export function buildObservation(applyOut, weaveResult, recipe) {
+export function buildObservation(applyOut, weaveResult, recipe, { picture = null, snapshot = null } = {}) {
   const rec = recipe ?? applyOut.recipe;
   const r = weaveResult;
   const stats = r?.report?.stats;
@@ -815,9 +901,18 @@ export function buildObservation(applyOut, weaveResult, recipe) {
     warnings: (r?.warnings ?? []).map(w => clip(String(w), 300)),
     stock: r?.preview?.stock ? { w: r.preview.stock.w, h: r.preview.stock.h, thickness: r.preview.stock.thickness, pinned: !!r.preview.stock.pinned } : null,
     runTimeMin: stats?.estRunTimeMin ?? null,
+    pieces: Number.isFinite(r?.pieces) ? r.pieces : null,
+    stack: (() => { const a = r?.preview?.assemblies?.find(x => x.kind === 'stack'); return a ? { layers: a.layers, height: a.height, align: a.align } : null; })(),
+    stackDeclared: rec?.assembly?.kind === 'stack',
+    chair: (() => { const a = r?.preview?.assemblies?.find(x => x.kind === 'rib_chair'); return a ? { ribs: a.ribs, slats: a.slats, height: a.height, width: a.width, depth: a.depth } : null; })(),
+    lattice: (() => { const a = r?.preview?.assemblies?.find(x => x.kind === 'lattice'); return a ? { ribsX: a.ribsX, ribsY: a.ribsY, crossings: a.crossings, height: a.height, footprint: a.footprint } : null; })(),
     ingredients: ingredientLines(r?.ingredients ?? []),
     targets,
     awaitingDraw,
+    picture: picture?.w > 0 && picture?.h > 0 ? { w: picture.w, h: picture.h } : null,   // the attached picture's pixel size, for the proportion line
+    // the picture of the cut (app/snapshot.mjs) rides as an image block in
+    // the tool_result; the observation records only its size and content
+    snapshot: snapshot ? { w: snapshot.w, h: snapshot.h, parts: snapshot.parts, marks: snapshot.marks } : null,
     claimIssues: [],   // filled by checkClaims
   };
 }
@@ -842,6 +937,11 @@ export function observationText(obs) {
     const bits = ['WEAVE: VERIFIED — the job posts'];
     if (obs.stock) bits.push(`board ${obs.stock.w}" × ${obs.stock.h}" × ${obs.stock.thickness}"${obs.stock.pinned ? ' (pinned blank)' : ' (auto-sized)'}`);
     if (obs.runTimeMin != null) bits.push(`about ${Math.max(1, Math.round(obs.runTimeMin))} min of machine time`);
+    if (obs.pieces > 1) bits.push(`${obs.pieces} separate pieces freed in this one run, laid out side by side`);
+    if (obs.stack) bits.push(`assembled preview: the pieces stack ${obs.stack.layers} high, ${+obs.stack.height.toFixed(3)}" tall, lined up on their ${obs.stack.align === 'center' ? 'centers' : 'holes'}`);
+    else if (obs.stackDeclared) bits.push('assembly "stack" is set but no piece had a cutout outline to stack');
+    if (obs.chair) bits.push(`assembled preview: ${obs.chair.ribs} side ribs across ${+obs.chair.width.toFixed(2)}" with ${obs.chair.slats} slats notched into each, ${+obs.chair.height.toFixed(2)}" tall × ${+obs.chair.depth.toFixed(2)}" deep`);
+    if (obs.lattice) bits.push(`assembled preview: ${obs.lattice.ribsX} × ${obs.lattice.ribsY} ribs slotted at ${obs.lattice.crossings} crossings, ${+obs.lattice.height.toFixed(3)}" tall on a ${+obs.lattice.footprint[0].toFixed(2)}" × ${+obs.lattice.footprint[1].toFixed(2)}" footprint`);
     lines.push(bits.join('; '));
     if (obs.ingredients?.length) lines.push(`INGREDIENTS (computed by the app — what the shop needs on hand; the user may say they lack one, then redesign around what they have): ${obs.ingredients.join('; ')}`);
     const bad = obs.targets.filter(t => t.gouges || t.depthViolations || t.maskViolations || t.intrusionArea);
@@ -849,6 +949,18 @@ export function observationText(obs) {
   } else {
     lines.push(`WEAVE: FAILED — the job will NOT post. Errors:\n${list(obs.errors.length ? obs.errors : ['(no error text)'])}`);
   }
+  // the picture's proportion against the board's: a sign woven landscape
+  // from a portrait photo is the model's to fix, and only it can tell a
+  // flat piece (held to the picture's proportion) from a 3D one or a scene
+  if (obs.picture && obs.stock && !obs.stock.pinned && obs.stock.w > 0 && obs.stock.h > 0) {
+    const pa = obs.picture.w / obs.picture.h, ba = obs.stock.w / obs.stock.h;
+    const word = (a) => (a > 1.15 ? 'landscape' : a < 1 / 1.15 ? 'portrait' : 'about square');
+    const pw = word(pa), bw = word(ba);
+    lines.push(`PICTURE vs BOARD: the picture is ${pw} (${obs.picture.w} × ${obs.picture.h} px, ${pa.toFixed(2)}:1); the auto-sized board came out ${bw} (${obs.stock.w}" × ${obs.stock.h}", ${ba.toFixed(2)}:1)${pw !== bw
+      ? ' — if the picture shows ONE flat piece (a sign, plaque, panel, tray), it should keep the picture\'s proportion: re-size letters, gaps or content so the board matches, and say so; a 3D piece or a scene is not held to this'
+      : ''}`);
+  }
+  if (obs.snapshot) lines.push(`PICTURE OF THE CUT: attached as the image in this result — ${obs.snapshot.parts} cutout outline${obs.snapshot.parts === 1 ? '' : 's'} (light) with ${obs.snapshot.marks} recessed area${obs.snapshot.marks === 1 ? '' : 's'} (dark), rendered by the app from the geometry that will actually be machined. Compare it with the user's picture: pose, proportion, where the markings sit.`);
   if (obs.warnings.length) lines.push(`WARNINGS:\n${list(obs.warnings)}`);
   if (obs.awaitingDraw.length) lines.push(`AWAITING THE USER'S DRAWING: ${obs.awaitingDraw.join(', ')} (ops using these skip until drawn — that is expected, not a failure)`);
   if (obs.claimIssues?.length) lines.push(`CLAIMS CHECK — REFUSED (the recipe does not substantiate these; fix the recipe if the catalog can, otherwise move the item to declined and reword the summary):\n${list(obs.claimIssues.map(c => c.message))}`);
@@ -877,17 +989,22 @@ const CUTOUT_STRATEGIES = new Set(['tag_cutout', 'disc_cutout', 'shape_cutout'])
 // parts / mating claims refused and "parts made to fit each other" pushed
 // into the user's declined list (the picture lane made it visible: 6/6).
 const FURNITURE_RE = /^furniture_/;
-const makesParts = (strategy) => CUTOUT_STRATEGIES.has(strategy) || FURNITURE_RE.test(strategy);
+const MULTI_PIECE = new Set(['rib_lattice', 'rib_chair']);   // one op, many pieces, counted by the weave
+const makesParts = (strategy) => CUTOUT_STRATEGIES.has(strategy) || FURNITURE_RE.test(strategy) || MULTI_PIECE.has(strategy);
 const TWO_SIDED_RE = /\b(other side|both sides|two[- ]sided|double[- ]sided|flip (it|the board|the sign|the piece|the part|over)|flip-over|back side|reverse side|second face|back face)\b/i;
 const BATHY_RE = /\b(bathymetr\w*|underwater (depth|terrain|canyon)|lake ?bottom|lake ?bed|sea ?floor|seabed|ocean floor|water depth|depth of the (lake|bay|water)|underwater)\b/i;
 const PLUG_RE = /\b(matching|mating|walnut|maple|cherry|contrasting)\s+(plug|insert|inlay piece|inlay part)s?\b|\bplug (that|which) (fills|fits|drops)|\binlay plug|\bplug part\b/i;
 const mentions = (list, re) => list.some(d => re.test(`${d.what ?? ''} ${d.why ?? ''}`));
 
-export function checkClaims(claims, recipe, summary = '', declined = []) {
+// weavePieces: the piece count the weave actually computed (runRecipe's
+// `pieces` — separate pieces, nested cutouts counted once), when a weave
+// ran; null otherwise. The cutout count stays the upper bound either way.
+export function checkClaims(claims, recipe, summary = '', declined = [], weavePieces = null) {
   const issues = [];
   const pipeline = recipe?.pipeline ?? [];
   const cutouts = pipeline.filter(o => CUTOUT_STRATEGIES.has(o.strategy));
   const furniture = pipeline.some(o => FURNITURE_RE.test(o.strategy));
+  const multi = pipeline.some(o => MULTI_PIECE.has(o.strategy));
   const terrain = pipeline.some(o => o.strategy === 'terrain_relief');
   const c = claims && typeof claims === 'object' ? claims : null;
   const push = (code, message, autoDecline) => issues.push({ code, message, ...(autoDecline ? { autoDecline } : {}) });
@@ -913,14 +1030,22 @@ export function checkClaims(claims, recipe, summary = '', declined = []) {
     if (!part || typeof part !== 'object') continue;
     const op = pipeline.find(o => o.id === part.opId);
     if (!op) push('phantom-part', `claims.parts "${part.name}": no operation "${part.opId}" exists in the pipeline.`);
-    else if (!makesParts(op.strategy)) push('phantom-part', `claims.parts "${part.name}": operation "${part.opId}" is ${op.strategy}, which does not free a piece — only a cutout (tag/disc/shape) or a furniture verb does.`);
+    else if (!makesParts(op.strategy)) push('phantom-part', `claims.parts "${part.name}": operation "${part.opId}" is ${op.strategy}, which does not free a piece — only a cutout (tag/disc/shape), rib_lattice or a furniture verb does.`);
   }
   if (PLUG_RE.test(summary) && cutouts.length < 2 && !furniture && !mentions(declined, /plug|inlay|insert|mating/i)) {
     push('phantom-plug', `the summary promises "${summary.match(PLUG_RE)[0]}", but there is ${cutouts.length ? 'only one cutout op' : 'no cutout op'} — a plug needs its own cutout of the same letters, and the catalog has no kerf/clearance fit. Decline the plug.`,
       { what: 'the matching plug / inlay piece', why: 'no operation produces a mating part — the catalog cuts pockets and outlines, not kerf-fitted inlay pairs' });
   }
-  if (Number.isFinite(c?.pieces) && c.pieces > cutouts.length && !furniture) {
+  if (Number.isFinite(c?.pieces) && c.pieces > cutouts.length && !furniture && !multi) {
     push('pieces', `claims.pieces ${c.pieces}, but one run frees at most ${cutouts.length} (one per cutout op). Say the user re-runs with the control for the rest, or add the cutouts.`);
+  } else if (Number.isFinite(c?.pieces) && Number.isFinite(weavePieces) && weavePieces > 0 && c.pieces !== weavePieces && !furniture) {
+    // the weave counted the pieces this run frees (a cutout ends a piece;
+    // one that encloses earlier pieces nests them). A mismatch is either
+    // a slot authored as a cutout (it became a loose offcut) or a set the
+    // summary undersells — both are the model's to resolve
+    push('pieces', `claims.pieces ${c.pieces}, but the recipe as woven frees ${weavePieces} separate piece${weavePieces === 1 ? '' : 's'} (a cutout ENDS a piece; a cutout enclosing earlier pieces nests them). ${weavePieces > c.pieces
+      ? 'If some cutout was meant as a slot or window INSIDE a part, make it pocket_shape at full depth before that part\'s cutout; otherwise the user is getting more pieces than you told them — count them.'
+      : 'Fewer pieces come free than you claim — a cutout that encloses an earlier one nests it (one part, not two). Fix the recipe or the claim.'}`);
   }
   if (c?.mating === true && !furniture) {
     push('mating', 'claims.mating true: only the furniture verbs produce parts made to fit each other — nothing else here is fitted to anything. Decline the fit.',
@@ -952,7 +1077,12 @@ const FINAL_TEXT = `That is the result after your corrections. This is the LAST 
 // (with its tool_use) as the assistant turn, then our observation as the
 // tool_result plus the instruction. System, tools, and tool_choice are
 // unchanged so the cached prefix is reused.
-export function buildReviseRequest(prevReq, assistantContent, toolUseId, observation, { final = false } = {}) {
+export function buildReviseRequest(prevReq, assistantContent, toolUseId, observation, { final = false, image = null } = {}) {
+  // the picture of the cut rides INSIDE the tool_result (a tool result may
+  // carry image blocks), so it is unmistakably the app's observation
+  const resultContent = image
+    ? [{ type: 'text', text: observationText(observation) }, { type: 'image', source: { type: 'base64', media_type: image.media_type, data: image.data } }]
+    : observationText(observation);
   return {
     ...prevReq,
     messages: [
@@ -961,7 +1091,7 @@ export function buildReviseRequest(prevReq, assistantContent, toolUseId, observa
       {
         role: 'user',
         content: [
-          { type: 'tool_result', tool_use_id: toolUseId, content: observationText(observation) },
+          { type: 'tool_result', tool_use_id: toolUseId, content: resultContent },
           { type: 'text', text: final ? FINAL_TEXT : REVISE_TEXT },
         ],
       },
@@ -979,6 +1109,12 @@ export class IntentError extends Error {
 // observation: the model gets the error text and can route around it,
 // instead of the whole turn dying. The app's own render path reports the
 // same failure on its next weave.
+// the picture of the cut must never sink a turn: a rasterizer bug is a
+// missing image, not a failed build
+function safeSnapshot(result) {
+  try { return snapshotWeave(result); } catch { return null; }
+}
+
 async function safeWeave(weave, recipe) {
   try { return await weave(recipe); }
   catch (e) {
@@ -1010,12 +1146,13 @@ const dedupeDeclined = (list) => {
 // Returns { recipe, turns, summary, firstSummary, declined, suggest, usage,
 //           revised, fixes } — turns[i] carries payload/applied/skipped/
 //           observation for logging and measurement.
-export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null, exemplars = null }) {
+export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null, exemplars = null, client = null }) {
   const turns = [];
   // Anthropic's usage fields, summed across calls (the probe prices from them)
   const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
-  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop, image, exemplars });
+  let req = buildParseRequest(recipe, utterance, { ...(model ? { model } : {}), shop, image, exemplars, client });
   let cur = recipe;
+  const picture = image ? imageSize(image) : null;
   const cap = mode === 'off' ? 1 : Math.max(1, maxTurns);
   for (let t = 0; t < cap; t++) {
     let data;
@@ -1070,14 +1207,18 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     if (!hadActions) break;
     if (t === cap - 1) break;
     const result = weave ? await safeWeave(weave, cur) : null;
-    turn.observation = buildObservation(out, result, cur);
+    // with a picture in play, the second look also SEES the cut (rendered
+    // from the lowered geometry) next to the user's picture
+    const snapshot = picture && result ? safeSnapshot(result) : null;
+    turn.snapshot = snapshot ? { w: snapshot.w, h: snapshot.h, parts: snapshot.parts, marks: snapshot.marks } : null;
+    turn.observation = buildObservation(out, result, cur, { picture, snapshot });
     turn.recipe = cur;   // the state this observation describes (applyActions never mutates it later)
     turn.claims = p0.claims && typeof p0.claims === 'object' ? p0.claims : (turns[turns.length - 2]?.claims ?? null);
-    const cc = checkClaims(turn.claims, cur, out.summary, out.declined);
+    const cc = checkClaims(turn.claims, cur, out.summary, out.declined, result?.ok ? result.pieces : null);
     turn.observation.claimIssues = cc.issues;
     turn.observation.claimsDeclared = cc.declared;
     if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
-    req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2 });
+    req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2, image: snapshot });
   }
   const first = turns[0], last = turns[turns.length - 1];
   const suggest = last.suggest?.length ? last.suggest : first.suggest;
@@ -1110,7 +1251,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   const lastHadActions = actionList(last.payload).length > 0;
   if (lastHadActions && turns.length > 1 && weave && last.applied.length) {
     const result = await safeWeave(weave, cur);
-    last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur);
+    last.observation = buildObservation({ applied: last.applied, skipped: last.skipped, recipe: cur }, result, cur, { picture });
     last.recipe = cur;
     const shown = turns[turns.length - 2].observation;
     const before = shown ? shown.ok : null, after = last.observation.ok;
@@ -1126,7 +1267,8 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
   // Claims left standing: the final summary is checked against the final
   // recipe; anything refused gets a deterministic postscript and a decline.
   const finalClaims = last.payload?.claims && typeof last.payload.claims === 'object' ? last.payload.claims : ([...turns].reverse().find(x => x.claims)?.claims ?? null);
-  const finalCheck = checkClaims(finalClaims, cur, summary, dedupeDeclined(turns.flatMap(x => x.declined ?? [])));
+  const lastObs = [...turns].reverse().find(x => x.observation?.weaved)?.observation;
+  const finalCheck = checkClaims(finalClaims, cur, summary, dedupeDeclined(turns.flatMap(x => x.declined ?? [])), lastObs?.ok ? lastObs.pieces : null);
   let claimIssues = finalCheck.issues;
   let claimDeclines = [];
   if (claimIssues.length) {

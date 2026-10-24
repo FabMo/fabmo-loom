@@ -134,6 +134,61 @@ yet in the catalog) → catalog integration here. The integration checklist:
 Declines logged by users are the backlog for this section — a decline
 converts to a feature by exactly this list.
 
+### Piece scopes (several loose pieces in one job)
+
+A cutout (`wrapsContent` entry: tag/disc/shape_cutout) frees a piece and
+ENDS it. The ops after it belong to the next piece: `runRecipe` gives
+each piece its own content context (contentBBox / contentRings /
+priorCutouts / opBoxes / edgeOps), so a cutout's content-fit check and
+every self-sizing or centering default read only their own piece, and the
+model authors every piece about the origin exactly as if it were alone.
+The first piece IS the recipe ctx, untouched — a one-piece recipe behaves
+as before. A cutout straight after a cutout is tried against the closed
+piece first; enclosing it whole (content and outline) is nesting (a ring
+from a disc), anything else is the next piece. As each piece closes,
+`placeScope` slides any later piece that lands on an earlier one into a
+row to the right (wrapping to a row above when the shop declares its
+width — a wrapped row stands on a FLOOR, the top of everything below it
+plus the gap, so pieces of different heights grow upward, never down into
+the row below); pieces authored clear of each other stay put. A set whose
+pieces glue up into one object may declare `recipe.assembly = {kind:'stack',
+align:'holes'|'center'}` (action `set_assembly`): `buildStackAssembly` then
+emits one assembly entry — each piece's closing-cutout outline with its bores
+and nested cutouts as holes, stacked in pipeline order one stock thickness per
+layer, lined up on each piece's first hole — and app/assembly3d.mjs draws the
+stack rising out of the board exactly as it draws furniture. A verb that
+frees SEVERAL pieces itself (`freesPieces: true` — `rib_lattice` in
+app/lattice.mjs: a form from interlocking half-lap slotted ribs, one op →
+every rib cut free, laid out, counted via `r.pieces`, previewed through
+its own `assembly {kind:'lattice'}`) closes the piece like a cutout and
+adds its own count; `placeScope` carries an assembly's sheet poses along
+when such a piece is laid out. The translation is
+`frameTransformers` with rot 0 — moves, declared targets, previews and the
+referenced shapes' construction outlines move together — and the
+verifier's footprint-overlap gate, unchanged, is still the proof that no
+two kerfs touch. Built entries carry `piece` and `r.pieceShift` (main.js
+subtracts the shift when a drag writes posX/posY); the result carries
+`pieces` (nested cutouts count once) for the observation and claims.
+
+### The picture of the cut (likeness from a photo)
+
+With a picture attached, the second look also SEES the build:
+`app/snapshot.mjs` rasterizes the lowered geometry (cutout rings light,
+pocket / V-carve regions dark, bores darker) into a small grayscale PNG —
+pure JS, stored-deflate, so it runs in the browser, Node and the guest-job
+worker alike — and `runIntentLoop` puts it INSIDE the tool_result as an
+image block beside the observation text (`PICTURE OF THE CUT`). The
+observation records only its size and content counts; the image itself is
+never logged. Rendered from the geometry that will be machined, never from
+the model's description. This is what lets a REPRESENTATIONAL subject in
+the picture (an animal, a building, a vehicle) be authored instead of
+declined: the `PHOTO_LIKENESS_RULE` (with a picture only) asks for
+`observed` — the schema's FIRST field, concrete features seen in the
+picture — before the geometry, and the second look compares the picture of
+the cut with the photo. Text-only likeness asks still decline (nothing is
+in view). Markings inside markings are `set_shape difference`, never two
+overlapping pockets.
+
 ## World-data references (the terrain pattern)
 
 Some capabilities need real-world data too big to embed (elevation
@@ -220,9 +275,16 @@ possible macro-strategy. The contract a guest must satisfy:
    compose frame-locally; consecutive framed ops on the same frame see
    each other as content), then rotates + translates the whole result —
    moves, target rings, previews — into place. Rings-based results only;
-   heightmap targets are refused with a clear error. The gate is
-   unchanged: framed content that strays across the guest's own cuts is
-   a footprint overlap and the job is refused.
+   heightmap targets are refused with a clear error. Content whose
+   panel-local extent exceeds the frame's `w × h` is REFUSED outright
+   (thin engraving strokes crossing a kerf only graze it, so the overlap
+   gate alone cannot catch that); the gate is otherwise unchanged:
+   framed content that strays across the guest's own cuts is a footprint
+   overlap and the job is refused. SEQUENCING: framed content is
+   machined AHEAD of its publisher's own sub-ops (spliced in before the
+   first of them, pipeline order kept among framed ops): the panel is
+   untouched stock under the V-bit rather than a tabbed island after its
+   release profile, and the job mounts each tool once.
 6. **Optionally, a `handoff` hook** — round-tripping out of Loom:
    `handoff: { label, carry(params, { evalNumber, vars, recipeName }) }`
    on the entry. `carry` receives RAW params (control bindings arrive as

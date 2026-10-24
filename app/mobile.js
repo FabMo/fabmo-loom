@@ -183,16 +183,26 @@ async function parseDirect(req, key) {
   if (!res.ok) throw new Error(directFailureMessage(res.status, await res.text().catch(() => '')));
   return res.json();
 }
-async function parseViaGuestPass(req, invite) {
+// Guest turns run ON THE SERVER (intent/loom-jobs.js): the ask is posted
+// once, the job id is kept here, and the page polls — or the person closes
+// the browser and finds the design waiting when they come back (builds are
+// kept a day). The old path relayed every call of the closed loop from the
+// phone, so a backgrounded Safari tab lost the turn (and still paid for it).
+const JOB_KEY = 'loom:job';
+const JOB_POLL_MS = 2500;
+function saveJob(j) { try { localStorage.setItem(JOB_KEY, JSON.stringify(j)); } catch {} }
+function loadJob() { try { return JSON.parse(localStorage.getItem(JOB_KEY) ?? 'null'); } catch { return null; } }
+function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch {} }
+async function startGuestJob(body, invite) {
   let res;
   try {
-    res = await fetch('/api/intent/loom', {
+    res = await fetch('/api/intent/loom/job', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
-      body: JSON.stringify({ req }),
+      body: JSON.stringify(body),
     });
   } catch (e) { throw new Error(networkFailureMessage(e)); }
-  // the relay answers JSON; nginx's own refusals (413 body too large, 502,
+  // the server answers JSON; nginx's own refusals (413 body too large, 502,
   // 504) are HTML — those are the ones that used to read "request failed"
   const payload = await res.clone().json().catch(() => ({}));
   if (!res.ok) {
@@ -202,7 +212,40 @@ async function parseViaGuestPass(req, invite) {
     if (res.status === 401 || res.status === 403) showAuth(true);
     throw new Error(relayFailureMessage(res.status, payload, { imageBytes: promptImage?.bytes ?? 0 }));
   }
-  return payload.data;
+  return payload.job;
+}
+// wait, but wake at once when the tab comes back into view
+function napUntilVisible(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(done, ms);
+    function done() { clearTimeout(t); document.removeEventListener('visibilitychange', onVis); resolve(); }
+    function onVis() { if (document.visibilityState === 'visible') done(); }
+    document.addEventListener('visibilitychange', onVis);
+  });
+}
+// resolves with the finished turn; rejects with the build's own words
+// (e.gone = the server no longer has it). A dropped connection or a server
+// restart mid-poll is waited out, not reported.
+async function awaitGuestJob(id, invite, onStage) {
+  let misses = 0;
+  for (;;) {
+    let res, payload = {};
+    try {
+      res = await fetch(`/api/intent/loom/job/${encodeURIComponent(id)}`, { headers: { 'x-loom-invite': invite }, cache: 'no-store' });
+      payload = await res.json().catch(() => ({}));
+    } catch { res = null; }
+    if (res?.status === 404) { const e = new Error(payload.error || 'That build is no longer on the server — ask again.'); e.gone = true; throw e; }
+    if (!res || !res.ok) {
+      if (++misses > 40) throw new Error('Lost touch with the server while waiting for the build — reopen this page to check on it.');
+      await napUntilVisible(JOB_POLL_MS * 2);
+      continue;
+    }
+    misses = 0;
+    if (payload.status === 'done' && payload.result) return payload.result;
+    if (payload.status === 'failed') { const e = new Error(payload.error || 'The build failed — your prompt was not counted. Try again.'); e.gone = true; throw e; }
+    if (payload.stage) onStage?.(payload.stage);
+    await napUntilVisible(JOB_POLL_MS);
+  }
 }
 
 // ------------------------------------------------------------------ photo
@@ -646,62 +689,56 @@ async function generate() {
   if (!haveAuth()) { showAuth(true); setMsg('Add an API key below, or open this page from a guest-pass link.'); return; }
   const key = localStorage.getItem('loom:apiKey');
   const invite = localStorage.getItem('loom:invite');
+  const firstLabel = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
+  await runTurn(firstLabel, async (stage) => {
+    const meta = {
+      utterance, invite,
+      parseContext: structuredClone(promptRecipeView(recipe)),
+      image: promptImage ? { attached: true, width: promptImage.width, height: promptImage.height } : null,
+    };
+    // worked examples from past verified builds (fresh builds only; see main.js)
+    const exemplars = recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
+    meta.exemplars = exemplars.map(e => e.key);
+    if (key) {
+      // BYO key: straight to Anthropic from this phone, the loop runs here
+      let calls = 0;
+      const out = await runIntentLoop({
+        recipe, utterance, shop: {}, model: currentModel(), image, exemplars, client: 'phone',   // no sketch dialog here (intent.mjs NO_DRAW_RULE)
+        call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return parseDirect(req, key); },
+        weave: async (rec) => {
+          stage('weaving…');
+          const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
+          if (rec.terrains?.length) return { ok: false, errors: ['terrain references are not available on the phone version — use the full app'], warnings: [], preview: { empty: true } };
+          const w = await weave({ recipe: rec, values, terrains: {}, shop: shopForRun() });
+          return w.result;
+        },
+      });
+      return { out, meta };
+    }
+    // guest pass: the server runs the whole turn; we hold the ticket
+    const id = await startGuestJob({ recipe, utterance, model: currentModel(), image, exemplars, values: controlValues, shop: shopForRun(), client: 'phone' }, invite);
+    saveJob({ id, startedAt: Date.now(), ...meta });
+    const out = await awaitGuestJob(id, invite, stage);
+    clearJob();
+    return { out, meta };
+  });
+}
+// the loom at work over the view while `work(stage)` runs, then the result
+// lands in the page (or the error in the message line)
+async function runTurn(firstLabel, work) {
   busy = true;
   setMsg('');
   $('build').disabled = true;
-  const firstLabel = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
   $('build').textContent = firstLabel;
   $('result').style.display = 'block';
   setBadge('wait', 'thinking…');
-  // the loom at work, over the view, for as long as the model turn runs
   const stopWeave = startWeave($('view3d'), firstLabel, LOGO_PALETTE);
   const stage = (s) => { $('build').textContent = s; stopWeave.setLabel?.(s); };
   try {
-    const parseContext = structuredClone(promptRecipeView(recipe));
-    const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
-    let calls = 0;
-    // worked examples from past verified builds (fresh builds only; see main.js)
-    const exemplars = recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
-    const out = await runIntentLoop({
-      recipe, utterance, shop: {}, model: currentModel(), image, exemplars,
-      call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
-      weave: async (rec) => {
-        stage('weaving…');
-        const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
-        if (rec.terrains?.length) return { ok: false, errors: ['terrain references are not available on the phone version — use the full app'], warnings: [], preview: { empty: true } };
-        const w = await weave({ recipe: rec, values, terrains: {}, shop: shopForRun() });
-        return w.result;
-      },
-    });
-    recipe = out.recipe;
-    if (out.summary?.trim()) recipe.about = out.summary.trim();
-    controlValues = { ...controlDefaults(recipe), ...pickExisting(controlValues, recipe) };
-    $('about').textContent = out.summary ?? '';
-    $('declined').innerHTML = out.declined?.length
-      ? `declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')}` : '';
-    $('aboutWrap').open = true;
-    $('prompt').value = '';
-    renderSliders();
-    await runAndRender();
-    if (result?.ok && assemblyLayer) playIntro();
-    persist();
-    $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-    // demand signal, same funnel as the full app; the picture itself is never sent
-    fetch('/api/intent/log', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(invite ? { 'x-loom-invite': invite } : {}) },
-      body: JSON.stringify({
-        app: 'loom', utterance,
-        intent: { summary: out.summary, actions: actionList(out.turns[0].payload), declined: out.declined, suggest: out.suggest, surface: 'mobile',
-          exemplars: exemplars.map(e => e.key),
-          loop: { turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack } },
-        usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
-        context: parseContext,
-        ...(promptImage ? { image: { attached: true, width: promptImage.width, height: promptImage.height } } : {}),
-      }),
-    }).catch(() => {});
+    const { out, meta } = await work(stage);
+    await finishTurn(out, meta);
   } catch (e) {
+    if (e?.gone) clearJob();
     setMsg(e.message ?? String(e));
     if (!hasDesign()) $('result').style.display = 'none';
     else render();
@@ -711,6 +748,40 @@ async function generate() {
     $('build').disabled = false;
     updateBuildLabel();
   }
+}
+async function finishTurn(out, meta) {
+  recipe = out.recipe;
+  if (out.summary?.trim()) recipe.about = out.summary.trim();
+  controlValues = { ...controlDefaults(recipe), ...pickExisting(controlValues, recipe) };
+  $('about').textContent = out.summary ?? '';
+  $('declined').innerHTML = out.declined?.length
+    ? `declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')}` : '';
+  // a shape the design asks the user to DRAW has no dialog on this page: say
+  // so instead of leaving a dead size slider and a job that omits the drawing
+  const waiting = (recipe.shapes ?? []).filter(sh => sh.draw?.of && !(recipe.assets ?? []).some(a => a.id === sh.draw.of || a.name === sh.draw.of)).map(sh => sh.draw.of);
+  if (waiting.length) $('declined').innerHTML += `${$('declined').innerHTML ? '<br>' : ''}✏ waiting on a drawing of ${waiting.map(n => `“${escapeHtml(n)}”`).join(', ')} — the phone page cannot sketch yet; the cut below leaves it out. Open this design in the full Loom app on a computer to draw it.`;
+  $('aboutWrap').open = true;
+  $('prompt').value = '';
+  renderSliders();
+  await runAndRender();
+  if (result?.ok && assemblyLayer) playIntro();
+  persist();
+  $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // demand signal, same funnel as the full app; the picture itself is never sent
+  fetch('/api/intent/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(meta.invite ? { 'x-loom-invite': meta.invite } : {}) },
+    body: JSON.stringify({
+      app: 'loom', utterance: meta.utterance,
+      intent: { summary: out.summary, actions: actionList(out.turns[0].payload), declined: out.declined, suggest: out.suggest, surface: 'mobile',
+        exemplars: meta.exemplars ?? [],
+        loop: { turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack } },
+      usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
+      context: meta.parseContext ?? null,
+      ...(meta.image ? { image: meta.image } : {}),
+    }),
+  }).catch(() => {});
 }
 function pickExisting(values, rec) {
   const keep = {};
@@ -775,6 +846,18 @@ async function loadGuests() {
     $('about').textContent = recipe.about ?? '';
     renderSliders();
     await runAndRender();
+  }
+  // a build was running when this page was last closed: it kept going on
+  // the server — pick it up (or learn how it ended)
+  const pending = loadJob();
+  const pendingInvite = localStorage.getItem('loom:invite');
+  if (pending?.id && pendingInvite) {
+    if (pending.utterance) setMsg(`Picking up “${pending.utterance.length > 60 ? pending.utterance.slice(0, 57) + '…' : pending.utterance}”`);
+    runTurn('still weaving…', async (stage) => {
+      const out = await awaitGuestJob(pending.id, pendingInvite, stage);
+      clearJob();
+      return { out, meta: { ...pending, invite: pendingInvite } };
+    });
   }
   window.loomMobile = { get recipe() { return recipe; }, get result() { return result; }, get values() { return controlValues; }, get view3d() { return view3d; }, get sim() { return lastSim; }, simulateJob, ready: true };   // test handle
 })();

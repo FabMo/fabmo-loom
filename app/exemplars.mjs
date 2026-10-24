@@ -44,7 +44,12 @@ export function askClass(q) {
   return null;
 }
 
+// Words the suffix rules would maul into ANOTHER real token ("dining" →
+// "din" = the DIN rail; "string" → "str"): kept whole.
+const NOSTEM = new Set(['dining', 'string', 'spring', 'ceiling', 'awning']);
+
 const stem = (w) => {
+  if (NOSTEM.has(w)) return ALIAS[w] ?? w;
   if (w.length > 5 && w.endsWith('ing')) w = w.slice(0, -3);
   else if (w.length > 4 && w.endsWith('ed')) w = w.slice(0, -2);
   else if (w.length > 4 && w.endsWith('ves')) w = w.slice(0, -3) + 'f';   // shelves → shelf, halves → half
