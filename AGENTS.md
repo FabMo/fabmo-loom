@@ -284,7 +284,16 @@ possible macro-strategy. The contract a guest must satisfy:
    machined AHEAD of its publisher's own sub-ops (spliced in before the
    first of them, pipeline order kept among framed ops): the panel is
    untouched stock under the V-bit rather than a tabbed island after its
-   release profile, and the job mounts each tool once.
+   release profile, and the job mounts each tool once. ENGRAVING RIDES
+   THE PANEL into the assembled view: a framed op's panel-local pocket /
+   V-carve regions are kept before the frame transform (`framedMarks`)
+   and, once every op has run, become `pockets` on the matching assembly
+   panel (frame-local origin = the panel body's center; the panel's rings
+   have their origin at the body's bottom-left corner), so a house gable's
+   windows show on the standing gable, not on the board behind it. Which
+   FACE they land on is the guest's call: a furniture panel is machined
+   from one face, and the compiler's `face` field ("+"/"-") pins it — the
+   A-frame's gables face OUT with through tenons at every gable joint.
 6. **Optionally, a `handoff` hook** — round-tripping out of Loom:
    `handoff: { label, carry(params, { evalNumber, vars, recipeName }) }`
    on the entry. `carry` receives RAW params (control bindings arrive as

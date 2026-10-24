@@ -878,6 +878,10 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   const setups = [];
   // published frames (id → {cx, cy, rot, w, h, ctx}) — see applyFrame above
   const frames = {};
+  // framed content's PANEL-LOCAL footprint (pocket / V-carve regions
+  // before the frame transform), so the assembled view can draw it as a
+  // recess on the posed panel instead of leaving it behind on the board
+  const framedMarks = [];
   // the INGREDIENTS LIST — what the shop must have on hand to cut this
   // (see mergeIngredients below): ops contribute sheets and hardware
   const ingredients = [];
@@ -1121,6 +1125,12 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
           break;
         }
       }
+      const localRegions = [];
+      for (const sub of (r.ops ?? [r])) {
+        for (const rg of sub.previewRegions ?? []) if (rg?.outer?.length >= 3) localRegions.push({ outer: rg.outer.map(q => ({ x: q.x, y: q.y })) });
+        for (const rg of sub.previewVee?.regions ?? []) if (rg?.outer?.length >= 3) localRegions.push({ outer: rg.outer.map(q => ({ x: q.x, y: q.y })) });
+      }
+      if (localRegions.length) framedMarks.push({ frameId: op.frame, regions: localRegions, depth: Number.isFinite(p.depth) && p.depth > 0 ? p.depth : 0.05 });
       const fe = applyFrame(r, frame, op.id);
       if (fe) { errors.push(`op "${op.id}": ${fe.error}`); break; }
     }
@@ -1192,6 +1202,23 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   if (recipe.assembly?.kind === 'stack' && !errors.length) {
     const asm = buildStackAssembly(scopes, built, stock.thickness, recipe.assembly, strategyWarnings);
     if (asm) assemblies.push({ opId: 'assembly', ...asm });
+  }
+  // engraving mounted on a guest panel rides the panel into its assembled
+  // pose: a framed op's local regions become blind pockets on that panel.
+  // Frame-local (0,0) is the panel body's center; the panel's rings live
+  // in its op frame with the origin at the body's bottom-left corner.
+  if (framedMarks.length) {
+    for (const a of assemblies) {
+      if (!Array.isArray(a.panels)) continue;
+      a.panels = a.panels.map((panel) => {
+        const marks = framedMarks.filter(m => m.frameId === panel.id);
+        const fr = frames[panel.id];
+        if (!marks.length || !fr) return panel;
+        const shift = (q) => ({ x: +(q.x + fr.w / 2).toFixed(6), y: +(q.y + fr.h / 2).toFixed(6) });
+        const extra = marks.flatMap(m => m.regions.map(rg => ({ ring: rg.outer.map(shift), depth: Math.min(m.depth, panel.thickness ?? m.depth), framed: true })));
+        return { ...panel, pockets: [...(panel.pockets ?? []), ...extra] };
+      });
+    }
   }
 
   if (errors.length || !built.length) {

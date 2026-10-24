@@ -2774,7 +2774,11 @@ console.log('--- guest mount: register, weave, verify ---');
           setups: { count: 2, current: 1, groups: [['padA'], ['padB']] },
           // frames contract: a clear face beside the pads, TURNED 90°,
           // for native verbs to mount into (see the framed-vcarve checks)
-          frames: [{ id: 'face', cx: 2 * sz + 2.5, cy: sz / 2, rot: 90, w: 4, h: 4 }],
+          frames: [{ id: 'face', cx: 2 * sz + 2.5, cy: sz / 2, rot: 90, w: 4, h: 4 },
+            // padB's body as a frame on the clear face (what the furniture guest
+            // publishes per panel; padA's own area is a pocket, so content there
+            // would overlap the pad's cut)
+            { id: 'padB', cx: 2 * sz + 2.5, cy: sz / 2, rot: 0, w: sz, h: sz }],
         };
       },
     },
@@ -2883,6 +2887,22 @@ console.log('--- guest mount: register, weave, verify ---');
     if (Math.abs(cx - (2 * sz + 2.5)) < 0.2 && Math.abs(cy - sz / 2) < 0.2) {
       pass(`framed content lands at the frame center (${cx.toFixed(2)}, ${cy.toFixed(2)})`);
     } else fail(`framed content at (${cx.toFixed(2)}, ${cy.toFixed(2)}), frame at (${2 * sz + 2.5}, ${sz / 2})`);
+    // ENGRAVING RIDES THE PANEL into the assembled view (v0.111): a framed
+    // pocket on padB becomes a blind pocket on padB's assembly panel, in
+    // the panel's own op frame (frame-local origin = the body center)
+    const win = applyActions(structuredClone(res.recipe), { summary: 'window on padB', actions: [
+      { kind: 'add_operation', operation: { id: 'win', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 0.6, height: 0.4, depth: 0.05, toolDiameter: 0.125, posX: 0.3, posY: -0.2 }, frame: 'padB' } },
+    ], declined: [] });
+    const rw = run(win.recipe);
+    const padA = rw.preview?.assemblies?.[0]?.panels?.find(x => x.id === 'padB');
+    const carried = (padA?.pockets ?? []).filter(x => x.framed);
+    const wb = carried[0]?.ring?.reduce((a, q) => ({ minX: Math.min(a.minX, q.x), maxX: Math.max(a.maxX, q.x), minY: Math.min(a.minY, q.y), maxY: Math.max(a.maxY, q.y) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+    const wcx = wb ? (wb.minX + wb.maxX) / 2 : NaN, wcy = wb ? (wb.minY + wb.maxY) / 2 : NaN;
+    if (rw.ok && carried.length === 1 && Math.abs(carried[0].depth - 0.05) < 1e-9 && Math.abs(wcx - (sz / 2 + 0.3)) < 0.05 && Math.abs(wcy - (sz / 2 - 0.2)) < 0.05 && padA.pockets.length === 1)
+      pass(`framed pocket rides padB into the assembled view: blind pocket at (${wcx.toFixed(2)}, ${wcy.toFixed(2)}) in the panel frame, 0.05" deep`);
+    else fail(`carried pocket: ok=${rw.ok} ${JSON.stringify({ n: carried.length, at: [wcx, wcy], pockets: padA?.pockets?.length, err: rw.errors })}`);
+    const padB = rw.preview?.assemblies?.[0]?.panels?.find(x => x.id === 'padA');
+    if ((padB?.pockets ?? []).filter(x => x.framed).length === 0 && padB?.pockets?.length === 1) pass('a panel with no framed content keeps only its own pockets'); else fail('padA changed');
     // "MMM" is a wide block; the frame turns 90° — the placed block must be TALL
     if (bb.maxY - bb.minY > (bb.maxX - bb.minX) * 1.5) {
       pass(`frame rotation baked into the content (${(bb.maxX - bb.minX).toFixed(2)}" wide × ${(bb.maxY - bb.minY).toFixed(2)}" tall)`);
