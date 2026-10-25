@@ -148,6 +148,7 @@ export class LoomJobs {
     } else {
       job.status = 'failed';
       job.stage = null;
+      if (m.cancelled) job.cancelled = true;
       // IntentError text is Loom's own ("the model returned no actions") and
       // reads fine on the phone; anything else is logged and summarised
       job.error = m.intent || m.timedOut || /not counted/.test(m.error ?? '') ? m.error : 'The AI call failed — your prompt was not counted. Try again.';
@@ -157,13 +158,24 @@ export class LoomJobs {
     }
   }
 
+  // The person started over (a new photo on the phone page cancels the
+  // build): stop the worker now and give the prompt back through onFailed.
+  // null = unknown or not this pass's job; false = it had already ended.
+  cancel(id, token) {
+    const j = this.jobs.get(id);
+    if (!j || j.token !== token) return null;
+    if (j.status !== 'running') return false;
+    this.finish(j, { kind: 'failed', intent: true, cancelled: true, error: 'Stopped — you started over. Your prompt was not counted.' });
+    return true;
+  }
+
   // the phone's view; null when unknown or not this pass's job
   get(id, token) {
     const j = this.jobs.get(id);
     if (!j || j.token !== token) return null;
     return {
       id: j.id, status: j.status, stage: j.stage, startedAt: j.startedAt, finishedAt: j.finishedAt,
-      utterance: j.utterance, hadImage: j.hadImage, result: j.result, error: j.error,
+      utterance: j.utterance, hadImage: j.hadImage, result: j.result, error: j.error, ...(j.cancelled ? { cancelled: true } : {}),
     };
   }
 

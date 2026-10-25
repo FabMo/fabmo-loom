@@ -40,6 +40,9 @@ let controlValues = {};
 let result = null;
 let lastSim = null;
 let busy = false;
+// the build in flight: { cancelled, ac: AbortController, jobId, invite, stop() }
+// — a new photo cancels it (see cancelTurn) and the page is free at once
+let activeTurn = null;
 let promptImage = null;      // { media_type, data, previewUrl, width, height } | null
 let LOADED_FONTS = null;
 let view3d = null;
@@ -178,6 +181,7 @@ async function parseDirect(req, key) {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
       body: JSON.stringify(req),
+      signal: activeTurn?.ac.signal,
     });
   } catch (e) { throw new Error(networkFailureMessage(e)); }
   if (!res.ok) throw new Error(directFailureMessage(res.status, await res.text().catch(() => '')));
@@ -226,9 +230,10 @@ function napUntilVisible(ms) {
 // resolves with the finished turn; rejects with the build's own words
 // (e.gone = the server no longer has it). A dropped connection or a server
 // restart mid-poll is waited out, not reported.
-async function awaitGuestJob(id, invite, onStage) {
+async function awaitGuestJob(id, invite, onStage, turn = null) {
   let misses = 0;
   for (;;) {
+    if (turn?.cancelled) throw new Error('stopped');
     let res, payload = {};
     try {
       res = await fetch(`/api/intent/loom/job/${encodeURIComponent(id)}`, { headers: { 'x-loom-invite': invite }, cache: 'no-store' });
@@ -248,18 +253,46 @@ async function awaitGuestJob(id, invite, onStage) {
   }
 }
 
+// tell the server to stop a build (it refunds the prompt); fire-and-forget
+function stopGuestJob(id, invite) {
+  if (!id || !invite) return;
+  fetch(`/api/intent/loom/job/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'x-loom-invite': invite } }).catch(() => {});
+}
+// Stop the build in flight. The page is free the moment this returns: the
+// turn's promise is settled here, a BYO call's fetch is aborted, a guest job
+// is cancelled on the server (which gives the prompt back), and whatever the
+// stale loop still does in the background lands nowhere (runTurn ignores
+// a cancelled turn). Returns false when nothing was running.
+function cancelTurn() {
+  const turn = activeTurn;
+  if (!turn) return false;
+  turn.cancelled = true;
+  activeTurn = null;
+  turn.ac.abort();
+  stopGuestJob(turn.jobId, turn.invite);
+  clearJob();
+  turn.stop();
+  return true;
+}
+
 // ------------------------------------------------------------------ photo
 // Encoded to a byte BUDGET (app/photo.mjs: ≤1568px, JPEG quality and size
 // stepping down until the base64 fits under the relay's request cap),
 // held in memory for the session, never persisted.
+// A new photo is a fresh start, as the prompt label promises: a build still
+// running is stopped (its guest prompt given back) and the design on the
+// page is cleared — no waiting for a stuck build to finish before you can
+// try again. The typed text stays: sizes and material still apply.
 async function takePhoto(file) {
   if (!file) return;
+  const stopped = cancelTurn();
+  if (stopped || hasDesign()) resetDesign();
   try {
     promptImage = await encodePhoto(file);
     $('thumb').src = promptImage.previewUrl;
     $('thumbMeta').textContent = `${promptImage.width}×${promptImage.height} · ${kb(promptImage.bytes)} · the picture decides the shape, your text decides the numbers`;
     $('thumbWrap').style.display = 'flex';
-    setMsg('');
+    setMsg(stopped ? 'Stopped the last build — a fresh start with this photo.' : '');
     updateBuildLabel();
   } catch (e) {
     setMsg(/hei[cf]/i.test(file.type + file.name) ? 'HEIC photos can\'t be read by the browser — export it as JPEG first.' : e.message);
@@ -690,7 +723,7 @@ async function generate() {
   const key = localStorage.getItem('loom:apiKey');
   const invite = localStorage.getItem('loom:invite');
   const firstLabel = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
-  await runTurn(firstLabel, async (stage) => {
+  await runTurn(firstLabel, async (stage, turn) => {
     const meta = {
       utterance, invite,
       parseContext: structuredClone(promptRecipeView(recipe)),
@@ -717,8 +750,10 @@ async function generate() {
     }
     // guest pass: the server runs the whole turn; we hold the ticket
     const id = await startGuestJob({ recipe, utterance, model: currentModel(), image, exemplars, values: controlValues, shop: shopForRun(), client: 'phone' }, invite);
+    if (turn.cancelled) { stopGuestJob(id, invite); throw new Error('stopped'); }   // cancelled while the POST was out
+    turn.jobId = id; turn.invite = invite;
     saveJob({ id, startedAt: Date.now(), ...meta });
-    const out = await awaitGuestJob(id, invite, stage);
+    const out = await awaitGuestJob(id, invite, stage, turn);
     clearJob();
     return { out, meta };
   });
@@ -726,6 +761,9 @@ async function generate() {
 // the loom at work over the view while `work(stage)` runs, then the result
 // lands in the page (or the error in the message line)
 async function runTurn(firstLabel, work) {
+  const turn = { cancelled: false, ac: new AbortController(), jobId: null, invite: null, stop: null };
+  const stopped = new Promise((_, reject) => { turn.stop = () => reject(new Error('stopped')); });
+  activeTurn = turn;
   busy = true;
   setMsg('');
   $('build').disabled = true;
@@ -733,16 +771,23 @@ async function runTurn(firstLabel, work) {
   $('result').style.display = 'block';
   setBadge('wait', 'thinking…');
   const stopWeave = startWeave($('view3d'), firstLabel, LOGO_PALETTE);
-  const stage = (s) => { $('build').textContent = s; stopWeave.setLabel?.(s); };
+  const stage = (s) => { if (turn.cancelled) return; $('build').textContent = s; stopWeave.setLabel?.(s); };
   try {
-    const { out, meta } = await work(stage);
+    // cancelTurn settles `stopped` so the page is free at once; the stale
+    // work may still be mid-weave — its result is ignored below
+    const working = work(stage, turn);
+    working.catch(() => {});
+    const { out, meta } = await Promise.race([working, stopped]);
+    if (turn.cancelled) return;
     await finishTurn(out, meta);
   } catch (e) {
+    if (turn.cancelled) return;   // the person started over; the page is already fresh
     if (e?.gone) clearJob();
     setMsg(e.message ?? String(e));
     if (!hasDesign()) $('result').style.display = 'none';
     else render();
   } finally {
+    if (activeTurn === turn) activeTurn = null;
     stopWeave();
     busy = false;
     $('build').disabled = false;
@@ -801,7 +846,9 @@ function download(name, content, type = 'text/plain') {
 }
 const slug = (t) => (t ?? '').trim().replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'loom';
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
-$('reset').addEventListener('click', () => {
+// back to an empty page (the photo and the typed text are the caller's call)
+function resetDesign() {
+  cancelTurn();
   cancelIntro();
   recipe = structuredClone(EMPTY_RECIPE);
   controlValues = {};
@@ -812,8 +859,11 @@ $('reset').addEventListener('click', () => {
   setNote('');
   $('sheets').innerHTML = ''; $('sheets').style.display = 'none';
   $('about').textContent = ''; $('declined').innerHTML = '';
-  $('clearPhoto').click();
   updateBuildLabel();
+}
+$('reset').addEventListener('click', () => {
+  resetDesign();
+  $('clearPhoto').click();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 });
 
@@ -853,11 +903,12 @@ async function loadGuests() {
   const pendingInvite = localStorage.getItem('loom:invite');
   if (pending?.id && pendingInvite) {
     if (pending.utterance) setMsg(`Picking up “${pending.utterance.length > 60 ? pending.utterance.slice(0, 57) + '…' : pending.utterance}”`);
-    runTurn('still weaving…', async (stage) => {
-      const out = await awaitGuestJob(pending.id, pendingInvite, stage);
+    runTurn('still weaving…', async (stage, turn) => {
+      turn.jobId = pending.id; turn.invite = pendingInvite;
+      const out = await awaitGuestJob(pending.id, pendingInvite, stage, turn);
       clearJob();
       return { out, meta: { ...pending, invite: pendingInvite } };
     });
   }
-  window.loomMobile = { get recipe() { return recipe; }, get result() { return result; }, get values() { return controlValues; }, get view3d() { return view3d; }, get sim() { return lastSim; }, simulateJob, ready: true };   // test handle
+  window.loomMobile = { get recipe() { return recipe; }, get result() { return result; }, get values() { return controlValues; }, get view3d() { return view3d; }, get sim() { return lastSim; }, simulateJob, cancelTurn, get busy() { return busy; }, ready: true };   // test handle
 })();

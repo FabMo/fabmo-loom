@@ -39,6 +39,9 @@ let lastTerrains = {};   // last resolved terrains, reused for sheet-positioned 
 let result = null;
 let lastSim = null;      // the worker's simulateJob output for `result` (3D surface)
 let busy = false;
+// the generation in flight: { cancelled, ac: AbortController, stop() } —
+// attaching a new picture while it runs cancels it (see cancelGeneration)
+let activeTurn = null;
 let modelChips = [];     // suggested next prompts from the last intent turn (ephemeral)
 
 const quiet = (fn) => {
@@ -1185,6 +1188,7 @@ async function parseDirect(req, key) {
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify(req),
+      signal: activeTurn?.ac.signal,
     });
   } catch (e) { throw new Error(networkFailureMessage(e)); }
   if (!res.ok) throw new Error(directFailureMessage(res.status, await res.text().catch(() => '')));
@@ -1201,6 +1205,7 @@ async function parseViaGuestPass(req, invite) {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
       body: JSON.stringify({ req }),
+      signal: activeTurn?.ac.signal,
     });
   } catch (e) { throw new Error(networkFailureMessage(e)); }
   // the relay answers JSON; nginx's own refusals (413 body too large, 502,
@@ -1235,14 +1240,32 @@ function setPromptImage(img) {
   $('prompt').placeholder = img ? 'e.g. "71 5/8 wide, 16 1/2 tall, 15 3/8 deep — 3/4 plywood"' : 'e.g. "an app to engrave names"';
 }
 
+// Stop the generation in flight: the page is free at once (the loop's
+// promise is settled here and its fetch aborted); whatever the stale loop
+// still does lands nowhere — generate() ignores a cancelled turn. The
+// design stays as it was before that turn. Returns false when idle.
+function cancelGeneration() {
+  const turn = activeTurn;
+  if (!turn) return false;
+  turn.cancelled = true;
+  activeTurn = null;
+  turn.ac.abort();
+  turn.stop();
+  return true;
+}
+
 async function takePromptImage(file) {
   if (!file || !file.type.startsWith('image/')) return;
+  // a new picture mid-generation means "not that — this": stop waiting on
+  // the stuck one, attach the picture, and the next Generate starts clean
+  const stopped = cancelGeneration();
   try {
     // encoded to a byte budget (app/photo.mjs), not just a pixel size: a
     // busy photo at 1568px can exceed the relay's request cap on its own
     const img = await encodePhoto(file);
     setPromptImage(img);
     if (img.steps > 1) addTurn(`Picture attached at ${img.width}×${img.height}, ${kb(img.bytes)} — shrunk to fit the request limit.`);
+    if (stopped) addTurn('Stopped the generation that was running — the new picture is attached; Generate when ready.');
   } catch (e) {
     addTurn(/hei[cf]/i.test(file.type + file.name) ? 'HEIC photos can\'t be read by the browser — export it as JPEG first.' : escapeHtml(e.message), true);
   }
@@ -1282,10 +1305,14 @@ async function generate() {
     addTurn('Add your Anthropic API key first — it stays in this browser. (Opening Loom from a guest-pass link works too.)', true);
     return;
   }
+  const turn = { cancelled: false, ac: new AbortController(), stop: null };
+  const stopped = new Promise((_, reject) => { turn.stop = () => reject(new Error('stopped')); });
+  activeTurn = turn;
   busy = true;
   $('generate').disabled = true;
   $('generate').textContent = 'weaving…';
   const stopWeave = startWeave($('appPanel'));
+  const setLabel = (s) => { if (!turn.cancelled) stopWeave.setLabel?.(s); };
   try {
     // what the model SAW — captured before the loop mutates the recipe
     // (cloned: with no assets promptRecipeView returns the live object).
@@ -1302,11 +1329,13 @@ async function generate() {
     // and corrects / writes the final summary (see intent.mjs). The weave
     // callback is the app's own weave path (worker + resolved terrains),
     // so what the model is told is exactly what the user would see.
-    const out = await runIntentLoop({
+    // cancelGeneration settles `stopped` so the page is free at once; the
+    // stale loop may still be mid-weave — its result is dropped below
+    const working = runIntentLoop({
       recipe, utterance, shop, model: currentModel(), image, exemplars,
-      call: (req) => { if (calls++ > 0) stopWeave.setLabel?.(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
+      call: (req) => { if (calls++ > 0) setLabel(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
       weave: async (rec) => {
-        stopWeave.setLabel?.('weaving…');
+        setLabel('weaving…');
         const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
         let terrains = {};
         if (rec.terrains?.length) {
@@ -1317,6 +1346,9 @@ async function generate() {
         return w.result;
       },
     });
+    working.catch(() => {});
+    const out = await Promise.race([working, stopped]);
+    if (turn.cancelled) return;
 
     recipe = out.recipe;
     modelChips = out.suggest;   // this turn's targeted chips (renderControls → renderChips shows them)
@@ -1393,8 +1425,9 @@ async function generate() {
     $('prompt').value = '';
     setPromptImage(null);   // one picture, one turn — the recipe now carries what it taught
   } catch (e) {
-    addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
+    if (!turn.cancelled) addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
   } finally {
+    if (activeTurn === turn) activeTurn = null;
     stopWeave();
     busy = false;
     $('generate').disabled = false;

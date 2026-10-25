@@ -91,7 +91,12 @@ try {
   let call;
   if (canned) {
     const queue = [...canned];
-    call = async () => { const r = queue.shift(); if (!r) throw new Error('canned responses exhausted'); return r; };
+    call = async () => {
+      const r = queue.shift();
+      if (!r) throw new Error('canned responses exhausted');
+      if (r.hang) return new Promise(() => {});   // a model that never answers (the cancel test)
+      return r;
+    };
   } else {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: key });

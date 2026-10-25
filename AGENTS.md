@@ -316,6 +316,23 @@ per-deployment. Entry docs are the model's ONLY knowledge of the guest
 format: condense the guest's document spec into the doc string, with a
 worked example, exactly as native entries do.
 
+### Starting over while a build runs (v0.112)
+
+A generation in flight is a **turn object** (`activeTurn` in `app/main.js`
+and `app/mobile.js`: `{ cancelled, ac: AbortController, stop() }`); the
+page awaits `Promise.race([work, stopped])`, so cancelling frees the page
+at once instead of waiting for a stuck model call or guest job to end.
+Rules: a cancelled turn's result lands nowhere (every `then` after the
+race checks `turn.cancelled`, stage labels are guarded), its fetches
+carry `activeTurn?.ac.signal`, and a guest job is told to stop with
+`DELETE /api/intent/loom/job/:id` (same pass only; `LoomJobs.cancel`
+terminates the worker and `onFailed` refunds the prompt). On the phone
+page **a new photo is a fresh start** — it cancels the build, clears the
+design (`resetDesign()`), keeps the typed text, and the next Build is a
+first build; the "Start over" button does the same and drops the photo.
+On the desktop a new picture only cancels; the design stays. Headless
+checks: `test/browser-mobile-cancel-test.mjs`, `test/browser-cancel-test.mjs`.
+
 ## Testing
 
 - `npm test` — self-contained gauntlets; must stay green.

@@ -80,6 +80,9 @@ function appendFunnel(entry) {
       source: entry.source,                       // 'server' | 'browser'
       app: KNOWN_APPS.has(entry.app) ? entry.app : 'step_toolpath',
       utterance: clip(entry.utterance, MAX_UTTERANCE),
+      // a picture rode with this parse (never the bytes — replay.mjs can't
+      // reproduce such a parse from text alone, and says so)
+      ...(entry.image?.attached ? { image: { attached: true, width: Number(entry.image.width) || undefined, height: Number(entry.image.height) || undefined } } : {}),
       summary: clip(entry.intent?.summary, 500),
       actions: (entry.intent?.actions ?? []).slice(0, 50),
       declined: (entry.intent?.declined ?? []).slice(0, 20),
@@ -308,6 +311,17 @@ export function mountIntent(app) {
     return res.json({ ok: true, ...v, invite: s ? { name: entry.name, remaining: s.remaining, resetsAt: s.resetsAt, expires: s.expires } : null });
   });
 
+  // the phone started over (a new photo while a build was running): stop
+  // the worker and give the prompt back — only the pass that started it may
+  app.delete('/api/intent/loom/job/:id', (req, res) => {
+    const token = req.get('x-loom-invite');
+    const r = token ? jobs.cancel(String(req.params.id), token) : null;
+    res.set('cache-control', 'no-store');
+    if (r === null) return res.status(404).json({ ok: false, error: 'That build is not on the server.' });
+    if (r) console.log(`[intent] loom build ${req.params.id} stopped by its owner — prompt refunded`);
+    return res.json({ ok: true, cancelled: r });
+  });
+
   // Mint a guest pass from the app. The shop's own Anthropic key is the
   // credential: whoever holds it may hand out metered access to it. The
   // phone already sends that key to api.anthropic.com for BYO parses; here
@@ -367,5 +381,5 @@ export function mountIntent(app) {
     return res.json({ ok: true, queryId });
   });
 
-  console.log('[intent] /api/intent/step + /api/intent/loom (+ /job) + /api/intent/invite (GET status, POST mint) + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
+  console.log('[intent] /api/intent/step + /api/intent/loom (+ /job, DELETE /job/:id) + /api/intent/invite (GET status, POST mint) + /api/intent/log mounted' + (readKey() ? '' : ' (no server key — proxy answers 503; BYO-key still works)'));
 }

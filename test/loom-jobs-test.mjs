@@ -98,6 +98,21 @@ const v2 = await jobs.wait(id2, TOKEN, { timeoutMs: 90_000 });
 ok(v2.status === 'failed' && /empty-handed/.test(v2.error), `an empty first turn fails with Loom's own words: "${v2.error}"`);
 ok(metered.length === 2 && metered[1].done === false && metered[1].token === TOKEN, 'onFailed fired with the token (the caller refunds)');
 
+// ---- the person started over: cancel stops the worker and refunds ----------
+console.log('a build stopped by its owner');
+const id3 = jobs.start({ token: TOKEN, input, canned: [{ hang: true }] });
+ok(jobs.get(id3, TOKEN)?.status === 'running' && jobs.busy(), 'a model that never answers leaves the job running');
+ok(jobs.cancel(id3, OTHER) === null, 'another pass cannot stop it');
+ok(jobs.cancel('lj_nope', TOKEN) === null, 'an unknown id is null');
+ok(jobs.cancel(id3, TOKEN) === true, 'the owner stops it');
+const v3 = jobs.get(id3, TOKEN);
+ok(v3.status === 'failed' && v3.cancelled === true && /started over/.test(v3.error), `it reads failed, in the page's own words: "${v3.error}"`);
+ok(!jobs.busy(), 'the worker is released at once');
+ok(metered.length === 3 && metered[2].done === false && metered[2].token === TOKEN, 'onFailed fired (the caller refunds the prompt)');
+ok(jobs.cancel(id3, TOKEN) === false, 'stopping it again is a no-op');
+ok(jobs.cancel(id, TOKEN) === false, 'a finished build cannot be stopped');
+ok(metered.length === 3, 'and nothing was metered twice');
+
 // ---- a restart hands running jobs back as orphans --------------------------
 console.log('restart');
 fs.writeFileSync(path.join(dir, 'lj_orphan.json'), JSON.stringify({ id: 'lj_orphan', token: TOKEN, status: 'running', stage: 'weaving…', startedAt: Date.now() - 60_000, utterance: 'x' }));
