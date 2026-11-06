@@ -60,6 +60,17 @@
 // towers on a keep: each brings its own two beams across the tier below
 // (siblings whose walls share a line share that beam), and siblings keep a
 // clear cell between them so their planks never want the same notch.
+//
+// A TOP is the skyline a tier nothing stands on may carry: ONE more course
+// of two planks whose bottom edge is notched like any plank — they seat on
+// the course below exactly as a plank would, and the structure audit treats
+// them as one — and whose top edge is a SILHOUETTE instead of notches: a
+// spire, a dome, an ogee, a terraced crown, a battlement, a stepped parapet
+// (TOP_SHAPES, topSilhouette, finialRing). The shapes are a fixed
+// vocabulary drawn from numbers (height, count), never a traced outline, so
+// ornament is chosen and sized, not copied — the likeness rule holds. The
+// ornament rides above the plank body (y ≥ W), so the notches, the relief
+// and the wall they leave are exactly a plank's.
 
 import { generateProfile } from '../strategies/profile.js';
 import { formatDiameter } from '../strategies/tool-select.js';
@@ -182,12 +193,118 @@ export function connectorRing(g) {
   return { ring: cleanRing([...h1, ...h1.map(mirror).reverse()]), rn, rIn, rOut, web, clear };
 }
 
+// ---- decorative tops ----
+export const TOP_SHAPES = {
+  spire: { doc: 'straight slopes from both ends to a point at the centre — a steeple when tall, a gable or roofline when low', count: null },
+  dome: { doc: 'a half-ellipse, its full height at the centre', count: null },
+  ogee: { doc: 'an ogee arch: round shoulders curving in to a sharp point', count: null },
+  crown: { doc: 'terraced arches, each stepped in and rising above the one outside it (the Chrysler Building\'s crown) — count = terraces', count: [5, 2, 9] },
+  crenellation: { doc: 'a battlement: count square merlons with open crenels between them', count: [5, 2, 30] },
+  steps: { doc: 'a stepped parapet rising to the centre — count steps each side (Art Deco setbacks, a ziggurat)', count: [3, 1, 12] },
+};
+export const TOP_SHAPE_NAMES = Object.keys(TOP_SHAPES);
+const CROWN_ARCH = 0.6;      // a crown terrace's arch rises this share of its half-width (a semicircle would be 1)
+
+/**
+ * The top edge of a decorative plank: points left → right from x = 0 to
+ * x = L, y = height ABOVE the plank body's top line (≥ 0, peak = h).
+ * tool = the cutting bit: a slot narrower than it cannot be cut.
+ * → { pts, peak, count } or { error }
+ */
+export function topSilhouette(shape, L, h, count = null, tool = 0) {
+  const spec = TOP_SHAPES[shape];
+  if (!spec) return { error: `"${shape}" is not a top shape — one of ${TOP_SHAPE_NAMES.join(', ')}` };
+  if (!(h > 0)) return { error: `a ${shape} top needs a height above 0 (got ${h})` };
+  let n = null;
+  if (spec.count) {
+    n = Math.round(count ?? spec.count[0]);
+    if (!(n >= spec.count[1] && n <= spec.count[2])) return { error: `a ${shape} top takes a count from ${spec.count[1]} to ${spec.count[2]} (got ${count})` };
+  }
+  const c = L / 2, pts = [];
+  const P = (x, y) => pts.push({ x, y });
+  const bezier = (p0, p1, p2, p3, m, skipFirst) => {
+    for (let k = skipFirst ? 1 : 0; k <= m; k++) {
+      const u = k / m, v = 1 - u, a = v * v * v, b = 3 * v * v * u, cc = 3 * v * u * u, d = u * u * u;
+      P(a * p0[0] + b * p1[0] + cc * p2[0] + d * p3[0], a * p0[1] + b * p1[1] + cc * p2[1] + d * p3[1]);
+    }
+  };
+  switch (shape) {
+    case 'spire': P(0, 0); P(c, h); P(L, 0); break;
+    case 'dome': {
+      const m = 64;
+      for (let k = 0; k <= m; k++) { const th = Math.PI - (Math.PI * k) / m; P(c + c * Math.cos(th), h * Math.sin(th)); }
+      break;
+    }
+    case 'ogee':
+      // each half a cubic: a steep round shoulder from the end, pulled in to
+      // a vertical tangent at the apex, so the two halves meet in a point
+      bezier([0, 0], [0, 0.6 * h], [c, 0.4 * h], [c, h], 32, false);
+      bezier([c, h], [c, 0.4 * h], [L, 0.6 * h], [L, 0], 32, true);
+      break;
+    case 'crown': {
+      // n terraces: terrace i is a plinth of half-width a_i = c·(1 − i/n) up
+      // to b_i, topped by an elliptical arch of rise r_i. The apexes climb
+      // evenly to h; an arch rises CROWN_ARCH of its half-width, or less
+      // when that would put its springing below the plank
+      const terr = [];
+      for (let i = 0; i < n; i++) { const a = c * (1 - i / n), apex = (h * (i + 1)) / n, r = Math.min(apex, CROWN_ARCH * a); terr.push({ a, r, b: apex - r }); }
+      const at = (x) => Math.max(0, ...terr.map(T => (Math.abs(x - c) <= T.a + 1e-9 ? T.b + T.r * Math.sqrt(Math.max(0, 1 - ((x - c) / T.a) ** 2)) : 0)));
+      const xs = new Set([0, L]);
+      for (const T of terr) {
+        const m = 48;
+        for (let k = 0; k <= m; k++) xs.add(c + T.a * Math.cos(Math.PI - (Math.PI * k) / m));
+        if (T.b > 0) { xs.add(c - T.a - 1e-6); xs.add(c + T.a + 1e-6); }   // the riser: a point just outside the terrace's edge
+      }
+      for (const x of [...xs].sort((p, q) => p - q)) P(Math.min(L, Math.max(0, x)), at(x));
+      break;
+    }
+    case 'crenellation': {
+      const unit = L / (2 * n - 1);
+      if (unit < tool + 0.05) return { error: `${n} merlons on a ${L.toFixed(1)}" plank leave crenels ${unit.toFixed(2)}" wide — too narrow for a ${tool}" bit (at most ${Math.floor((L / (tool + 0.05) + 1) / 2)} merlons)` };
+      for (let j = 0; j < 2 * n - 1; j++) { const y = j % 2 === 0 ? h : 0; P(j * unit, y); P((j + 1) * unit, y); }
+      break;
+    }
+    case 'steps': {
+      const m = 2 * n + 1, unit = L / m;
+      for (let j = 0; j < m; j++) { const y = (h * (n - Math.abs(j - n) + 1)) / (n + 1); P(j * unit, y); P((j + 1) * unit, y); }
+      break;
+    }
+  }
+  pts[0].x = 0; pts[pts.length - 1].x = L;
+  return { pts, peak: h, count: n };
+}
+
+/**
+ * A decorative TOP plank: a plank's notched bottom edge and straight sides,
+ * and a silhouette for its top edge. CCW, plank-local inches like plankRing;
+ * g as plankRing's, top = { shape, height, count }, tool = the cutting bit.
+ * → { ring, length, centres, peak, height } or { error }
+ */
+export function finialRing(g, top, tool = 0) {
+  const { notches: n, width: W, pitch, endMargin, slotW: s, depth: d, reliefR: r, cornerR: cr } = g;
+  const L = (n - 1) * pitch + 2 * endMargin;
+  const sil = topSilhouette(top.shape, L, top.height, top.count, tool);
+  if (sil.error) return sil;
+  const centres = Array.from({ length: n }, (_, i) => endMargin + i * pitch);
+  const ring = [];
+  ring.push({ x: cr, y: 0 });
+  for (const c of centres) notchUp(ring, c, s, d, r);
+  cornerArc(ring, L - cr, cr, cr, -H, 0);
+  // up the right side to the silhouette's end, the silhouette right → left
+  // on top of the plank body, down the left side
+  for (const q of [...sil.pts].reverse()) ring.push({ x: q.x, y: W + q.y });
+  cornerArc(ring, cr, cr, cr, 2 * H, 3 * H);
+  return { ring: cleanRing(ring), length: L, centres, peak: sil.peak, height: W + sil.peak, count: sil.count };
+}
+
 /**
  * The planks of a stacked-tier structure, on the notch grid.
  * tiers: [{ w, d, courses, x, y, on }] — whole cells; x, y the tier's corner
  * relative to the base tier's; `on` the index of the tier it stands on
  * (-1 for the base; always an EARLIER tier), inside which it must lie.
- * → { planks: [{ dir:'x'|'y', line, from, to, course, tier, transfer }], courses, starts }
+ * A tier may carry `top` ({ shape, height, count }): one more course of two
+ * decorative planks on its own wall lines (planks carry `top` too).
+ * → { planks: [{ dir:'x'|'y', line, from, to, course, tier, transfer, top? }], courses, starts }
  *   an 'x' plank runs along X on the wall line y = line, spanning cells
  *   from … to (so it has to − from + 1 notches); a 'y' plank likewise.
  *   courses is the tallest branch; starts[i] the course tier i begins on.
@@ -200,18 +317,20 @@ export function towerPlan(tiers) {
     const below = on >= 0 ? tiers[on] : null;
     const start = below ? starts[on] + below.courses : 0;
     starts.push(start);
-    top = Math.max(top, start + T.courses);
-    for (let j = 0; j < T.courses; j++) {
+    const courses = T.courses + (T.top ? 1 : 0);   // the top is one more course, of decorative planks
+    top = Math.max(top, start + courses);
+    for (let j = 0; j < courses; j++) {
       const k = start + j;
       // the first course of a tier that stands on another is carried by it:
       // its planks run that tier's full extent to reach its walls. Two
       // siblings whose walls share a line get ONE such beam between them.
       const span = below && j === 0 ? below : T;
+      const crown = j === T.courses ? T.top : null;
       const add = (dir, line, from, to) => {
         const key = `${dir}/${line}/${from}/${to}/${k}`;
         if (seen.has(key)) return;
         seen.add(key);
-        planks.push({ dir, line, from, to, course: k, tier: ti, transfer: span !== T });
+        planks.push({ dir, line, from, to, course: k, tier: ti, transfer: span !== T, ...(crown ? { top: crown } : {}) });
       };
       if (k % 2 === 0) for (const line of [T.y, T.y + T.d]) add('x', line, span.x, span.x + span.w);
       else for (const line of [T.x, T.x + T.w]) add('y', line, span.y, span.y + span.d);
@@ -224,12 +343,12 @@ const fmtAngle = (a) => `${+a.toFixed(1)}`;
 
 export const LINKER_LOG_ENTRIES = {
   linker_logs: {
-    doc: 'Cut a KIT OF LINKER LOGS — notched plywood PLAY PLANKS (Bill Young\'s design, after the 1950s "Plywood Play Planks"; giant flat Lincoln-log-style building planks). Every plank has matching notches on BOTH long edges; two planks cross-lap at a notch, each sinking a quarter of its width into the other, so courses stack like a log cabin and a pile of planks builds walls, towers, forts, bridges and playhouses with no fasteners — and knocks down flat. ONE op makes the WHOLE KIT: each plank is cut free as its own outline with its notches, packed into sheets, counted as a piece. Use it for any ask for Linker Logs, play planks, notched building planks, a plywood log-cabin / fort building set, or interlocking construction planks — never hand-author the planks as cutouts. "planks" lists the kit: [{notches, count}, …], where notches is how many notches the plank has along EACH edge and count how many of that plank (numbers or arithmetic over control ids). A plank\'s length follows its notches: (notches − 1) × pitch + 2 × endMargin — with the defaults 4.5", 10.5", 22.5", 34.5" and 46.5" for 1, 2, 4, 6 and 8 notches (any whole number of notches works: 3 → 16.5", 5 → 28.5"). The default planks list is Bill\'s standard sheet — 6 × 8-notch, 6 × 6-notch, 8 × 4-notch, 14 × 2-notch, 16 × 1-notch = 50 planks on one 4×8 — so leave planks out for "a set of Linker Logs" and use "sets" for more of them. ANGLE CONNECTORS are the kit\'s other part: "connectors" [{angle, count}, …] adds small ring-segment pieces with one plank notch in each of two straight edges set at that angle (degrees; with Bill\'s proportions anything from 5 to about 70 — a sharper one closes up its inner edge and is refused by name), so a plank seated in each stands at that angle to the other — for walls that turn a corner other than square, polygons, a pitched roof. Bill\'s connector sheet is [{"angle":15,"count":12},{"angle":30,"count":12},{"angle":45,"count":12}] (36 pieces, a 2×4); the default is none, so add them when the user asks for connectors, angles, a roof or a round/polygonal build — and pass planks [] to cut connectors alone. Each connector has its angle scored on its face ("labels", on by default) so 15s and 30s are told apart in the bin: the label is a traced hairline with a 60° V-bit, which is a TOOL CHANGE before the cutting bit — say so, or set labelToolDiameter to the cutting bit\'s diameter to score with it and skip the change, or labels false. TO BUILD A STRUCTURE instead of a loose kit, give "tiers": a tower, a skyscraper\'s massing with its setbacks, a stepped pyramid, a fort or keep, a box — anything that is RECTANGULAR TIERS stacked bottom to top — as [{w, d, courses, x?, y?, on?}, …]. w and d are the tier\'s footprint in GRID CELLS across and deep (one cell = one pitch, 6" by default), courses how many plank courses tall it is (at least 2), and x, y its corner in cells from the BASE tier\'s corner (default: centred on the tier it stands on — keep the widths all odd or all even so setbacks come out symmetric). Each tier stands on the PREVIOUS tier in the list unless "on" names another (the index of an earlier tier, 0 = the base) and must sit inside it. SEVERAL tiers may stand on the same one — a hall with a spire at each end, a keep with four corner towers, twin towers on a podium: give each "on" and its own x, y, and leave at least ONE CLEAR CELL between any two that share a tier (so two 1 × 1 spires need a base at least 3 cells that way: cells 0–1 and 2–3). The structure\'s height is its tallest branch. Courses alternate direction and each rises half a plank width (1.76" by default), so a branch\'s height is (its courses, base to top − 1) × 1.76 + 3.5; the footprint is the base tier\'s cells × pitch + 4.5. The op then cuts EXACTLY the planks the structure needs (two per course; the first course of a tier that stands on another runs long, across that tier, to carry it), counts them, and shows the structure ASSEMBLED in the 3D view (no set_assembly). With tiers, "planks" lists SPARES to add (default none) and connectors stay optional extras. Walls come out solid — planks stack edge to edge — with every corner cross-lapped and the top open. It is a blocky, stepped form and nothing else: a crown, spire, arches, windows, sloped, round or domed parts are NOT built — decline them by name. Size it with the grid: scale plankWidth / pitch / endMargin and the stock together to reach a target height, and report the height and footprint the observation gives. THE STOCK THICKNESS IS THE NOTCH WIDTH: Bill draws it for 1/2" plywood, so set_thickness 0.5 unless the user names their plywood (thicker stock works — the notches widen to match; say so). Notch width = stock thickness + slotClearance; notch depth is a quarter of plankWidth, so two crossed planks overlap by half a plank; each notch floor carries a round T-bone relief on both walls so the square edge of the mating plank seats (no dog-bone needed). THE BIT IS SIZED TO THE PLANKS: leave toolDiameter and reliefDiameter at 0 and the verb picks the largest of 1/4", 1/8" and 1/16" that fits the notch and leaves at least half of every notch wall straight above its relief for the crossing plank to grip (a relief takes its own diameter off that wall, so a bit too big for a small plank leaves the joint nothing to hold) — the observation names the bit it chose; say which bit to load. TO BUILD AT ANOTHER SCALE (a tabletop set, a model) scale plankWidth, pitch and endMargin together (Bill\'s are 3.5 / 6 / 2.25) and pick stock near plankWidth ÷ 7; the bit follows by itself. The pieces are laid along the long side of a 4×8 sheet, or of the shop\'s declared material / machine area, in as few sheets as they need; when that is more than one, a warning says how many and "setup" picks the sheet this file cuts — bind it to a control. A plank longer than the sheet is refused by name (fewer notches). claims.pieces = the total piece count across all sheets, planks plus connectors (read it from the observation). WITHOUT tiers this is a KIT OF LOOSE PARTS: it has no assembled view and makes no particular building — do not promise one. Never pair it with set_assembly or add cutouts for the pieces.',
+    doc: 'Cut a KIT OF LINKER LOGS — notched plywood PLAY PLANKS (Bill Young\'s design, after the 1950s "Plywood Play Planks"; giant flat Lincoln-log-style building planks). Every plank has matching notches on BOTH long edges; two planks cross-lap at a notch, each sinking a quarter of its width into the other, so courses stack like a log cabin and a pile of planks builds walls, towers, forts, bridges and playhouses with no fasteners — and knocks down flat. ONE op makes the WHOLE KIT: each plank is cut free as its own outline with its notches, packed into sheets, counted as a piece. Use it for any ask for Linker Logs, play planks, notched building planks, a plywood log-cabin / fort building set, or interlocking construction planks — never hand-author the planks as cutouts. "planks" lists the kit: [{notches, count}, …], where notches is how many notches the plank has along EACH edge and count how many of that plank (numbers or arithmetic over control ids). A plank\'s length follows its notches: (notches − 1) × pitch + 2 × endMargin — with the defaults 4.5", 10.5", 22.5", 34.5" and 46.5" for 1, 2, 4, 6 and 8 notches (any whole number of notches works: 3 → 16.5", 5 → 28.5"). The default planks list is Bill\'s standard sheet — 6 × 8-notch, 6 × 6-notch, 8 × 4-notch, 14 × 2-notch, 16 × 1-notch = 50 planks on one 4×8 — so leave planks out for "a set of Linker Logs" and use "sets" for more of them. ANGLE CONNECTORS are the kit\'s other part: "connectors" [{angle, count}, …] adds small ring-segment pieces with one plank notch in each of two straight edges set at that angle (degrees; with Bill\'s proportions anything from 5 to about 70 — a sharper one closes up its inner edge and is refused by name), so a plank seated in each stands at that angle to the other — for walls that turn a corner other than square, polygons, a pitched roof. Bill\'s connector sheet is [{"angle":15,"count":12},{"angle":30,"count":12},{"angle":45,"count":12}] (36 pieces, a 2×4); the default is none, so add them when the user asks for connectors, angles, a roof or a round/polygonal build — and pass planks [] to cut connectors alone. Each connector has its angle scored on its face ("labels", on by default) so 15s and 30s are told apart in the bin: the label is a traced hairline with a 60° V-bit, which is a TOOL CHANGE before the cutting bit — say so, or set labelToolDiameter to the cutting bit\'s diameter to score with it and skip the change, or labels false. TO BUILD A STRUCTURE instead of a loose kit, give "tiers": a tower, a skyscraper\'s massing with its setbacks, a stepped pyramid, a fort or keep, a box — anything that is RECTANGULAR TIERS stacked bottom to top — as [{w, d, courses, x?, y?, on?}, …]. w and d are the tier\'s footprint in GRID CELLS across and deep (one cell = one pitch, 6" by default), courses how many plank courses tall it is (at least 2), and x, y its corner in cells from the BASE tier\'s corner (default: centred on the tier it stands on — keep the widths all odd or all even so setbacks come out symmetric). Each tier stands on the PREVIOUS tier in the list unless "on" names another (the index of an earlier tier, 0 = the base) and must sit inside it. SEVERAL tiers may stand on the same one — a hall with a spire at each end, a keep with four corner towers, twin towers on a podium: give each "on" and its own x, y, and leave at least ONE CLEAR CELL between any two that share a tier (so two 1 × 1 spires need a base at least 3 cells that way: cells 0–1 and 2–3). The structure\'s height is its tallest branch. Courses alternate direction and each rises half a plank width (1.76" by default), so a branch\'s height is (its courses, base to top − 1) × 1.76 + 3.5; the footprint is the base tier\'s cells × pitch + 4.5. The op then cuts EXACTLY the planks the structure needs (two per course; the first course of a tier that stands on another runs long, across that tier, to carry it), counts them, and shows the structure ASSEMBLED in the 3D view (no set_assembly). With tiers, "planks" lists SPARES to add (default none) and connectors stay optional extras. Walls come out solid — planks stack edge to edge — with every corner cross-lapped and the top open. The SKYLINE is a tier\'s "top": any tier NOTHING stands on may carry top {"shape", "height", "count"?} — one more course of two planks notched underneath like any plank and cut to a silhouette on top, rising "height" inches above the plank (default one plank width). Shapes, by name only: "spire" (a point — steeple when tall, gable or roofline when low), "dome" (half-ellipse), "ogee" (round shoulders to a sharp point), "crown" (terraced arches stepping in and up, the Chrysler Building\'s crown; count = terraces, 2–9, default 5), "crenellation" (a battlement, count merlons, default 5), "steps" (a stepped parapet rising to the centre, count steps each side, default 3). [{"w":3,"d":3,"courses":12},{"w":1,"d":1,"courses":20,"top":{"shape":"crown","height":9,"count":7}}] is a tower with a terraced crown. The top shows on the two faces its planks run along; it is chosen and sized from this vocabulary — never an outline traced from a picture — and a top on a tier another tier stands on is refused by name. A top taller than the sheet is wide is refused; one more than twice its plank\'s length is warned as fragile. Everything else a building wears — windows, columns, statues, a needle finer than a spire, anything on the walls — is NOT built: decline it by name. Size it with the grid: scale plankWidth / pitch / endMargin and the stock together to reach a target height, and report the height and footprint the observation gives. THE STOCK THICKNESS IS THE NOTCH WIDTH: Bill draws it for 1/2" plywood, so set_thickness 0.5 unless the user names their plywood (thicker stock works — the notches widen to match; say so). Notch width = stock thickness + slotClearance; notch depth is a quarter of plankWidth, so two crossed planks overlap by half a plank; each notch floor carries a round T-bone relief on both walls so the square edge of the mating plank seats (no dog-bone needed). THE BIT IS SIZED TO THE PLANKS: leave toolDiameter and reliefDiameter at 0 and the verb picks the largest of 1/4", 1/8" and 1/16" that fits the notch and leaves at least half of every notch wall straight above its relief for the crossing plank to grip (a relief takes its own diameter off that wall, so a bit too big for a small plank leaves the joint nothing to hold) — the observation names the bit it chose; say which bit to load. TO BUILD AT ANOTHER SCALE (a tabletop set, a model) scale plankWidth, pitch and endMargin together (Bill\'s are 3.5 / 6 / 2.25) and pick stock near plankWidth ÷ 7; the bit follows by itself. The pieces are laid along the long side of a 4×8 sheet, or of the shop\'s declared material / machine area, in as few sheets as they need; when that is more than one, a warning says how many and "setup" picks the sheet this file cuts — bind it to a control. A plank longer than the sheet is refused by name (fewer notches). claims.pieces = the total piece count across all sheets, planks plus connectors (read it from the observation). WITHOUT tiers this is a KIT OF LOOSE PARTS: it has no assembled view and makes no particular building — do not promise one. Never pair it with set_assembly or add cutouts for the pieces.',
     freesPieces: true,
     params: {
       planks: { type: 'object', default: BILLS_SHEET, doc: 'the planks: [{"notches":8,"count":6},{"notches":2,"count":14}] — notches per edge (whole number ≥ 1, sets the length) and how many of that plank (numbers or arithmetic strings over control ids). Default: Bill\'s standard 50-plank sheet. [] with connectors cuts connectors alone' },
       connectors: { type: 'object', default: [], doc: 'angle connectors: [{"angle":30,"count":12}] — the angle between the two notched edges, degrees (5 to about 70), and how many (numbers or arithmetic over control ids). Default none; Bill\'s connector sheet is 12 each at 15, 30 and 45' },
-      tiers: { type: 'object', default: [], doc: 'a structure, bottom to top: [{"w":3,"d":3,"courses":12},{"w":1,"d":1,"courses":20}] — w × d grid cells, courses tall (≥ 2), optional x / y corner in cells from the base tier\'s corner (default centred on the tier it stands on), optional "on": the index of the earlier tier it stands on (default the previous one; several tiers may share one, a clear cell apart — [{"w":7,"d":3,"courses":6},{"w":1,"d":1,"courses":10,"on":0,"x":0,"y":1},{"w":1,"d":1,"courses":10,"on":0,"x":6,"y":1}] is a hall with a spire at each end); numbers or arithmetic over control ids. Default none (a loose kit)' },
+      tiers: { type: 'object', default: [], doc: 'a structure, bottom to top: [{"w":3,"d":3,"courses":12},{"w":1,"d":1,"courses":20}] — w × d grid cells, courses tall (≥ 2), optional x / y corner in cells from the base tier\'s corner (default centred on the tier it stands on), optional "on": the index of the earlier tier it stands on (default the previous one; several tiers may share one, a clear cell apart — [{"w":7,"d":3,"courses":6},{"w":1,"d":1,"courses":10,"on":0,"x":0,"y":1},{"w":1,"d":1,"courses":10,"on":0,"x":6,"y":1}] is a hall with a spire at each end); optional "top": {"shape":"spire"|"dome"|"ogee"|"crown"|"crenellation"|"steps", "height": inches above the plank, "count"?: terraces / merlons / steps} on a tier nothing stands on — the skyline; numbers or arithmetic over control ids. Default none (a loose kit)' },
       sets: { type: 'number', default: 1, min: 1, max: 20, doc: 'how many times over to cut the planks and connectors lists (2 = two kits), whole number', bindable: true },
       plankWidth: { type: 'number', default: 3.5, min: 0.75, max: 12, doc: 'plank width, inches (Bill\'s is 3.5)', bindable: true },
       pitch: { type: 'number', default: 6, min: 1, max: 24, doc: 'notch spacing, centre to centre, inches (Bill\'s is 6) — the building grid', bindable: true },
@@ -380,7 +499,25 @@ export const LINKER_LOG_ENTRIES = {
           const S = tiers[clash];
           return { error: `linker_logs: tiers[${i}] (${T.w} × ${T.d} at x ${T.x}, y ${T.y}) and tiers[${clash}] (${S.w} × ${S.d} at x ${S.x}, y ${S.y}) both stand on tiers[${T.on}] and touch or overlap — leave at least one clear cell between two tiers on the same one (give each its own x / y)` };
         }
+        if (row.top != null) {
+          const tp = typeof row.top === 'string' ? { shape: row.top } : row.top;
+          if (!tp || typeof tp !== 'object' || typeof tp.shape !== 'string') return { error: `linker_logs: tiers[${i}].top needs {"shape", "height"} — shape one of ${TOP_SHAPE_NAMES.join(', ')}` };
+          const shape = tp.shape.trim().toLowerCase();
+          if (!TOP_SHAPES[shape]) return { error: `linker_logs: tiers[${i}].top.shape "${tp.shape}" is not a top shape — one of ${TOP_SHAPE_NAMES.join(', ')}` };
+          const h = tp.height == null ? { value: W } : numAt(tp.height, `tiers[${i}].top.height`);
+          if (h.error) return h;
+          if (!(h.value > 0)) return { error: `linker_logs: tiers[${i}].top.height is ${h.value} — the ornament's height above the plank, in inches (above 0)` };
+          let count = null;
+          if (tp.count != null) { const cn = numAt(tp.count, `tiers[${i}].top.count`); if (cn.error) return cn; count = Math.round(cn.value); }
+          else if (TOP_SHAPES[shape].count) count = TOP_SHAPES[shape].count[0];
+          T.top = { shape, height: h.value, count };
+        }
         tiers.push(T);
+      }
+      // a top is a skyline: nothing stands on it
+      for (let i = 0; i < tiers.length; i++) {
+        const above = tiers.findIndex(S => S.on === i);
+        if (tiers[i].top && above >= 0) return { error: `linker_logs: tiers[${i}] carries a ${tiers[i].top.shape} top but tiers[${above}] stands on it — a top goes only on a tier nothing stands on (move the top to tiers[${above}], or drop it)` };
       }
       const plan = tiers.length ? towerPlan(tiers) : null;
       const nStruct = plan ? plan.planks.length * sets : 0;
@@ -427,6 +564,18 @@ export const LINKER_LOG_ENTRIES = {
       const outlines = new Map();   // notches → plank outline, drawn once
       const outlineFor = (notches) => outlines.get(notches) ?? outlines.set(notches, plankRing({ notches, width: W, pitch, endMargin, slotW, depth, reliefR, cornerR })).get(notches);
       const plankPiece = (id, notches, pose = null) => { const pr = outlineFor(notches); return { id, kind: `${notches}-notch`, plank: true, notches, ring: pr.ring, label: null, w: pr.length, h: W, area: pr.length * W, pose }; };
+      // a decorative top plank: a plank's notched bottom, a silhouette on top
+      const finials = new Map();
+      const finialFor = (notches, top) => {
+        const key = `${notches}/${top.shape}/${top.height}/${top.count}`;
+        if (!finials.has(key)) finials.set(key, finialRing({ notches, width: W, pitch, endMargin, slotW, depth, reliefR, cornerR }, top, tool));
+        return finials.get(key);
+      };
+      const topPiece = (id, notches, top, tierIndex, pose = null) => {
+        const fr = finialFor(notches, top);
+        if (fr.error) return { error: `linker_logs: tiers[${tierIndex}].top: ${fr.error}` };
+        return { id, kind: `${notches}-notch ${top.shape} top`, plank: true, top: true, tier: tierIndex, shape: top.shape, peak: fr.peak, count: fr.count, notches, ring: fr.ring, label: null, w: fr.length, h: fr.height, area: fr.length * fr.height, pose };
+      };
       // the structure's planks: named by course (C7-1, C7-2), posed in the
       // assembled view; a second set is the same planks, loose
       if (plan) {
@@ -434,7 +583,12 @@ export const LINKER_LOG_ENTRIES = {
         for (let s = 0; s < sets; s++) for (const sp of plan.planks) {
           const key = `${s}/${sp.course}`, i = (nth.get(key) ?? 0) + 1;
           nth.set(key, i);
-          pieces.push(plankPiece(`C${sp.course + 1}-${i}${s ? `/${s + 1}` : ''}`, sp.to - sp.from + 1, s ? null : sp));
+          const id = `C${sp.course + 1}-${i}${s ? `/${s + 1}` : ''}`, notches = sp.to - sp.from + 1;
+          if (!sp.top) { pieces.push(plankPiece(id, notches, s ? null : sp)); continue; }
+          const pc = topPiece(id, notches, sp.top, sp.tier, s ? null : sp);
+          if (pc.error) return pc;
+          if (pc.peak > 2 * pc.w) warnings.push(`the ${sp.top.shape} top on tiers[${sp.tier}] rises ${pc.peak.toFixed(1)}" above a ${pc.w.toFixed(1)}" plank — a thin, fragile piece in ${t}" stock; a lower top or a wider tier would be sturdier`);
+          pieces.push(pc);
         }
       }
       for (const [notches, count] of [...kinds].sort((a, b) => b[0] - a[0])) {
@@ -461,7 +615,11 @@ export const LINKER_LOG_ENTRIES = {
           : `linker_logs: a ${tooLong.kind} is ${tooLong.w.toFixed(1)}" long and the ${sheetW}" × ${sheetH}" sheet takes at most ${longSide.toFixed(1)}" — a bigger sheet or a smaller kit scale` };
       }
       const tooTall = pieces.find(pc => pc.h > shortSide + 1e-9);
-      if (tooTall) return { error: `linker_logs: a ${tooTall.plank ? `${W}" plank` : tooTall.kind} (${tooTall.h.toFixed(1)}" across) does not fit across the ${sheetW}" × ${sheetH}" sheet — a narrower plank or a bigger sheet` };
+      if (tooTall) {
+        return { error: tooTall.top
+          ? `linker_logs: the ${tooTall.shape} top on tiers[${tooTall.tier}] is ${tooTall.h.toFixed(1)}" tall (a ${W}" plank plus ${tooTall.peak.toFixed(1)}" of ornament) and the ${sheetW}" × ${sheetH}" sheet takes at most ${shortSide.toFixed(1)}" across — a lower top (at most ${(shortSide - W).toFixed(1)}") or a bigger sheet`
+          : `linker_logs: a ${tooTall.plank ? `${W}" plank` : tooTall.kind} (${tooTall.h.toFixed(1)}" across) does not fit across the ${sheetW}" × ${sheetH}" sheet — a narrower plank or a bigger sheet` };
+      }
       // tallest rows first, longest pieces first within a height: a piece
       // joins the first row it fits in (never a row shorter than itself)
       const order = [...pieces].sort((a, b) => (Math.abs(b.h - a.h) > 1e-9 ? b.h - a.h : b.w - a.w));
@@ -555,7 +713,15 @@ export const LINKER_LOG_ENTRIES = {
       const labelled = placed.some(pc => pc.label);
       // every plank cut, by length (the structure's and the loose ones together)
       const byNotches = new Map();
-      for (const pc of pieces) if (pc.plank) byNotches.set(pc.notches, (byNotches.get(pc.notches) ?? 0) + 1);
+      for (const pc of pieces) if (pc.plank && !pc.top) byNotches.set(pc.notches, (byNotches.get(pc.notches) ?? 0) + 1);
+      // the decorative tops, by tier
+      const topsByTier = new Map();
+      for (const pc of pieces) if (pc.top) {
+        const cur = topsByTier.get(pc.tier) ?? { tier: pc.tier, shape: pc.shape, height: +pc.peak.toFixed(4), count: pc.count, planks: 0, length: +pc.w.toFixed(4), notches: pc.notches };
+        cur.planks++;
+        topsByTier.set(pc.tier, cur);
+      }
+      const tops = [...topsByTier.values()].sort((a, b) => a.tier - b.tier);
 
       // ---- the assembled view: every structural plank standing in its course ----
       // world (Y-up): X across, Z deep, the base tier's wall lines at
@@ -579,9 +745,10 @@ export const LINKER_LOG_ENTRIES = {
             : { origin: sub(sub(O, U, pc.at.x), V, pc.at.y), u: U, v: V };
           return { id: pc.id, thickness: t, rings: [pc.ring], sheet: { x: 0, y: 0, rot: 0 }, setup: pc.bin + 1, active: pc.bin === setup - 1, world };
         });
-        const base = tiers[0], height = (plan.courses - 1) * rise + W;
+        // as tall as its highest plank — a top's ornament counts
+        const base = tiers[0], height = Math.max(...placed.filter(pc => pc.pose).map(pc => pc.pose.course * rise + pc.h));
         const footprint = [base.w * pitch + 2 * endMargin, base.d * pitch + 2 * endMargin];
-        assembly = { kind: 'linker_tower', tiers: tiers.map((T, i) => ({ w: T.w, d: T.d, courses: T.courses, x: T.x, y: T.y, on: T.on, from: plan.starts[i] })), courses: plan.courses, planks: plan.planks.length,
+        assembly = { kind: 'linker_tower', tiers: tiers.map((T, i) => ({ w: T.w, d: T.d, courses: T.courses, x: T.x, y: T.y, on: T.on, from: plan.starts[i], ...(T.top ? { top: T.top } : {}) })), courses: plan.courses, planks: plan.planks.length, tops,
           height: +height.toFixed(4), footprint: footprint.map(v => +v.toFixed(4)), box: [footprint[0], height, footprint[1]], panels };
       }
       return {
@@ -590,7 +757,8 @@ export const LINKER_LOG_ENTRIES = {
         pieces: placed.length,
         kit: {
           planks: [...byNotches].sort((a, b) => b[0] - a[0]).map(([notches, count]) => ({ notches, count, length: +((notches - 1) * pitch + 2 * endMargin).toFixed(4) })),
-          structure: assembly ? { tiers: assembly.tiers, courses: assembly.courses, planks: assembly.planks, height: assembly.height, footprint: assembly.footprint } : null,
+          structure: assembly ? { tiers: assembly.tiers, courses: assembly.courses, planks: assembly.planks, tops, height: assembly.height, footprint: assembly.footprint } : null,
+          tops,
           connectors: [...angles].sort((a, b) => a[0] - b[0]).map(([angle, count]) => ({ angle, count })),
           labels: labelled ? (labelTool > 0 ? `${formatDiameter(labelTool)} endmill` : '60° V-bit') : null,
           plankWidth: W, pitch, endMargin, slotWidth: +slotW.toFixed(4), notchDepth: +depth.toFixed(4), reliefDiameter: +reliefD.toFixed(4),

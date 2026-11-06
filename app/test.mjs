@@ -4847,6 +4847,21 @@ console.log('--- piece scopes: several separate pieces in one job (multi-part-se
     if (hl.ok && hl.pieces === 8 + 2 + 6 + 10 && ha.courses === 10 && ha.tiers.map(t => t.on).join() === '-1,0,0' && ha.panels.length === 26
       && /tier 1 \(base\): 5 × 3 cells × 4 courses; tier 2 on tier 1 at x 0, y 1: 1 × 1 cells × 4 courses; tier 3 on tier 1 at x 4, y 1: 1 × 1 cells × 6 courses\) — 10 courses at its tallest/.test(obsH)) pass('linker_logs tiers, two spires on a hall: 26 planks (the spires share one pair of long beams), 10 courses at the taller spire, VERIFIED; the observation says which tier each stands on and where');
     else fail(`linker_logs multi-tower: ok=${hl.ok} pieces=${hl.pieces} courses=${ha?.courses} ${hl.errors?.[0] ?? ''} // ${obsH.split('\n').find(l => /WEAVE/.test(l))?.slice(0, 300)}`);
+    // a decorative top: the skyline — one more course of two silhouette planks, verified like every other piece
+    const crowned = kit({ tiers: [{ w: 3, d: 3, courses: 4 }, { w: 1, d: 1, courses: 'top', top: { shape: 'crown', height: 'crownH', count: 7 } }] },
+      { controls: [{ id: 'top', type: 'number', label: 'Top courses', default: 4, min: 2, max: 30, step: 1 }, { id: 'crownH', type: 'number', label: 'Crown height', default: 6, min: 1, max: 24, step: 0.5 }] });
+    const cw = run(crowned), cw2 = run(crowned, { top: 4, crownH: 9 });
+    const ca = cw.preview?.assemblies?.find(a => a.kind === 'linker_tower'), ca2 = cw2.preview?.assemblies?.find(a => a.kind === 'linker_tower');
+    const obsC = cw.ok ? observationText(buildObservation({ applied: ['x'], skipped: [], recipe: crowned }, cw, crowned)) : '';
+    if (cw.ok && cw.pieces === 18 && ca?.panels.length === 18 && ca.courses === 9 && Math.abs(ca.height - (8 * 1.76 + 3.5 + 6)) < 1e-6 && ca.tops?.length === 1 && cw.report.stats.targets.every(t => !t.intrusionArea)
+      && cw2.ok && Math.abs(ca2.height - (8 * 1.76 + 3.5 + 9)) < 1e-6
+      && /built from 18 planks \(solid walls, cross-lapped corners, topped with a crown of 7 rising 6" above tier 2 — two decorative planks each, notched underneath like any plank; nothing else on the walls\)/.test(obsC)
+      && /parts list: 18 planks — 10 × 22\.5" \(4 notches per edge\), 6 × 10\.5" \(2 notches per edge\), 2 × 10\.5" crown tops \(2 notches underneath, rising 6" above the plank\)/.test(obsC)) {
+      pass(`linker_logs top: a 3 × 3 base, a 1 × 1 spire with a 7-terrace crown 6" tall — 18 pieces, 9 courses, ${ca.height}" tall, VERIFIED; the crown height bound to a slider (9" → ${ca2.height}"); the observation names the top and counts its planks`);
+    } else fail(`linker_logs top: ok=${cw.ok}/${cw2.ok} pieces=${cw.pieces} courses=${ca?.courses} height=${ca?.height}/${ca2?.height} tops=${JSON.stringify(ca?.tops)} ${cw.errors?.[0] ?? ''} // ${obsC.split('\n').find(l => /WEAVE/.test(l))?.slice(0, 400)}`);
+    const underTop = run(kit({ tiers: [{ w: 3, d: 3, courses: 4, top: { shape: 'dome', height: 4 } }, { w: 1, d: 1, courses: 4 }] }));
+    if (!underTop.ok && /tiers\[0\] carries a dome top but tiers\[1\] stands on it/.test(underTop.errors[0])) pass('linker_logs top: a top under another tier is refused by name');
+    else fail(`linker_logs top refusal: ok=${underTop.ok} ${underTop.errors?.[0]}`);
     const touching = run(kit({ tiers: [{ w: 4, d: 2, courses: 4 }, { w: 2, d: 2, courses: 4, on: 0, x: 0, y: 0 }, { w: 2, d: 2, courses: 4, on: 0, x: 2, y: 0 }] }));
     if (!touching.ok && /both stand on tiers\[0\] and touch or overlap — leave at least one clear cell/.test(touching.errors[0])) pass('linker_logs tiers: two tiers on the same one that touch are refused by name (a clear cell between them)');
     else fail(`linker_logs sibling refusal: ok=${touching.ok} ${touching.errors?.[0]}`);
@@ -4854,7 +4869,7 @@ console.log('--- piece scopes: several separate pieces in one job (multi-part-se
     if (!offTier.ok && /tiers\[1\] \(3 × 1 cells at x -1, y 0\) reaches outside tiers\[0\]/.test(offTier.errors[0])) pass('linker_logs tiers: a tier that overhangs the one below is refused by name');
     else fail(`linker_logs tier refusal: ok=${offTier.ok} ${offTier.errors?.[0]}`);
     const sysK = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
-    if (/- linker_logs: Cut a KIT OF LINKER LOGS/.test(sysK) && /LINKER LOGS \/ PLAY PLANKS/.test(sysK) && /KIT OF LOOSE PARTS with no assembled view/.test(sysK) && /ANGLE CONNECTORS are the kit's other part/.test(sysK) && /Its ANGLE CONNECTORS \(connectors \[\{angle, count\}\]/.test(sysK) && /TO BUILD A STRUCTURE instead of a loose kit, give "tiers"/.test(sysK) && /is the SAME op with tiers \[\{w, d, courses\}\]/.test(sysK) && /SEVERAL tiers may stand on the same one/.test(sysK) && /decline its ornament by name/.test(sysK)) pass('the model is told about linker_logs: catalog doc + the play-planks rule — a loose kit, connectors with V-bit labels, and structures as tiers (massing only; estimates named, ornament declined)');
+    if (/- linker_logs: Cut a KIT OF LINKER LOGS/.test(sysK) && /LINKER LOGS \/ PLAY PLANKS/.test(sysK) && /The SKYLINE is a tier's "top"/.test(sysK) && /Its SKYLINE is a tier's "top"/.test(sysK) && !/decline its ornament by name/.test(sysK) && /KIT OF LOOSE PARTS with no assembled view/.test(sysK) && /ANGLE CONNECTORS are the kit's other part/.test(sysK) && /Its ANGLE CONNECTORS \(connectors \[\{angle, count\}\]/.test(sysK) && /TO BUILD A STRUCTURE instead of a loose kit, give "tiers"/.test(sysK) && /is the SAME op with tiers \[\{w, d, courses\}\]/.test(sysK) && /SEVERAL tiers may stand on the same one/.test(sysK) && /a top on a tier another tier stands on is refused by name/.test(sysK)) pass('the model is told about linker_logs: catalog doc + the play-planks rule — a loose kit, connectors with V-bit labels, structures as tiers (massing only; estimates named) and the top vocabulary as the only ornament');
     else fail('linker_logs missing from the system prompt');
   }
 

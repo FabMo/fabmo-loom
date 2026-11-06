@@ -17,7 +17,7 @@
 import { generateProfile } from '../strategies/profile.js';
 import { composeJob } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
-import { plankRing, connectorRing, towerPlan, LINKER_LOG_ENTRIES, BILLS_SHEET, BILLS_CONNECTORS } from '../app/linkerlogs.mjs';
+import { plankRing, connectorRing, towerPlan, finialRing, topSilhouette, TOP_SHAPE_NAMES, LINKER_LOG_ENTRIES, BILLS_SHEET, BILLS_CONNECTORS } from '../app/linkerlogs.mjs';
 
 let passed = 0, failed = 0;
 const ok = (name, cond, detail) => {
@@ -568,6 +568,94 @@ const FULL = { W: 3.5, t: 0.5, depth: 0.87, pitch: 6, endMargin: 2.25 };
   ];
   const badR = refusals.filter(([, r, re]) => !(r.error && re.test(r.error))).map(([what, r]) => `${what}: ${r.error ?? 'NOT refused'}`);
   ok(`${refusals.length} structure refusals, each by name: a tier outside the one below (two ways), one course, no width, an offset base, a malformed list, too many planks, a plank longer than the sheet`, !badR.length, badR.join(' | '));
+}
+
+// ---------------- 7. decorative tops (the skyline) ----------------
+console.log('--- linker logs: tops ---');
+{
+  const L = 22.5, h = 9;
+  // every shape: a polyline from x = 0 to x = L, never below the plank, exactly h at its peak, x never running backwards
+  const shapes = TOP_SHAPE_NAMES.map(shape => ({ shape, sil: topSilhouette(shape, L, h, null, 0.25) }));
+  const badShape = shapes.filter(({ sil }) => sil.error || sil.pts[0].x !== 0 || sil.pts[sil.pts.length - 1].x !== L || sil.pts.some(q => q.y < -1e-12 || q.y > h + 1e-9)
+    || Math.abs(Math.max(...sil.pts.map(q => q.y)) - h) > 1e-9 || sil.pts.some((q, i) => i && q.x < sil.pts[i - 1].x - 1e-9));
+  ok(`${shapes.length} top shapes (${TOP_SHAPE_NAMES.join(', ')}) each run from x = 0 to x = ${L}, stay at or above the plank, peak at exactly ${h}" and never run backwards`, !badShape.length, badShape.map(b => `${b.shape}: ${b.sil.error ?? 'geometry'}`).join(' | '));
+  const sym = shapes.filter(({ sil }) => {
+    const at = (x) => { for (let i = 1; i < sil.pts.length; i++) { const a = sil.pts[i - 1], b = sil.pts[i]; if (x >= a.x - 1e-9 && x <= b.x + 1e-9) return b.x - a.x < 1e-12 ? Math.max(a.y, b.y) : a.y + ((b.y - a.y) * (x - a.x)) / (b.x - a.x); } return NaN; };
+    return [0.3, 1.4, 2.5 + 0.3, 4.1, 6.3, 8.4, 10.6].some(x => Math.abs(at(x) - at(L - x)) > 0.02);   // off the band edges
+  });
+  ok('every shape is symmetric about the plank\'s centre (sampled both sides)', !sym.length, sym.map(b => b.shape).join(', '));
+  const cren = topSilhouette('crenellation', L, 3, 5, 0.25), steps = topSilhouette('steps', L, 6, 3, 0.25), crown = topSilhouette('crown', L, h, 7, 0.25);
+  const unit = L / 9, merlons = cren.pts.filter((q, i) => i % 2 === 0 && q.y === 3).length;
+  ok(`a 5-merlon crenellation on ${L}" is 9 equal bands of ${unit.toFixed(3)}": 5 merlons up, 4 crenels down to the plank; 3 steps each side rise 1.5, 3, 4.5 to 6" at the centre; a 7-terrace crown peaks once, at the centre`,
+    merlons === 5 && cren.pts.every(q => q.y === 3 || q.y === 0) && Math.abs(cren.pts[1].x - unit) < 1e-9
+    && [...new Set(steps.pts.map(q => +q.y.toFixed(6)))].sort((a, b) => a - b).join() === '1.5,3,4.5,6'
+    && Math.abs(crown.pts.find(q => Math.abs(q.y - h) < 1e-9).x - L / 2) < 1e-6 && crown.count === 7, `merlons ${merlons} steps ${[...new Set(steps.pts.map(q => +q.y.toFixed(6)))]}`);
+  const refusals = [
+    ['an unknown shape', topSilhouette('minaret', L, h), /"minaret" is not a top shape — one of spire, dome, ogee, crown, crenellation, steps/],
+    ['no height', topSilhouette('spire', L, 0), /needs a height above 0/],
+    ['too many terraces', topSilhouette('crown', L, h, 12), /a crown top takes a count from 2 to 9/],
+    ['crenels narrower than the bit', topSilhouette('crenellation', 10.5, 2, 30, 0.25), /30 merlons on a 10.5" plank leave crenels 0.18" wide — too narrow for a 0.25" bit \(at most 18 merlons\)/],
+  ];
+  const badR = refusals.filter(([, r, re]) => !r.error || !re.test(r.error));
+  ok(`${refusals.length} silhouette refusals by name: an unknown shape, no height, too many terraces, crenels narrower than the bit`, !badR.length, badR.map(([n, r]) => `${n}: ${r.error}`).join(' | '));
+
+  // the decorative plank: a plank's bottom edge exactly, a silhouette on top, one simple CCW ring
+  const g = { notches: 4, width: 3.5, pitch: 6, endMargin: 2.25, slotW: 0.51, depth: 0.87, reliefR: 0.13, cornerR: 0.25 };
+  const plain = plankRing(g), fin = finialRing(g, { shape: 'ogee', height: h, count: null }, 0.25);
+  const low = (ring) => ring.filter(q => q.y <= g.depth + 1e-9).map(q => `${q.x.toFixed(6)},${q.y.toFixed(6)}`).join(' ');
+  const area2 = (ring) => ring.reduce((a, q, i) => { const n = ring[(i + 1) % ring.length]; return a + q.x * n.y - n.x * q.y; }, 0);
+  const crosses = (ring) => {
+    const segs = ring.map((q, i) => [q, ring[(i + 1) % ring.length]]);
+    const side = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    let n = 0;
+    for (let i = 0; i < segs.length; i++) for (let j = i + 2; j < segs.length; j++) {
+      if (i === 0 && j === segs.length - 1) continue;
+      const [a, b] = segs[i], [c, d] = segs[j];
+      if (side(a, b, c) * side(a, b, d) < -1e-18 && side(c, d, a) * side(c, d, b) < -1e-18) n++;
+    }
+    return n;
+  };
+  ok(`the ogee top plank keeps a plank's notched bottom edge point for point (${low(plain.ring).split(' ').length} points), rises to ${(3.5 + h)}", is counter-clockwise and never crosses itself (${fin.ring.length} points)`,
+    !fin.error && low(fin.ring) === low(plain.ring) && Math.abs(Math.max(...fin.ring.map(q => q.y)) - (3.5 + h)) < 1e-9 && area2(fin.ring) > 0 && crosses(fin.ring) === 0 && fin.length === plain.length,
+    fin.error ?? `area2 ${area2(fin.ring)} crosses ${crosses(fin.ring)}`);
+  const allRings = TOP_SHAPE_NAMES.map(shape => [shape, finialRing(g, { shape, height: 4, count: shape === 'crenellation' ? 7 : null }, 0.25)]).filter(([, r]) => r.error || crosses(r.ring) || area2(r.ring) <= 0);
+  ok('every top shape makes a simple counter-clockwise plank outline at 4" tall', !allRings.length, allRings.map(([s, r]) => `${s}: ${r.error ?? 'crossing/clockwise'}`).join(' | '));
+
+  // structures with tops: the same brute-force audit, the top planks the highest, nothing on them
+  const spired = runKit({ tiers: [{ w: 5, d: 3, courses: 6 }, { w: 3, d: 3, courses: 5 }, { w: 1, d: 1, courses: 8, top: { shape: 'spire', height: 12 } }] });
+  const sb = spired.error ? [] : worldBoxes(spired);
+  const topBoxes = sb.filter(b => /^C20-/.test(b.id));
+  ok(`a 3-tier tower with a 12" spire on top: 40 pieces (38 planks + 2 spire planks on course 20), the audit passes over ${sb.length} boxes, the spire planks are the highest (top at ${((19 * 1.76) + 3.5 + 12).toFixed(2)}") and nothing stands on them; height ${spired.assembly?.height}"`,
+    !spired.error && spired.pieces === 40 && !structureAudit(sb, FULL).length && topBoxes.length === 2 && topBoxes.every(b => Math.abs(b.max[1] - (19 * 1.76 + 3.5 + 12)) < 1e-6)
+    && Math.abs(spired.assembly.height - (19 * 1.76 + 15.5)) < 1e-6 && spired.assembly.courses === 20 && spired.kit.tops.length === 1 && spired.kit.tops[0].planks === 2 && spired.kit.tops[0].height === 12
+    && spired.kit.planks.reduce((n, k) => n + k.count, 0) === 38 && spired.assembly.tiers[2].top.shape === 'spire',
+    spired.error ?? `${structureAudit(sb, FULL).slice(0, 2).join(' | ')} pieces ${spired.pieces} height ${spired.assembly?.height}`);
+  const hall = runKit({ tiers: [{ w: 7, d: 3, courses: 6 }, { w: 1, d: 1, courses: 8, on: 0, x: 0, y: 1, top: { shape: 'dome', height: 3 } }, { w: 1, d: 1, courses: 12, on: 0, x: 3, y: 1, top: { shape: 'crown', height: 8, count: 5 } }, { w: 1, d: 1, courses: 8, on: 0, x: 6, y: 1, top: { shape: 'crenellation', height: 2, count: 3 } }] });
+  const hb = hall.error ? [] : worldBoxes(hall);
+  ok(`a hall with three spires, each with its own top (dome, crown, crenellation): the audit passes over ${hb.length} boxes, three tops reported in tier order, height by the crowned middle spire`,
+    !hall.error && !structureAudit(hb, FULL).length && hall.kit.tops.map(tp => `${tp.tier}:${tp.shape}`).join() === '1:dome,2:crown,3:crenellation' && hall.assembly.courses === 6 + 12 + 1
+    && Math.abs(hall.assembly.height - ((6 + 12) * 1.76 + 3.5 + 8)) < 1e-6, hall.error ?? structureAudit(hb, FULL).slice(0, 2).join(' | '));
+  // SABOTAGE: a top plank slid off its notches or lifted is caught like any plank
+  const slid = sb.map(b => (b.id === 'C20-1' ? { ...b, min: [b.min[0] + 0.3, b.min[1], b.min[2]], max: [b.max[0] + 0.3, b.max[1], b.max[2]] } : b));
+  const lifted = sb.map(b => (b.id === 'C20-1' ? { ...b, min: [b.min[0], b.min[1] + 1, b.min[2]], max: [b.max[0], b.max[1] + 1, b.max[2]] } : b));
+  ok('SABOTAGE: the audit rejects a spire plank slid 0.3" off its notches and one lifted 1"', structureAudit(slid, FULL).length > 0 && structureAudit(lifted, FULL).length > 0, `${structureAudit(slid, FULL)[0]} // ${structureAudit(lifted, FULL)[0]}`);
+  // the top planks are cut like every other piece: a profile op each, posed panel each
+  ok('the spire planks are cut as their own outside profiles and posed as panels in the assembled view', spired.ops.filter(o => /^plank C20-/.test(o.subName)).length === 2 && spired.assembly.panels.filter(p => /^C20-/.test(p.id)).length === 2
+    && spired.assembly.panels.filter(p => /^C20-/.test(p.id)).every(p => Math.max(...p.rings[0].map(q => q.y)) > 15 || Math.max(...p.rings[0].map(q => q.x)) > 15));
+  // refusals
+  const tr = [
+    ['a top under another tier', runKit({ tiers: [{ w: 3, d: 3, courses: 4, top: { shape: 'dome', height: 4 } }, { w: 1, d: 1, courses: 4 }] }), /tiers\[0\] carries a dome top but tiers\[1\] stands on it — a top goes only on a tier nothing stands on/],
+    ['an unknown shape', runKit({ tiers: [{ w: 3, d: 3, courses: 4, top: 'minaret' }] }), /tiers\[0\]\.top\.shape "minaret" is not a top shape — one of spire, dome, ogee, crown, crenellation, steps/],
+    ['a top taller than the sheet', runKit({ tiers: [{ w: 3, d: 3, courses: 4, top: { shape: 'spire', height: 46 } }] }), /the spire top on tiers\[0\] is 49\.5" tall \(a 3\.5" plank plus 46\.0" of ornament\) and the 96" × 48" sheet takes at most 47\.0" across — a lower top \(at most 43\.5"\)/],
+    ['crenels too narrow', runKit({ tiers: [{ w: 1, d: 1, courses: 4, top: { shape: 'crenellation', height: 2, count: 30 } }] }), /tiers\[0\]\.top: 30 merlons on a 10\.5" plank leave crenels 0\.18" wide/],
+    ['a top with no height', runKit({ tiers: [{ w: 3, d: 3, courses: 4, top: { shape: 'dome', height: 0 } }] }), /tiers\[0\]\.top\.height is 0/],
+    ['a malformed top', runKit({ tiers: [{ w: 3, d: 3, courses: 4, top: 7 }] }), /tiers\[0\]\.top needs \{"shape", "height"\}/],
+  ];
+  const badTR = tr.filter(([, r, re]) => !r.error || !re.test(r.error));
+  ok(`${tr.length} top refusals, each by name: under another tier, an unknown shape, taller than the sheet, crenels too narrow, no height, malformed`, !badTR.length, badTR.map(([n, r]) => `${n}: ${r.error}`).join(' | '));
+  const fragile = runKit({ tiers: [{ w: 1, d: 1, courses: 4, top: { shape: 'spire', height: 30 } }] });
+  ok('a 30" spire on a 10.5" plank builds but is warned as fragile; the height defaults to one plank width', !fragile.error && fragile.warnings.some(w => /spire top on tiers\[0\] rises 30\.0" above a 10\.5" plank — a thin, fragile piece/.test(w))
+    && runKit({ tiers: [{ w: 1, d: 1, courses: 4, top: { shape: 'dome' } }] }).kit.tops[0].height === 3.5, fragile.error ?? fragile.warnings.join(' | '));
 }
 
 console.log(failed === 0 ? `\nALL ${passed} LINKER LOGS CHECKS PASSED` : `\n${failed} LINKER LOGS CHECK(S) FAILED (${passed} passed)`);

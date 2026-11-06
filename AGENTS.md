@@ -212,12 +212,24 @@ a clear cell apart, and siblings whose walls share a line share the beam. It the
 assembly (`kind: 'linker_tower'` — tiers, courses, height, footprint, a
 posed panel per plank), which the observation reports as the tower line;
 the gauntlet audits the poses by brute force (every contact is two notches
-meeting, every plank is carried at two, nothing else touches). Without
-tiers a kit is
+meeting, every plank is carried at two, nothing else touches). A tier
+nothing stands on may carry a TOP (`top: {shape, height, count?}`): one
+more course of two DECORATIVE planks, notched underneath exactly like a
+plank (so the same audit covers them) and cut to a silhouette on top —
+`TOP_SHAPES` is the whole vocabulary (spire, dome, ogee, crown =
+terraced arches, crenellation, steps), `topSilhouette` draws it from
+numbers and `finialRing` puts it on a plank body. That is the only
+ornament: chosen and sized, never traced, so the likeness rule stands.
+A top under another tier, a shape not in the list, a top taller than the
+sheet is wide, and crenels narrower than the bit are refused by name; a
+top more than twice its plank's length is warned as fragile. The
+observation's tower line names each top and the kit line counts its
+planks. Without tiers a kit is
 what is cut, not what it becomes: the prompt rule has the model decline
-any structure that is not stacked rectangles, and a named building's
-ornament always (only the stepped massing is built; proportions not taken
-from a picture or the user's numbers are named as estimates).
+any structure that is not stacked rectangles, and everything a named
+building wears beyond its top (windows, statues, a needle, arches in the
+walls) always (the stepped massing plus its top is built; proportions not
+taken from a picture or the user's numbers are named as estimates).
 
 ### The picture of the cut (likeness from a photo)
 
