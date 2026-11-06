@@ -456,6 +456,24 @@ console.log('--- picture of the cut (v0.110): likeness from a photo ---');
   calls = 0; seen = null;
   await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out a cow', call: async (r) => { calls++; if (r.messages.length > 1) seen = r.messages[2].content[0]; return mk(calls === 1 ? build : { summary: 'ok', claims: { pieces: 1 }, actions: [], declined: [] }); }, weave: async (r) => run(r) });
   if (typeof seen?.content === 'string' && !/PICTURE OF THE CUT/.test(seen.content)) pass('no picture attached → tool_result stays plain text (no snapshot)'); else fail('snapshot leaked into a text-only turn');
+
+  // the first draft, handed to the page early: the woven first turn, with
+  // its verdict and the model's first summary — before the second look
+  calls = 0; const drafts = [];
+  const loopOut = await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out a cow', onDraft: (d) => { drafts.push(d); }, call: async () => { calls++; return mk(calls === 1 ? build : { summary: 'Looked: fine.', claims: { pieces: 1 }, actions: [], declined: [] }); }, weave: async (r) => run(r) });
+  const d0 = drafts[0];
+  if (drafts.length === 1 && d0.turn === 0 && d0.recipe.pipeline.length === 2 && d0.summary === build.summary && d0.ok === true && d0.result?.ok)
+    pass(`onDraft fired once after the first weave (turn ${d0.turn}, ${d0.recipe.pipeline.length} ops, verified, first summary) and the loop still finished with its final summary "${loopOut.summary.slice(0, 20)}…"`);
+  else fail(`onDraft: ${JSON.stringify(drafts.map(d => ({ turn: d.turn, ops: d.recipe?.pipeline?.length, ok: d.ok, summary: d.summary?.slice(0, 30) })))}`);
+  // a renderer that throws or rejects must not touch the loop
+  calls = 0;
+  let threw = null;
+  try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out a cow', onDraft: () => { throw new Error('page broke'); }, call: async () => { calls++; return mk(calls === 1 ? build : { summary: 'ok', actions: [], declined: [] }); }, weave: async (r) => run(r) }); }
+  catch (e) { threw = e; }
+  calls = 0;
+  try { await runIntentLoop({ recipe: structuredClone(EMPTY_RECIPE), utterance: 'cut out a cow', onDraft: async () => { throw new Error('page broke later'); }, call: async () => { calls++; return mk(calls === 1 ? build : { summary: 'ok', actions: [], declined: [] }); }, weave: async (r) => run(r) }); }
+  catch (e) { threw = threw ?? e; }
+  if (!threw) pass('a throwing or rejecting onDraft is swallowed — the loop completes'); else fail(`onDraft broke the loop: ${threw.message}`);
 }
 
 console.log('--- claims channel: in the loop ---');
@@ -4720,6 +4738,124 @@ console.log('--- piece scopes: several separate pieces in one job (multi-part-se
     const obsC = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: chair(CLUB) }, rc, chair(CLUB)));
     if (/assembled preview: 5 side ribs across 28" with 22 slats notched into each, 36(\.\d+)?" tall × 30" deep/.test(obsC)) pass('observation: "5 side ribs across 28\" with 22 slats notched into each, 36\" tall × 30\" deep"');
     else fail(`rib_chair observation: ${obsC.split('\n').find(l => /WEAVE/.test(l))}`);
+  }
+
+  // ---- linker_logs: a kit of notched play planks (Bill Young's Linker Logs; geometry + sabotage gauntlet in test/linker-logs-test.mjs) ----
+  console.log('--- linker_logs ---');
+  {
+    const kit = (params = {}, extra = {}) => ({ ...structuredClone(EMPTY_RECIPE), name: 'kit', stock: { thickness: 0.5 }, pipeline: [{ id: 'kit', strategy: 'linker_logs', params }], ...extra });
+    const full = run(kit());
+    const fk = full.preview?.kits?.[0];
+    if (full.ok && full.pieces === 50 && fk?.sheets === 1 && full.preview.built.length === 50 && full.preview.stock.w <= 96 && full.preview.stock.h <= 48
+      && full.report.stats.targets.length === 50 && full.report.stats.targets.every(t => !t.intrusionArea) && !(full.preview.assemblies ?? []).length) {
+      pass(`linker_logs default kit: Bill's 50 planks (${fk.planks.map(k => `${k.count} × ${k.length}"`).join(', ')}) on one ${full.preview.stock.w}" × ${full.preview.stock.h}" board, 50 profile targets clean, VERIFIED, no assembly published (a kit of loose parts)`);
+      if (ingredientLines(full.ingredients).some(l => /^1 sheet 1\/2" 96 × 48 \(Linker Logs kit, \d+% used\)$/.test(l))) pass(`linker_logs ingredients: "${ingredientLines(full.ingredients)[0]}"`);
+      else fail(`linker_logs ingredients: ${ingredientLines(full.ingredients).join(' | ')}`);
+      const cc = checkClaims({ pieces: 50, parts: [{ name: 'planks', opId: 'kit' }] }, kit(), 'A set of 50 planks.', [], 50);
+      const under = checkClaims({ pieces: 5 }, kit(), 'Five planks.', [], 50);
+      if (!cc.issues.length && under.issues.some(i => i.code === 'pieces')) pass('claims: pieces 50 and a part on the kit op are accepted (the verb counts its planks); pieces 5 against a 50-plank weave is refused');
+      else fail(`linker_logs claims: ${cc.issues.map(i => i.message).join(' | ')} // under: ${under.issues.map(i => i.code).join(',')}`);
+      const obsK = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: kit() }, full, kit()));
+      if (/kit of loose planks \(no assembled view\): 50 planks — 6 × 46\.5" \(8 notches per edge\), 6 × 34\.5" \(6 notches per edge\), 8 × 22\.5" \(4 notches per edge\), 14 × 10\.5" \(2 notches per edge\), 16 × 4\.5" \(1 notch per edge\)/.test(obsK)
+        && /notches 0\.51" wide × 0\.87" deep every 6", cut with a 0\.25" endmill \(sized to the planks\) that leaves 0\.61" of each notch wall straight above its relief \(70%\); crossed planks rise 1\.76" per course; 1 sheet of 96" × 48"/.test(obsK) && /50 separate pieces freed/.test(obsK)) pass('observation: the kit line lists every plank length, the notch, the bit sized to the planks and the wall it leaves, the course rise and the sheet count');
+      else fail(`linker_logs observation: ${obsK.split('\n').find(l => /WEAVE/.test(l))}`);
+      // the bit follows the plank through the whole pipeline: a half-size
+      // kit with no bit named weaves with a 1/8" endmill and verifies
+      const halfKit = { ...kit(), stock: { thickness: 0.25 }, pipeline: [{ id: 'kit', strategy: 'linker_logs', params: { plankWidth: 1.75, pitch: 3, endMargin: 1.125, planks: [{ notches: 4, count: 4 }, { notches: 2, count: 4 }] } }] };
+      const halfRun = quiet(() => runRecipe(halfKit, controlDefaults(halfKit), {}, {}, {}));
+      const halfObs = halfRun.ok ? observationText(buildObservation({ applied: ['x'], skipped: [], recipe: halfKit }, halfRun, halfKit)) : '';
+      if (halfRun.ok && halfRun.preview.kits[0].toolDiameter === 0.125 && /cut with a 0\.125" endmill \(sized to the planks\) that leaves 0\.297" of each notch wall straight above its relief \(69%\)/.test(halfObs)) pass('linker_logs at half scale, no bit named: a 1/8" endmill, 0.297" of each 0.4325" notch wall left straight (69%), VERIFIED — and the model is told which bit');
+      else fail(`linker_logs half scale: ${halfRun.errors?.[0] ?? halfObs.split('\n').find(l => /WEAVE/.test(l))}`);
+      const fat = { ...halfKit, pipeline: [{ id: 'kit', strategy: 'linker_logs', params: { ...halfKit.pipeline[0].params, toolDiameter: 0.25 } }] };
+      const fatRun = quiet(() => runRecipe(fat, controlDefaults(fat), {}, {}, {}));
+      if (!fatRun.ok && /leaves only 0\.172" of straight wall \(40%\).*a 1\/8" endmill leaves 0\.297"/.test(fatRun.errors.join(' '))) pass('linker_logs at half scale with a 1/4" bit named: refused through the pipeline with the wall it would leave and the bit that fits');
+      else fail(`linker_logs fat bit: ok=${fatRun.ok} ${fatRun.errors?.[0]}`);
+    } else fail(`linker_logs default: ok=${full.ok} pieces=${full.pieces} built=${full.preview?.built?.length} board=${full.preview?.stock?.w}×${full.preview?.stock?.h} ${full.errors?.slice(0, 2).join(' | ')}`);
+    // counts as arithmetic over a control, sets bound to another: the sliders drive the kit
+    const bound = kit({ planks: [{ notches: 4, count: 'n' }, { notches: 2, count: 'n + 1' }, { notches: 1, count: 2 }], sets: { ctrl: 'sets' } },
+      { controls: [{ id: 'n', type: 'number', label: 'Long planks', default: 2, min: 0, max: 12, step: 1 }, { id: 'sets', type: 'number', label: 'Sets', default: 1, min: 1, max: 4, step: 1 }] });
+    const b1 = run(bound), b2 = run(bound, { n: 3, sets: 2 });
+    if (b1.ok && b1.pieces === 7 && b2.ok && b2.pieces === 18 && b2.preview.kits[0].planks.map(k => k.count).join() === '6,8,4') pass('linker_logs bound to controls: n = 2 → 7 planks; n = 3, sets = 2 → 18 (6 × 4-notch, 8 × 2-notch, 4 × 1-notch), both VERIFIED');
+    else fail(`linker_logs bound: ${b1.ok}/${b1.pieces} ${b2.ok}/${b2.pieces} ${b1.errors?.[0] ?? ''} ${b2.errors?.[0] ?? ''}`);
+    // thicker plywood: the notch follows it
+    const k34 = run({ ...kit({ planks: [{ notches: 2, count: 2 }] }), stock: { thickness: 0.75 } });
+    if (k34.ok && k34.preview.kits[0].slotWidth === 0.76 && k34.preview.stock.thickness === 0.75) pass('linker_logs on 3/4" stock: notches 0.76" wide, VERIFIED');
+    else fail(`linker_logs 3/4: ok=${k34.ok} slot=${k34.preview?.kits?.[0]?.slotWidth} ${k34.errors?.[0]}`);
+    // a small machine: the kit splits into sheets, setup picks one, the count stays the whole kit
+    const shopK = { machineW: 48, machineH: 48 };
+    const s1 = quiet(() => runRecipe(kit(), controlDefaults(kit()), FONT_SHELF, TERRAIN_FIXTURE, shopK));
+    const s2 = quiet(() => runRecipe(kit({ setup: 2 }), controlDefaults(kit()), FONT_SHELF, TERRAIN_FIXTURE, shopK));
+    const su = s1.preview?.setups?.[0];
+    if (s1.ok && s2.ok && s1.pieces === 50 && su?.count === 2 && s1.preview.built.length + s2.preview.built.length === 50 && s1.preview.stock.w <= 48 && s1.preview.stock.h <= 48
+      && s1.warnings.some(w => /50 planks need 2 sheets of 48" × 48"/.test(w) && /bind setup to a control/.test(w)) && ingredientLines(s1.ingredients)[0].startsWith('2 sheets 1/2" 48 × 48')) pass(`linker_logs under a 48" × 48" machine: 2 sheets (${su.groups.map(g => g.length).join(' + ')} planks), each within the machine, both VERIFIED, pieces still 50`);
+    else fail(`linker_logs sheets: ${s1.ok}/${s2.ok} pieces=${s1.pieces} setups=${JSON.stringify(su?.groups?.map(g => g.length))} board=${s1.preview?.stock?.w}×${s1.preview?.stock?.h} ${s1.errors?.[0] ?? ''}`);
+    const tooBig = quiet(() => runRecipe(kit(), controlDefaults(kit()), FONT_SHELF, TERRAIN_FIXTURE, { machineW: 30, machineH: 30 }));
+    const wideBit = run(kit({ toolDiameter: 0.75 }));
+    if (!tooBig.ok && /8-notch plank is 46\.5" long and the 30" × 30" sheet takes at most/.test(tooBig.errors[0]) && !wideBit.ok && /endmill is wider than the 0\.510" notch/.test(wideBit.errors[0])) pass('linker_logs refusals through the runtime: a plank longer than the machine and a bit wider than the notch, each by name');
+    else fail(`linker_logs refusals: ${tooBig.errors?.[0]} | ${wideBit.errors?.[0]}`);
+    // angle connectors: ring segments with a notch in each straight edge, their angle scored first with a V-bit
+    const CONN = [{ angle: 15, count: 2 }, { angle: 30, count: 2 }, { angle: 45, count: 2 }];
+    const mixed = kit({ planks: [{ notches: 2, count: 2 }], connectors: CONN });
+    const mx = run(mixed);
+    const mk = mx.preview?.kits?.[0];
+    if (mx.ok && mx.pieces === 8 && mx.preview.built.length === 9 && mx.preview.built[0].r.subName === 'angle labels' && mx.preview.built[0].r.tool.name === '60° V-bit'
+      && mx.preview.built.slice(1).every(b => b.r.tool.name === '1/4" endmill') && mx.report.stats.targets.length === 9 && mx.report.stats.targets.every(t => !t.intrusionArea && !t.depthViolations)
+      && mk.connectors.length === 3 && mk.labels === '60° V-bit') {
+      pass('linker_logs with connectors: 2 planks + 6 connectors (15°, 30°, 45°) = 8 pieces; the angle labels are scored first with a 60° V-bit, then 8 profiles with the 1/4" endmill; 9 targets clean, VERIFIED');
+      const obsM = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: mixed }, mx, mixed));
+      if (/kit of loose parts \(no assembled view\): 8 pieces — 2 planks: 2 × 10\.5" \(2 notches per edge\); 6 angle connectors: 2 × 15°, 2 × 30°, 2 × 45°, each scored with its angle \(60° V-bit — a tool change before the cut\)/.test(obsM) && /8 separate pieces freed/.test(obsM)) pass('observation: planks and connectors are counted apart, and the V-bit label pass is named as a tool change');
+      else fail(`linker_logs connector observation: ${obsM.split('\n').find(l => /WEAVE/.test(l))}`);
+      const ccM = checkClaims({ pieces: 8 }, mixed, 'Two planks and six connectors.', [], 8);
+      if (!ccM.issues.length) pass('claims: pieces 8 (planks + connectors) is accepted');
+      else fail(`linker_logs connector claims: ${ccM.issues.map(i => i.message).join(' | ')}`);
+    } else fail(`linker_logs connectors: ok=${mx.ok} pieces=${mx.pieces} built=${mx.preview?.built?.length} first=${mx.preview?.built?.[0]?.r?.subName} ${mx.errors?.slice(0, 2).join(' | ')}`);
+    const oneTool = run(kit({ planks: [], connectors: CONN, labelToolDiameter: 0.25 }));
+    const noLabel = run(kit({ planks: [], connectors: CONN, labels: false }));
+    if (oneTool.ok && new Set(oneTool.preview.built.map(b => b.r.tool.name)).size === 1 && oneTool.preview.kits[0].labels === '1/4" endmill' && oneTool.pieces === 6
+      && noLabel.ok && noLabel.preview.built.length === 6 && noLabel.preview.kits[0].labels === null) pass('linker_logs connectors alone (planks []): labels with the cutting bit → one tool; labels false → six profiles and no label pass; both VERIFIED');
+    else fail(`linker_logs label options: ${oneTool.ok}/${noLabel.ok} tools=${[...new Set(oneTool.preview?.built?.map(b => b.r.tool.name) ?? [])].join(',')} ${oneTool.errors?.[0] ?? ''} ${noLabel.errors?.[0] ?? ''}`);
+    const BILL_CONN = [{ angle: 15, count: 12 }, { angle: 30, count: 12 }, { angle: 45, count: 12 }];
+    const quarter = quiet(() => runRecipe(kit({ planks: [], connectors: BILL_CONN }), controlDefaults(kit()), FONT_SHELF, TERRAIN_FIXTURE, { materialW: 48, materialH: 24 }));
+    const fullSheet = run(kit({ planks: [], connectors: BILL_CONN }));
+    if (quarter.ok && quarter.pieces === 36 && quarter.preview.setups?.[0]?.count === 2 && quarter.preview.stock.w <= 48 && quarter.preview.stock.h <= 24
+      && fullSheet.ok && fullSheet.pieces === 36 && !fullSheet.preview.setups?.length && fullSheet.preview.built.length === 37) pass(`linker_logs, Bill's 36 connectors: one strip of a 4×8 (${fullSheet.preview.stock.w}" × ${fullSheet.preview.stock.h}"), or 2 sheets of 2×4 material (${quarter.preview.setups[0].groups.map(g => g.length).join(' + ')}) — both VERIFIED`);
+    else fail(`linker_logs connector sheets: ${quarter.ok}/${fullSheet.ok} pieces=${quarter.pieces}/${fullSheet.pieces} setups=${quarter.preview?.setups?.[0]?.count} ${quarter.errors?.[0] ?? ''} ${fullSheet.errors?.[0] ?? ''}`);
+    const sharp = run(kit({ planks: [], connectors: [{ angle: 75, count: 1 }] }));
+    if (!sharp.ok && /a 75° connector is too sharp: its inner edge would close up/.test(sharp.errors[0])) pass('linker_logs: a 75° connector is refused by name (its inner edge closes up)');
+    else fail(`linker_logs sharp connector: ok=${sharp.ok} ${sharp.errors?.[0]}`);
+    // a structure: stacked tiers → exactly its planks, posed in the assembled view (structural audit in test/linker-logs-test.mjs)
+    const tower = kit({ tiers: [{ w: 3, d: 3, courses: 4 }, { w: 1, d: 1, courses: 'top' }] },
+      { controls: [{ id: 'top', type: 'number', label: 'Top courses', default: 4, min: 2, max: 30, step: 1 }] });
+    const tw = run(tower), tw2 = run(tower, { top: 9 });
+    const ta = tw.preview?.assemblies?.find(a => a.kind === 'linker_tower'), ta2 = tw2.preview?.assemblies?.find(a => a.kind === 'linker_tower');
+    if (tw.ok && tw.pieces === 16 && ta?.panels.length === 16 && ta.courses === 8 && Math.abs(ta.height - 15.82) < 1e-6 && ta.footprint.join() === '22.5,22.5' && ta.box.join() === `22.5,${ta.height},22.5`
+      && tw.report.stats.targets.every(t => !t.intrusionArea) && tw2.ok && tw2.pieces === 26 && ta2.courses === 13 && Math.abs(ta2.height - 24.62) < 1e-6) {
+      pass(`linker_logs tiers: a 3 × 3 base with a 1 × 1 top is 16 planks, 8 courses, ${ta.height}" tall on 22.5" × 22.5", published as a linker_tower assembly, VERIFIED; the top bound to a slider — 9 courses → 26 planks, ${ta2.height}" tall`);
+      const obsT = observationText(buildObservation({ applied: ['x'], skipped: [], recipe: tower }, tw, tower));
+      if (/assembled preview: a Linker Logs structure of 2 tiers \(3 × 3 cells × 4 courses, then 1 × 1 cells × 4 courses\) — 8 courses at its tallest, 15\.82" tall on a 22\.5" × 22\.5" footprint, built from 16 planks \(solid walls, cross-lapped corners, open top; no ornament\)/.test(obsT)
+        && /parts list: 16 planks — 10 × 22\.5" \(4 notches per edge\), 6 × 10\.5" \(2 notches per edge\)/.test(obsT) && !/no assembled view/.test(obsT)) pass('observation: the tower line gives tiers, courses, height, footprint and plank count; the kit line becomes its parts list');
+      else fail(`linker_logs tower observation: ${obsT.split('\n').find(l => /WEAVE/.test(l))}`);
+      const ccT = checkClaims({ pieces: 16, parts: [{ name: 'tower', opId: 'kit' }] }, tower, 'A two-tier tower.', [], 16);
+      if (!ccT.issues.length) pass('claims: 16 pieces and the tower as a part of the kit op are accepted');
+      else fail(`linker_logs tower claims: ${ccT.issues.map(i => i.message).join(' | ')}`);
+    } else fail(`linker_logs tiers: ok=${tw.ok}/${tw2.ok} pieces=${tw.pieces}/${tw2.pieces} courses=${ta?.courses}/${ta2?.courses} height=${ta?.height}/${ta2?.height} ${tw.errors?.[0] ?? ''}`);
+    // several tiers on one: a hall with a spire at each end
+    const hallR = kit({ tiers: [{ w: 5, d: 3, courses: 4 }, { w: 1, d: 1, courses: 4, on: 0, x: 0, y: 1 }, { w: 1, d: 1, courses: 6, on: 0, x: 4, y: 1 }] });
+    const hl = run(hallR);
+    const ha = hl.preview?.assemblies?.find(a => a.kind === 'linker_tower');
+    const obsH = hl.ok ? observationText(buildObservation({ applied: ['x'], skipped: [], recipe: hallR }, hl, hallR)) : '';
+    if (hl.ok && hl.pieces === 8 + 2 + 6 + 10 && ha.courses === 10 && ha.tiers.map(t => t.on).join() === '-1,0,0' && ha.panels.length === 26
+      && /tier 1 \(base\): 5 × 3 cells × 4 courses; tier 2 on tier 1 at x 0, y 1: 1 × 1 cells × 4 courses; tier 3 on tier 1 at x 4, y 1: 1 × 1 cells × 6 courses\) — 10 courses at its tallest/.test(obsH)) pass('linker_logs tiers, two spires on a hall: 26 planks (the spires share one pair of long beams), 10 courses at the taller spire, VERIFIED; the observation says which tier each stands on and where');
+    else fail(`linker_logs multi-tower: ok=${hl.ok} pieces=${hl.pieces} courses=${ha?.courses} ${hl.errors?.[0] ?? ''} // ${obsH.split('\n').find(l => /WEAVE/.test(l))?.slice(0, 300)}`);
+    const touching = run(kit({ tiers: [{ w: 4, d: 2, courses: 4 }, { w: 2, d: 2, courses: 4, on: 0, x: 0, y: 0 }, { w: 2, d: 2, courses: 4, on: 0, x: 2, y: 0 }] }));
+    if (!touching.ok && /both stand on tiers\[0\] and touch or overlap — leave at least one clear cell/.test(touching.errors[0])) pass('linker_logs tiers: two tiers on the same one that touch are refused by name (a clear cell between them)');
+    else fail(`linker_logs sibling refusal: ok=${touching.ok} ${touching.errors?.[0]}`);
+    const offTier = run(kit({ tiers: [{ w: 2, d: 2, courses: 4 }, { w: 3, d: 1, courses: 4 }] }));
+    if (!offTier.ok && /tiers\[1\] \(3 × 1 cells at x -1, y 0\) reaches outside tiers\[0\]/.test(offTier.errors[0])) pass('linker_logs tiers: a tier that overhangs the one below is refused by name');
+    else fail(`linker_logs tier refusal: ok=${offTier.ok} ${offTier.errors?.[0]}`);
+    const sysK = buildParseRequest(structuredClone(EMPTY_RECIPE), 'x').system;
+    if (/- linker_logs: Cut a KIT OF LINKER LOGS/.test(sysK) && /LINKER LOGS \/ PLAY PLANKS/.test(sysK) && /KIT OF LOOSE PARTS with no assembled view/.test(sysK) && /ANGLE CONNECTORS are the kit's other part/.test(sysK) && /Its ANGLE CONNECTORS \(connectors \[\{angle, count\}\]/.test(sysK) && /TO BUILD A STRUCTURE instead of a loose kit, give "tiers"/.test(sysK) && /is the SAME op with tiers \[\{w, d, courses\}\]/.test(sysK) && /SEVERAL tiers may stand on the same one/.test(sysK) && /decline its ornament by name/.test(sysK)) pass('the model is told about linker_logs: catalog doc + the play-planks rule — a loose kit, connectors with V-bit labels, and structures as tiers (massing only; estimates named, ornament declined)');
+    else fail('linker_logs missing from the system prompt');
   }
 
   // ---- a picture's proportion reaches the second look (2026-10-24: the same photo of a portrait sign wove portrait/3 lines, then landscape/2 lines) ----

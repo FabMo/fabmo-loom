@@ -11,9 +11,14 @@
 //
 // workerData: { appDir, key, job: { recipe, utterance, model, image, exemplars,
 // values, shop }, canned? } — `canned` is a list of model responses for tests
-// (no network, no key). Messages out: { kind: 'stage', stage } as the turn
-// progresses, then exactly one of { kind: 'done', result } / { kind: 'failed',
-// error, intent }.
+// (no network, no key). Messages out, as the turn progresses:
+//   { kind: 'stage', stage }  — which step is running (a fixed set of labels)
+//   { kind: 'note', note }    — the model's own progress line while it thinks
+//                               (summarized reasoning, streamed; Claude 5 only)
+//   { kind: 'draft', draft }  — the FIRST woven state (recipe + first summary +
+//                               verdict): the phone shows it while the second
+//                               look runs, as a draft, export shut
+// then exactly one of { kind: 'done', result } / { kind: 'failed', error, intent }.
 
 import { parentPort, workerData } from 'node:worker_threads';
 import fs from 'node:fs';
@@ -24,6 +29,27 @@ const CONTRIBUTORS = '/var/opt/apps/contributors/';
 
 const { appDir, key, job, canned = null } = workerData;
 const post = (m) => parentPort.postMessage(m);
+
+// The latest complete sentence of the summarized reasoning so far, as one
+// short line, posted at most ~once a second and only when it changed. The
+// phone shows it in place of "thinking…" — "Choosing a tenoned-panel box
+// with a face frame for the drawers." — for the 20–40 s before any action
+// arrives (hidden reasoning is most of a turn's wait, measured 2026-11-01).
+const NOTE_MAX = 140, NOTE_EVERY_MS = 1000;
+let lastNote = '', lastNoteAt = 0;
+function postNote(snapshot) {
+  const text = String(snapshot ?? '').replace(/\s+/g, ' ').trim();
+  // sentences end at . ! ? followed by a space — never inside 0.25" or 1.5"
+  const parts = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  let note = parts[parts.length - 1]?.trim() ?? '';
+  if (!/[.!?]$/.test(note)) note = parts[parts.length - 2]?.trim() ?? '';   // the last one is still being written
+  if (!note) return;
+  if (note.length > NOTE_MAX) note = note.slice(0, NOTE_MAX - 1).replace(/\s+\S*$/, '') + '…';
+  const now = Date.now();
+  if (note === lastNote || now - lastNoteAt < NOTE_EVERY_MS) return;
+  lastNote = note; lastNoteAt = now;
+  post({ kind: 'note', note });
+}
 let intentErrorClass = null;   // Loom's IntentError, once the app is loaded
 
 // the deployment's guests (app/guests.local.mjs holds same-origin URLs the
@@ -76,7 +102,7 @@ function slim(out) {
 }
 
 try {
-  const { runIntentLoop, isKnownModel, DEFAULT_MODEL, IntentError } = await import(`${appDir}intent.mjs`);
+  const { runIntentLoop, isKnownModel, DEFAULT_MODEL, IntentError, FORCED_TOOL_CHOICE_UNSUPPORTED } = await import(`${appDir}intent.mjs`);
   intentErrorClass = IntentError;
   const { runRecipe, controlDefaults } = await import(`${appDir}runtime.mjs`);
   const { registerCatalogEntries } = await import(`${appDir}catalog.mjs`);
@@ -88,6 +114,7 @@ try {
     fonts[f.id] = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
   }
 
+  const model = isKnownModel(job.model) ? job.model : DEFAULT_MODEL;
   let call;
   if (canned) {
     const queue = [...canned];
@@ -100,10 +127,19 @@ try {
   } else {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: key });
-    call = (req) => client.messages.create(
-      { ...req, stream: false, max_tokens: Math.min(req.max_tokens ?? 2000, MAX_TOKENS) },
-      { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) },
-    );
+    // The Claude 5 models always think; asking for the SUMMARIZED display
+    // streams readable progress notes while they reason (billed the same,
+    // the blocks ride back into the next call unchanged as before). Older
+    // models keep their request shape — adaptive thinking would switch
+    // reasoning ON for them. Streaming also keeps the socket alive through
+    // a long first call instead of waiting on one buffered response.
+    const notes = FORCED_TOOL_CHOICE_UNSUPPORTED.test(model);
+    call = async (req) => {
+      const params = { ...req, max_tokens: Math.min(req.max_tokens ?? 2000, MAX_TOKENS), ...(notes ? { thinking: { type: 'adaptive', display: 'summarized' } } : {}) };
+      const stream = client.messages.stream(params, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+      if (notes) stream.on('thinking', (_delta, snapshot) => postNote(snapshot));
+      return stream.finalMessage();
+    };
   }
 
   let calls = 0;
@@ -112,11 +148,13 @@ try {
     recipe: job.recipe,
     utterance: job.utterance,
     shop: {},
-    model: isKnownModel(job.model) ? job.model : DEFAULT_MODEL,
+    model,
     image: job.image ?? null,
     exemplars: job.exemplars ?? null,
     client: job.client ?? null,
     call: (req) => { if (calls++ > 0) post({ kind: 'stage', stage: calls === 2 ? 'checking the weave…' : 'checking again…' }); return call(req); },
+    // the first woven state, shown on the phone while the second look runs
+    onDraft: (d) => post({ kind: 'draft', draft: { turn: d.turn, recipe: d.recipe, summary: d.summary, declined: d.declined, ok: d.ok, errors: (d.result?.errors ?? []).slice(0, 3) } }),
     weave: async (rec) => {
       post({ kind: 'stage', stage: 'weaving…' });
       if (rec.terrains?.length) return { ok: false, errors: ['terrain references are not available on the phone version — use the full app'], warnings: [], preview: { empty: true } };

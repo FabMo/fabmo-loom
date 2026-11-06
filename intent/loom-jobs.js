@@ -25,6 +25,30 @@ const DEFAULT_MAX_ACTIVE = 3;          // one weave at a time per thread; three 
 const JOB_CAP_MS = 15 * 60_000;        // three 4-minute calls plus weaves — anything past this is stuck
 
 const STAGES = new Set(['thinking…', 'reading the picture…', 'weaving…', 'checking the weave…', 'checking again…']);
+const NOTE_MAX = 160;             // the model's streamed progress line (worker: postNote)
+const DRAFT_MAX_BYTES = 512 * 1024;
+
+// the worker's progress line, as plain text or nothing
+function cleanNote(n) {
+  if (typeof n !== 'string') return null;
+  const t = n.replace(/\s+/g, ' ').trim();
+  return t ? t.slice(0, NOTE_MAX) : null;
+}
+// the worker's first draft, shape-checked: a recipe with a pipeline, the
+// first summary, the declines, the verdict — nothing else, nothing huge
+function cleanDraft(d) {
+  if (!d || typeof d !== 'object' || !d.recipe || typeof d.recipe !== 'object' || !Array.isArray(d.recipe.pipeline)) return null;
+  const draft = {
+    turn: Number.isInteger(d.turn) ? d.turn : 0,
+    recipe: d.recipe,
+    summary: typeof d.summary === 'string' ? d.summary.slice(0, 2000) : '',
+    declined: (Array.isArray(d.declined) ? d.declined : []).slice(0, 20).filter(x => x && typeof x === 'object').map(x => ({ what: String(x.what ?? '').slice(0, 300), why: String(x.why ?? '').slice(0, 300) })),
+    ok: typeof d.ok === 'boolean' ? d.ok : null,
+    errors: (Array.isArray(d.errors) ? d.errors : []).slice(0, 3).map(e => String(e).slice(0, 300)),
+  };
+  if (JSON.stringify(draft).length > DRAFT_MAX_BYTES) return null;
+  return draft;
+}
 
 // the Loom app whose modules the worker runs: the repo's own app/ when this
 // file lives beside it (fabmo-loom/intent), else the published Loom
@@ -38,8 +62,20 @@ export function newJobId() {
   return 'lj_' + crypto.randomBytes(12).toString('base64url');
 }
 
+// a push subscription the phone attached to a running job (loom-push.js
+// cleans the shape; this is the fallback when the caller passes raw JSON)
+function cleanPush(body) {
+  const s = body?.subscription ?? body;
+  if (!s || typeof s !== 'object' || typeof s.endpoint !== 'string' || !/^https:\/\/\S+$/.test(s.endpoint) || s.endpoint.length > 2048) return null;
+  if (typeof s.keys?.p256dh !== 'string' || typeof s.keys?.auth !== 'string') return null;
+  const page = typeof body?.page === 'string' && /^\/[^\s]*$/.test(body.page) && !body.page.startsWith('//') && body.page.length <= 512 ? body.page : '';
+  return { subscription: { endpoint: s.endpoint, keys: { p256dh: s.keys.p256dh, auth: s.keys.auth } }, page };
+}
+
 export class LoomJobs {
-  constructor({ dir = JOBS_DIR, appDir = resolveLoomApp(), maxActive = DEFAULT_MAX_ACTIVE, ttlMs = DEFAULT_TTL_MS, capMs = JOB_CAP_MS, onDone = null, onFailed = null, log = console } = {}) {
+  // notify(job) is called once when a job that carries a push subscription
+  // ends (done or failed) — loom-push.js sends the one notification
+  constructor({ dir = JOBS_DIR, appDir = resolveLoomApp(), maxActive = DEFAULT_MAX_ACTIVE, ttlMs = DEFAULT_TTL_MS, capMs = JOB_CAP_MS, onDone = null, onFailed = null, notify = null, log = console } = {}) {
     this.dir = dir;
     this.appDir = appDir;
     this.maxActive = maxActive;
@@ -47,6 +83,7 @@ export class LoomJobs {
     this.capMs = capMs;
     this.onDone = onDone;
     this.onFailed = onFailed;
+    this.notify = notify;
     this.log = log;
     this.jobs = new Map();      // id → record (public fields + token)
     this.workers = new Map();   // id → { worker, timer }
@@ -101,7 +138,7 @@ export class LoomJobs {
   start({ token, input, key = null, canned = null }) {
     this.sweep();
     const job = {
-      id: newJobId(), token, status: 'running', stage: 'thinking…',
+      id: newJobId(), token, status: 'running', stage: 'thinking…', note: null, draft: null,
       startedAt: Date.now(), finishedAt: null, utterance: input.utterance, hadImage: !!input.image,
       result: null, error: null, input,
     };
@@ -123,7 +160,12 @@ export class LoomJobs {
     this.workers.set(job.id, { worker, timer });
 
     worker.on('message', (m) => {
-      if (m?.kind === 'stage') { if (STAGES.has(m.stage)) { job.stage = m.stage; } return; }
+      if (job.status !== 'running') return;
+      // a new stage retires the note that belonged to the previous one
+      if (m?.kind === 'stage') { if (STAGES.has(m.stage)) { job.stage = m.stage; job.note = null; } return; }
+      if (m?.kind === 'note') { job.note = cleanNote(m.note); return; }
+      // the draft is saved like a result: a phone that comes back mid-build finds it
+      if (m?.kind === 'draft') { const d = cleanDraft(m.draft); if (d) { job.draft = d; this.save(job); } return; }
       if (m?.kind === 'done' || m?.kind === 'failed') this.finish(job, m);
     });
     worker.on('error', (e) => this.finish(job, { kind: 'failed', error: `the build crashed: ${e?.message ?? e}` }));
@@ -139,6 +181,7 @@ export class LoomJobs {
     if (w) { clearTimeout(w.timer); this.workers.delete(job.id); w.worker.terminate?.().catch?.(() => {}); }
     job.finishedAt = Date.now();
     delete job.input;
+    job.note = null;
     if (m.kind === 'done') {
       job.status = 'done';
       job.stage = null;
@@ -156,6 +199,27 @@ export class LoomJobs {
       this.save(job);
       try { this.onFailed?.({ id: job.id, token: job.token, error: m.error }); } catch (e) { this.log.error?.(`[loom-jobs] onFailed failed: ${e?.message ?? e}`); }
     }
+    // the one ping, then the subscription is dropped from the record
+    if (job.push) {
+      try { const p = this.notify?.(job); p?.catch?.((e) => this.log.warn?.(`[loom-jobs] notify failed: ${e?.message ?? e}`)); }
+      catch (e) { this.log.warn?.(`[loom-jobs] notify failed: ${e?.message ?? e}`); }
+      delete job.push;
+      this.save(job);
+    }
+  }
+
+  // The phone attaches a push subscription to its running build: one ping
+  // when it ends. null = unknown or not this pass's job; false = the body
+  // is not a subscription, or the job already ended.
+  attachPush(id, token, body) {
+    const j = this.jobs.get(id);
+    if (!j || j.token !== token) return null;
+    if (j.status !== 'running') return false;
+    const push = cleanPush(body);
+    if (!push) return false;
+    j.push = push;
+    this.save(j);
+    return true;
   }
 
   // The person started over (a new photo on the phone page cancels the
@@ -174,8 +238,8 @@ export class LoomJobs {
     const j = this.jobs.get(id);
     if (!j || j.token !== token) return null;
     return {
-      id: j.id, status: j.status, stage: j.stage, startedAt: j.startedAt, finishedAt: j.finishedAt,
-      utterance: j.utterance, hadImage: j.hadImage, result: j.result, error: j.error, ...(j.cancelled ? { cancelled: true } : {}),
+      id: j.id, status: j.status, stage: j.stage, note: j.note ?? null, draft: j.draft ?? null, startedAt: j.startedAt, finishedAt: j.finishedAt,
+      utterance: j.utterance, hadImage: j.hadImage, result: j.result, error: j.error, push: !!j.push, ...(j.cancelled ? { cancelled: true } : {}),
     };
   }
 

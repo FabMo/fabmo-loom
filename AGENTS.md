@@ -170,6 +170,55 @@ two kerfs touch. Built entries carry `piece` and `r.pieceShift` (main.js
 subtracts the shift when a drag writes posX/posY); the result carries
 `pieces` (nested cutouts count once) for the observation and claims.
 
+### Kits of loose parts (no assembly)
+
+`linker_logs` (app/linkerlogs.mjs — Bill Young's notched play planks) is a
+`freesPieces` verb whose pieces do NOT make one object: it returns no
+`assembly` and reports what it cut as `kit` instead. `runRecipe` collects
+these into `preview.kits`, and `buildObservation` turns the first into the
+model's "kit of loose planks" line (plank counts and lengths, the notch,
+the course rise, the sheet count) — the model summarises from that, never
+from memory of the design. Its sheet packing is its own: rows along the
+long side of the sheet, first-fit, `setups` when the kit needs several
+sheets, and two kerfs plus a web between planks — an outside profile
+sweeps a full bit diameter past the outline, so the fixed half-inch gap
+the rib verbs use only clears a 1/4" bit. The proportions are measured
+from Bill's drawings and recorded in the module header;
+test/linker-logs-test.mjs is the geometry and sabotage gauntlet. THE BIT IS
+SIZED TO THE PLANKS (`STOCK_BITS`, `MIN_GRIP`): each notch wall carries a
+round relief at its floor, and the relief takes its whole diameter off the
+straight wall the crossing plank grips — so a fixed bit and relief that
+suit a 3.5" plank leave a half-size one almost nothing to hold (a field
+report, 2026-11-05: 0.05" of a 0.43" wall, and the verifier had no reason
+to object — the cut matched its target). With `toolDiameter` and
+`reliefDiameter` at 0 the verb takes the largest of 1/4", 1/8", 1/16" that
+fits the notch and leaves at least half of every wall straight, sizes the
+relief to just clear it, never steps down more than the bit's diameter, and
+reports the bit and the wall in `kit` for the observation; a named bit or
+relief that leaves less than half is refused with the bit that fits. A
+verb that scales must scale its cutter with it. The kit's ANGLE CONNECTORS (`connectors`
+[{angle, count}], `connectorRing`) are ring segments with one plank notch in
+each straight edge; the notch radius follows the rule recovered from his
+15°/30°/45° drawings (the two seated planks' inner corners meet), so any
+angle up to about 70° is generated, and each connector's angle is scored
+along its bisector in ONE label op that runs before the profiles — a
+V-bit by default (a tool change), the cutting bit on request. With `tiers` the same
+verb builds a STRUCTURE: rectangular tiers on the notch grid, two planks a
+course, courses alternating direction (`towerPlan`); a stepped-in tier's
+first course runs the full extent of the tier below so it lands on that
+tier's walls. Tiers form a tree (`on`: the earlier tier a tier stands on;
+default the previous one): several may share a tier — spires on a hall —
+a clear cell apart, and siblings whose walls share a line share the beam. It then cuts exactly those planks and DOES publish an
+assembly (`kind: 'linker_tower'` — tiers, courses, height, footprint, a
+posed panel per plank), which the observation reports as the tower line;
+the gauntlet audits the poses by brute force (every contact is two notches
+meeting, every plank is carried at two, nothing else touches). Without
+tiers a kit is
+what is cut, not what it becomes: the prompt rule has the model decline
+any structure that is not stacked rectangles, and a named building's
+ornament always (only the stepped massing is built; proportions not taken
+from a picture or the user's numbers are named as estimates).
+
 ### The picture of the cut (likeness from a photo)
 
 With a picture attached, the second look also SEES the build:
@@ -207,6 +256,57 @@ own connection, pins the resolved bbox/zoom/meta back into the recipe
 3. Resolved metadata (center lat/lng, elevation range) is pinned into
    the recipe so later intent turns can author true facts (coordinates
    carved on a plaque) from the document instead of from model memory.
+
+### Looking a real building up (the reference pattern)
+
+The model has no web access, so "a Linker Logs Chrysler Building" used to
+be built from memory or declined. The second network seam above the rail
+is `app/reference-fetch.mjs`: `findReference(subject)` asks Wikipedia
+which article the name means, takes the article's pictures in article
+order (the infobox view first), keeps only JPEGs that live on Wikimedia
+Commons (a file on en.wikipedia alone is fair use and is skipped), and
+returns ONE photo with its author and licence, the Wikidata height /
+floors / length / width, and the article's sentences that state a size.
+It refuses people, logos, brands and companies on what Wikidata says the
+subject IS, whatever was asked, and it never throws — every failure is a
+named non-answer the turn carries on from.
+
+How the model gets it (`app/intent.mjs`):
+
+- `find_reference` is a second client tool, offered only when the caller
+  passes `lookUp` to `runIntentLoop`, no picture is attached, and the
+  model can choose its tool. A caller that passes nothing (the phone page,
+  the server jobs, the nightly probe) sends byte-for-byte the request it
+  always did.
+- Calling it does NOT continue the conversation. The loop STARTS THE TURN
+  OVER with the photo and `referenceText()` attached to the ask. The
+  Claude 5 models tie thinking blocks to the tool list they were produced
+  under, so a tool (web search) cannot be added to a conversation under
+  way; a fresh one is the only append-only form.
+- Web search (`WEB_SEARCH_TOOL`, the basic `web_search_20250305`, two
+  uses at most) rides ONLY on a request that carries a reference — an
+  ordinary prompt can never bill a search. The newer search version is
+  refused by the API beside `disable_parallel_tool_use`, which this loop
+  needs. If the API rejects the search-bearing call, it is sent once more
+  without search.
+- One retry (`MAX_LOOKUPS = 2`) exists for "that is the town, not the
+  courthouse"; after it the tool is withdrawn.
+
+Invariants when extending this:
+
+1. A reference is REFERENCE, NOT DATA. Nothing fetched becomes geometry;
+   the model reads massing and proportion and still has to build from the
+   catalog and pass the verifier. It is not the user's picture: the
+   picture rules and the picture-vs-board comparison stay off.
+2. The credit travels, the bytes do not. `recipe.reference` and the
+   funnel log carry the article, the file, the author and the licence —
+   never the image.
+3. The likeness rule is untouched. A reference never licenses tracing an
+   outline, and the refusals in `REFUSED_KINDS` are the backstop that does
+   not depend on the model following its rule.
+
+`test/reference-test.mjs` proves it with no network and no model (a
+recorded Wikimedia fixture behind an injected fetch, a scripted model).
 
 ## Mounting a guest app
 
@@ -332,6 +432,89 @@ design (`resetDesign()`), keeps the typed text, and the next Build is a
 first build; the "Start over" button does the same and drops the photo.
 On the desktop a new picture only cancels; the design stays. Headless
 checks: `test/browser-mobile-cancel-test.mjs`, `test/browser-cancel-test.mjs`.
+
+### The first draft, shown early (v0.113)
+
+Most of a turn's wait is the model's hidden reasoning (measured
+2026-11-01 on six photo turns: 70–75 % of output tokens are thinking;
+`tools/synth-probe/runs/latency-2026-11-01-*.jsonl`), and the first woven
+state exists about halfway through. `runIntentLoop` takes `onDraft` and
+calls it (never awaited) after each weave the model is about to look at,
+with `{ turn, recipe, summary, declined, result, ok }`. Both pages render
+that state at once — loom overlay down, badge "FIRST DRAFT · checking…",
+every export control shut, the recipe NOT yet committed — and the final
+result replaces it. A draft is provisional by construction: a fix turn, a
+claims correction or the rollback guard may still change it. The guest-job
+worker posts `{ kind: 'draft' }` (shape-checked and saved by `LoomJobs`, so
+a phone that comes back mid-build finds it) and, on the Claude 5 models,
+`{ kind: 'note' }`: the last complete sentence of the SUMMARIZED thinking
+stream (`thinking: { type: 'adaptive', display: 'summarized' }`, billed the
+same), shown on the button in place of "thinking…". Headless check:
+`test/browser-mobile-draft-test.mjs`.
+
+### Installable phone page + one push when a build ends (v0.113)
+
+A guest can leave the phone page for another app while the server builds
+(iOS suspends a backgrounded tab within a minute or two; the job keeps
+running, the page catches up on return). What brings them back is a push.
+`app/manifest.webmanifest` + `app/icons/` make `mobile.html` installable;
+`app/sw.js` is a notifications-only service worker (nothing cached — the
+page is always live). Once a guest job is posted, `offerPush` in
+`app/mobile.js` attaches the browser's push subscription to THAT job
+(`POST /api/intent/loom/job/:id/push`, same pass only; silently when
+permission is already granted, else a "Ping me when it's ready" button —
+subscribing needs a gesture; on iOS not yet installed, a line says to Add
+to Home Screen). `LoomJobs.attachPush` keeps it on the job record;
+`finish()` calls `notify(job)` once and drops it. `intent/loom-push.js`
+holds the VAPID keys (self-provisioned at `/var/opt/apps/.loom-push.json`,
+mode 600, OWNED BY THE SERVER'S USER — production runs as nodeapp, and a
+root-owned file it cannot read means fresh in-memory keys at every restart
+and every earlier subscription goes dead; `subscribePush` on the page
+compares the subscription's key with the server's and resubscribes when
+they differ; subject = the site, never a person's address) and sends the one
+message via `web-push`: ready / did not verify / did not finish, tag = the
+job id, tap reopens the page (which resumes the job from local storage).
+Tests: `test/loom-push-test.mjs`, push cases in `test/loom-jobs-test.mjs`,
+the browser draft test checks registration and the offer. LIVE copy:
+`seams/intent` (server.js, loom-jobs.js, loom-push.js, worker) — edit both.
+
+### Open builds: no pass, no key (v0.113)
+
+"Adoption before lock-down." A phone-page build with neither a guest pass
+nor an API key runs on the shop's key as an OPEN build, metered by
+`intent/open-allowance.js`: 3 a day per IP address (the fairness rule) and
+100 a day app-wide (the abuse bound), both ROLLING 24 h windows (no
+midnight to game; "come back at" = the oldest build in the window + 24 h),
+ledger at `/var/opt/apps/.intent-open.json`, read fresh per call and
+WRITABLE BY THE SERVER'S USER (nodeapp) — the constructor probes it at
+startup; a build it cannot record still runs but reports `remaining: null`
+and the page shows no count (never "2 more" forever, the 2026-11-01 bug). Guest
+passes and BYO keys are not counted — a workshop on one wifi keeps its
+pass. The job route hands back a one-off `pass` ('op_…') that is the
+job's token: the phone polls, stops and pings with it and keeps it in
+`loom:job` for a reopen; a failed build refunds the slot (`openSlots`,
+in memory). Refusals are 429 with `reason: 'ip' | 'app'` + `resetsAt`; the
+page then opens the key box. The funnel log route still wants a real
+invite header (open builds log without one). Test:
+`test/open-allowance-test.mjs`; the browser draft test has an open-build
+section.
+
+### Download nested vectors — DXF for VCarve (v0.113)
+
+`app/dxf.mjs` `weaveToDxf(result)` writes the woven layout as a strict R12
+DXF (POLYLINE/VERTEX + CIRCLE only, LTYPE table — the flavour VCarve
+actually imports; LWPOLYLINE/R14 layer tables get dropped, see the step
+app's writer) in sheet coordinates (inches, X0 Y0 = board corner): layers
+SHEET, PROFILE, THROUGH (nested cutouts, full-depth pockets),
+POCKET_D<depth>, VCARVE (letter outlines, counters as holes), HOLES_D<dia>
+(CIRCLEs), ENGRAVE (on-the-line traces), RELIEF_BOUNDARY (a 3D relief's
+outline only, with a warning). Source = preview.built's preview* fields
+(the same the canvas draws) + each op's declared target as the fallback
+for guest ops, shifted by preview.placement. Design lines, not kerf
+paths: VCarve offsets itself. The buttons ("Download .dxf vectors" /
+"Vectors .dxf") are enabled whenever something is built, verified or not —
+a DXF is not a machine program — and shut during a first draft. Test:
+`test/dxf-test.mjs` (measured against the preview rings + placement).
 
 ## Testing
 

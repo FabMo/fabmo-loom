@@ -23,6 +23,7 @@ import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { simulateJob } from './sim.mjs';
 import { startWeave, LOGO_PALETTE } from './weave.mjs';
+import { weaveToDxf } from './dxf.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { loadToolLibrary } from '../ir/tools.js';
@@ -81,8 +82,16 @@ if (urlInvite) {
   clean.searchParams.delete('invite');
   history.replaceState(null, '', clean);
 }
+// A build needs neither: without a pass or a key the server runs it as an
+// OPEN build on the shop's key (3 a day per network, 100 a day app-wide).
+// The key box is an option — opened from its button, or by the server when
+// the free builds are used up.
 function haveAuth() { return !!(localStorage.getItem('loom:apiKey') || localStorage.getItem('loom:invite')); }
-function showAuth(show) { $('auth').style.display = show ? 'block' : 'none'; }
+function showAuth(show) {
+  $('auth').style.display = show ? 'block' : 'none';
+  $('ownKeyLine').style.display = show || localStorage.getItem('loom:apiKey') ? 'none' : 'block';
+}
+$('ownKey').addEventListener('click', () => showAuth(true));
 $('saveKey').addEventListener('click', () => {
   const v = $('apiKey').value.trim();
   if (!v) return;
@@ -194,6 +203,90 @@ async function parseDirect(req, key) {
 // phone, so a backgrounded Safari tab lost the turn (and still paid for it).
 const JOB_KEY = 'loom:job';
 const JOB_POLL_MS = 2500;
+
+// ---------------------------------------------- installable + push
+// The page installs to the home screen (manifest + app/sw.js, which only
+// handles notifications) so a guest can leave for another app while the
+// server builds: ONE push when the build ends. Subscribing needs a user
+// gesture (the "ping me" button, shown once a build is running); once
+// allowed, later builds are attached silently. iOS offers push only to a
+// page added to the Home Screen — the line says so instead of a button.
+let swReg = null;
+async function registerSw() {
+  if (!('serviceWorker' in navigator)) return null;
+  try { swReg = await navigator.serviceWorker.register('./sw.js'); }
+  catch (e) { console.warn('service worker:', e?.message ?? e); }
+  return swReg;
+}
+const pushSupported = () => !!(swReg && 'PushManager' in window && 'Notification' in window);
+const standalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+function b64ToBytes(str) {
+  const pad = '='.repeat((4 - str.length % 4) % 4);
+  const raw = atob((str + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+async function subscribePush() {
+  const res = await fetch('/api/intent/loom/push/key');
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || !j.key) throw new Error('this server has no push keys');
+  const key = b64ToBytes(j.key);
+  const existing = await swReg.pushManager.getSubscription().catch(() => null);
+  if (existing) {
+    // a subscription made under a different server key is never delivered
+    // (the push service refuses the signature): drop it and subscribe afresh
+    const had = existing.options?.applicationServerKey ? new Uint8Array(existing.options.applicationServerKey) : null;
+    if (!had || (had.length === key.length && had.every((b, i) => b === key[i]))) return existing;
+    await existing.unsubscribe().catch(() => {});
+  }
+  return swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+}
+async function attachPush(jobId, invite, sub) {
+  const res = await fetch(`/api/intent/loom/job/${encodeURIComponent(jobId)}/push`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
+    body: JSON.stringify({ subscription: sub.toJSON(), page: location.pathname }),
+  });
+  return res.ok;
+}
+const PUSH_OK = 'You can leave this page — we’ll ping you when it’s ready.';
+function showPushLine(note, withButton) {
+  $('pushNote').textContent = note;
+  $('pushBtn').style.display = withButton ? '' : 'none';
+  $('pushLine').style.display = 'block';
+}
+function hidePushLine() { $('pushLine').style.display = 'none'; }
+// a guest build just started (or was picked up again): attach the ping
+// silently when already allowed, otherwise offer it
+async function offerPush(jobId, invite, turn) {
+  hidePushLine();
+  if (!pushSupported()) {
+    if (isIOS() && !standalone()) showPushLine('Add this page to your Home Screen (share → Add to Home Screen) to get a ping when a build is ready.', false);
+    return;
+  }
+  const attach = async () => {
+    const sub = await subscribePush();
+    if (turn.cancelled || turn.done) return false;
+    return attachPush(jobId, invite, sub);
+  };
+  if (Notification.permission === 'granted') {
+    if (await attach().catch(() => false)) showPushLine(PUSH_OK, false);
+    return;
+  }
+  if (Notification.permission === 'denied') return;
+  showPushLine('', true);
+  $('pushBtn').onclick = async () => {
+    $('pushBtn').disabled = true;
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { showPushLine('No ping, then — this page keeps checking while it is open.', false); return; }
+      if (await attach()) showPushLine(PUSH_OK, false);
+      else if (!turn.cancelled && !turn.done) showPushLine('Could not set up the ping — this page keeps checking while it is open.', false);
+    } catch (e) {
+      showPushLine(`Could not set up the ping (${e?.message ?? e}).`, false);
+    } finally { $('pushBtn').disabled = false; }
+  };
+}
+window.loomPush = { offerPush, get swReg() { return swReg; } };   // test handle
 function saveJob(j) { try { localStorage.setItem(JOB_KEY, JSON.stringify(j)); } catch {} }
 function loadJob() { try { return JSON.parse(localStorage.getItem(JOB_KEY) ?? 'null'); } catch { return null; } }
 function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch {} }
@@ -202,7 +295,7 @@ async function startGuestJob(body, invite) {
   try {
     res = await fetch('/api/intent/loom/job', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-loom-invite': invite },
+      headers: { 'content-type': 'application/json', ...(invite ? { 'x-loom-invite': invite } : {}) },
       body: JSON.stringify(body),
     });
   } catch (e) { throw new Error(networkFailureMessage(e)); }
@@ -210,13 +303,22 @@ async function startGuestJob(body, invite) {
   // 504) are HTML — those are the ones that used to read "request failed"
   const payload = await res.clone().json().catch(() => ({}));
   if (!res.ok) {
+    const at = (iso) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     if (res.status === 429 && payload.reason === 'window') {
-      throw new Error(`Your guest pass is out of prompts — it refills at ${new Date(payload.resetsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`);
+      throw new Error(`Your guest pass is out of prompts — it refills at ${at(payload.resetsAt)}.`);
+    }
+    if (res.status === 429 && (payload.reason === 'ip' || payload.reason === 'app')) {
+      showAuth(true);
+      throw new Error(payload.reason === 'ip'
+        ? `The free builds from this network are used up for today — more at ${at(payload.resetsAt)}. A guest link or your own API key lifts the limit.`
+        : `Loom's free builds for today are all used up — try again after ${at(payload.resetsAt)}, or add your own API key below.`);
     }
     if (res.status === 401 || res.status === 403) showAuth(true);
     throw new Error(relayFailureMessage(res.status, payload, { imageBytes: promptImage?.bytes ?? 0 }));
   }
-  return payload.job;
+  // an open build comes back with its own one-off pass: the token this
+  // phone polls, stops and pings the job with
+  return { job: payload.job, pass: payload.pass ?? invite ?? null, allowance: payload.allowance ?? null };
 }
 // wait, but wake at once when the tab comes back into view
 function napUntilVisible(ms) {
@@ -230,8 +332,8 @@ function napUntilVisible(ms) {
 // resolves with the finished turn; rejects with the build's own words
 // (e.gone = the server no longer has it). A dropped connection or a server
 // restart mid-poll is waited out, not reported.
-async function awaitGuestJob(id, invite, onStage, turn = null) {
-  let misses = 0;
+async function awaitGuestJob(id, invite, onStage, turn = null, onDraft = null) {
+  let misses = 0, draftSeen = false;
   for (;;) {
     if (turn?.cancelled) throw new Error('stopped');
     let res, payload = {};
@@ -248,7 +350,11 @@ async function awaitGuestJob(id, invite, onStage, turn = null) {
     misses = 0;
     if (payload.status === 'done' && payload.result) return payload.result;
     if (payload.status === 'failed') { const e = new Error(payload.error || 'The build failed — your prompt was not counted. Try again.'); e.gone = true; throw e; }
-    if (payload.stage) onStage?.(payload.stage);
+    // the first woven state arrives before the second look is done — once
+    if (payload.draft && onDraft && !draftSeen) { draftSeen = true; onDraft(payload.draft); }
+    // the model's own progress line while it thinks beats a bare stage label
+    const label = payload.note || payload.stage;
+    if (label) onStage?.(label);
     await napUntilVisible(JOB_POLL_MS);
   }
 }
@@ -493,6 +599,7 @@ function render() {
   }
   $('errors').textContent = (r?.ok || !r) ? '' : (r.errors ?? []).join('\n');
   $('dlSbp').disabled = !r?.ok;
+  $('dlDxf').disabled = !(r?.preview?.built?.length);   // design lines, not a program: any built state
   const su = pre?.setups?.[0];
   $('dlSbp').textContent = su && su.count > 1 ? `Download .sbp (${su.current} of ${su.count})` : 'Download .sbp';
   renderSheetPicker();
@@ -719,11 +826,10 @@ async function generate() {
   const utterance = typed || (image ? 'Build what is in this picture.' : '');
   if (busy) return;
   if (!utterance) { setMsg('Take a photo, or say what to build.'); return; }
-  if (!haveAuth()) { showAuth(true); setMsg('Add an API key below, or open this page from a guest-pass link.'); return; }
   const key = localStorage.getItem('loom:apiKey');
   const invite = localStorage.getItem('loom:invite');
   const firstLabel = image && !hasDesign() ? 'reading the picture…' : 'weaving…';
-  await runTurn(firstLabel, async (stage, turn) => {
+  await runTurn(firstLabel, async (stage, turn, draft) => {
     const meta = {
       utterance, invite,
       parseContext: structuredClone(promptRecipeView(recipe)),
@@ -738,6 +844,7 @@ async function generate() {
       const out = await runIntentLoop({
         recipe, utterance, shop: {}, model: currentModel(), image, exemplars, client: 'phone',   // no sketch dialog here (intent.mjs NO_DRAW_RULE)
         call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return parseDirect(req, key); },
+        onDraft: draft,
         weave: async (rec) => {
           stage('weaving…');
           const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
@@ -748,36 +855,63 @@ async function generate() {
       });
       return { out, meta };
     }
-    // guest pass: the server runs the whole turn; we hold the ticket
-    const id = await startGuestJob({ recipe, utterance, model: currentModel(), image, exemplars, values: controlValues, shop: shopForRun(), client: 'phone' }, invite);
-    if (turn.cancelled) { stopGuestJob(id, invite); throw new Error('stopped'); }   // cancelled while the POST was out
-    turn.jobId = id; turn.invite = invite;
-    saveJob({ id, startedAt: Date.now(), ...meta });
-    const out = await awaitGuestJob(id, invite, stage, turn);
+    // guest pass or open build: the server runs the whole turn; we hold the ticket
+    const { job: id, pass, allowance } = await startGuestJob({ recipe, utterance, model: currentModel(), image, exemplars, values: controlValues, shop: shopForRun(), client: 'phone' }, invite);
+    if (turn.cancelled) { stopGuestJob(id, pass); throw new Error('stopped'); }   // cancelled while the POST was out
+    turn.jobId = id; turn.invite = pass;
+    saveJob({ id, pass, startedAt: Date.now(), ...meta });
+    if (allowance?.scope === 'open' && allowance.remaining != null) setMsg(allowance.remaining > 0 ? `${allowance.remaining} more free build${allowance.remaining === 1 ? '' : 's'} today from this network.` : 'That is the last free build today from this network — a guest link or your own key lifts the limit.');
+    offerPush(id, pass, turn);   // not awaited: the poll starts now
+    const out = await awaitGuestJob(id, pass, stage, turn, draft);
     clearJob();
     return { out, meta };
   });
 }
 // the loom at work over the view while `work(stage)` runs, then the result
 // lands in the page (or the error in the message line)
+// `work(stage, turn, draft)`: stage(label) updates the button and the loom
+// overlay; draft(d) shows the FIRST woven state early (runIntentLoop's
+// onDraft, or the guest job's `draft`) — the loom overlay comes down, the
+// design renders under a "first draft" badge with Download shut, the button
+// keeps saying what the second look is doing, and finishTurn replaces it all.
 async function runTurn(firstLabel, work) {
-  const turn = { cancelled: false, ac: new AbortController(), jobId: null, invite: null, stop: null };
+  const turn = { cancelled: false, done: false, ac: new AbortController(), jobId: null, invite: null, stop: null };
   const stopped = new Promise((_, reject) => { turn.stop = () => reject(new Error('stopped')); });
   activeTurn = turn;
   busy = true;
   setMsg('');
+  showAuth(false);
   $('build').disabled = true;
   $('build').textContent = firstLabel;
   $('result').style.display = 'block';
   setBadge('wait', 'thinking…');
-  const stopWeave = startWeave($('view3d'), firstLabel, LOGO_PALETTE);
-  const stage = (s) => { if (turn.cancelled) return; $('build').textContent = s; stopWeave.setLabel?.(s); };
+  let overlay = startWeave($('view3d'), firstLabel, LOGO_PALETTE);
+  const stopWeave = () => { overlay?.(); overlay = null; };
+  const stage = (s) => { if (turn.cancelled) return; $('build').textContent = s; overlay?.setLabel?.(s); };
+  const draft = async (d) => {
+    if (turn.cancelled || turn.done || !LOADED_FONTS || !d?.recipe) return;
+    let r = d.result ?? null, sim = null;
+    if (!r) {   // a guest job sends the recipe; weave it here
+      const values = { ...controlDefaults(d.recipe), ...pickExisting(controlValues, d.recipe) };
+      ({ result: r, sim } = await weave({ recipe: d.recipe, values, terrains: {}, shop: shopForRun() }));
+    }
+    if (turn.cancelled || turn.done || !r) return;   // the final result landed meanwhile
+    stopWeave();
+    result = r; lastSim = sim;
+    $('about').textContent = d.summary ?? '';
+    $('aboutWrap').open = true;
+    render();
+    setBadge('wait', r.ok ? 'FIRST DRAFT · verified · checking…' : 'FIRST DRAFT · checking…');
+    $('dlSbp').disabled = true; $('dlDxf').disabled = true;   // nothing leaves the page until the final state
+    window.loomMobile?.onDraft?.(d);   // test hook
+  };
   try {
     // cancelTurn settles `stopped` so the page is free at once; the stale
     // work may still be mid-weave — its result is ignored below
-    const working = work(stage, turn);
+    const working = work(stage, turn, draft);
     working.catch(() => {});
     const { out, meta } = await Promise.race([working, stopped]);
+    turn.done = true;
     if (turn.cancelled) return;
     await finishTurn(out, meta);
   } catch (e) {
@@ -787,8 +921,10 @@ async function runTurn(firstLabel, work) {
     if (!hasDesign()) $('result').style.display = 'none';
     else render();
   } finally {
+    turn.done = true;
     if (activeTurn === turn) activeTurn = null;
     stopWeave();
+    hidePushLine();
     busy = false;
     $('build').disabled = false;
     updateBuildLabel();
@@ -846,6 +982,12 @@ function download(name, content, type = 'text/plain') {
 }
 const slug = (t) => (t ?? '').trim().replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'loom';
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
+$('dlDxf').addEventListener('click', () => {
+  const out = weaveToDxf(result, { name: recipe.name });
+  if (out.error) { setNote(`vectors: ${out.error}`); return; }
+  if (out.warnings.length) setNote(out.warnings.join(' '));
+  download(`${exportStem()}-vectors.dxf`, out.dxf, 'application/dxf');
+});
 // back to an empty page (the photo and the typed text are the caller's call)
 function resetDesign() {
   cancelTurn();
@@ -878,10 +1020,11 @@ async function loadGuests() {
   return list;
 }
 (async function boot() {
+  registerSw();      // installable page + the push channel (never blocks the boot)
   loadExemplars();   // worked-example index, fetched once in the background so the first build has it
   const restored = loadState();
   updateBuildLabel();
-  if (!haveAuth()) showAuth(true);
+  showAuth(false);
   refreshGuestUI();
   const loaded = {};
   await Promise.all(FONTS.map(async (f) => {
@@ -900,12 +1043,13 @@ async function loadGuests() {
   // a build was running when this page was last closed: it kept going on
   // the server — pick it up (or learn how it ended)
   const pending = loadJob();
-  const pendingInvite = localStorage.getItem('loom:invite');
+  const pendingInvite = pending?.pass ?? localStorage.getItem('loom:invite');
   if (pending?.id && pendingInvite) {
     if (pending.utterance) setMsg(`Picking up “${pending.utterance.length > 60 ? pending.utterance.slice(0, 57) + '…' : pending.utterance}”`);
-    runTurn('still weaving…', async (stage, turn) => {
+    runTurn('still weaving…', async (stage, turn, draft) => {
       turn.jobId = pending.id; turn.invite = pendingInvite;
-      const out = await awaitGuestJob(pending.id, pendingInvite, stage, turn);
+      navigator.serviceWorker?.ready.then(() => offerPush(pending.id, pendingInvite, turn)).catch(() => {});
+      const out = await awaitGuestJob(pending.id, pendingInvite, stage, turn, draft);
       clearJob();
       return { out, meta: { ...pending, invite: pendingInvite } };
     });

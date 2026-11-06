@@ -63,11 +63,12 @@ ok(validateJobInput({ ...input, values: 'nope', shop: [1] }).input.values && Obj
 
 // ---- a job runs the loop and persists ------------------------------------
 console.log('a canned build');
-const metered = [];
+const metered = [], notified = [];
 const jobs = new LoomJobs({
   dir, appDir, maxActive: 1,
   onDone: (m) => metered.push({ done: true, ...m }),
   onFailed: (m) => metered.push({ done: false, ...m }),
+  notify: (j) => { notified.push({ id: j.id, status: j.status, endpoint: j.push?.subscription?.endpoint, page: j.push?.page }); },
   log: { warn() {}, error(...a) { console.error(...a); } },
 });
 const id = jobs.start({ token: TOKEN, input, canned: [BUILD, STAND_PAT] });
@@ -76,8 +77,21 @@ ok(jobs.busy(), 'one running job fills a maxActive of 1');
 ok(jobs.get(id, TOKEN)?.status === 'running', 'the job reports running to its own pass');
 ok(jobs.get(id, OTHER) === null, 'another pass cannot see it');
 ok(jobs.get('lj_nope', TOKEN) === null, 'an unknown id is null');
+// the phone attaches its push subscription to the running build
+const SUB = { endpoint: 'https://web.push.apple.com/QAbc123', keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } };
+ok(jobs.attachPush(id, OTHER, { subscription: SUB }) === null, 'another pass cannot attach a ping');
+ok(jobs.attachPush(id, TOKEN, { subscription: { endpoint: 'http://nope' } }) === false, 'a non-subscription is refused');
+ok(jobs.attachPush(id, TOKEN, { subscription: SUB, page: '/c/x/app/mobile.html' }) === true, 'the owner attaches a push subscription');
+ok(jobs.get(id, TOKEN).push === true, 'the view says a ping is set');
 const view = await jobs.wait(id, TOKEN, { timeoutMs: 90_000 });
+ok(notified.length === 1 && notified[0].id === id && notified[0].status === 'done' && notified[0].endpoint === SUB.endpoint && notified[0].page === '/c/x/app/mobile.html', 'notify fired once at the end with the subscription and the page');
+ok(view.push === false && !JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), 'utf8')).push, 'the subscription is dropped from the record once used');
+ok(jobs.attachPush(id, TOKEN, { subscription: SUB }) === false, 'a finished build takes no ping');
 ok(view.status === 'done', `the job finishes done${view.error ? ` (${view.error})` : ''}`);
+// the first draft was posted on the way: the woven first turn with the
+// model's first summary, kept on the record for a phone that comes back
+ok(view.draft?.turn === 0 && view.draft.recipe?.pipeline?.length === 2 && view.draft.ok === true && /arrow/.test(view.draft.summary), `the first draft is on the record (${view.draft?.recipe?.pipeline?.length} ops, verified, "${view.draft?.summary?.slice(0, 28)}…")`);
+ok(view.note === null, 'no progress note lingers on a finished job');
 ok(!jobs.busy(), 'the worker is released');
 const r = view.result;
 ok(r.recipe.pipeline.length === 2 && r.recipe.name === 'Driveway Arrow House Number', 'the result carries the woven recipe');

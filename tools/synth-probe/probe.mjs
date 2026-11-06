@@ -41,6 +41,14 @@ const EXEMPLARS = process.env.EXEMPLARS === 'off' || !existsSync(`${LOOM}/app/ex
 // pre-loop one-shot behavior, kept so the two can be measured side by side
 const LOOP_MODE = ['always', 'trouble', 'off'].includes(process.env.LOOP) ? process.env.LOOP : 'always';
 const MODEL = process.env.MODEL || undefined;
+// Latency experiment knobs (2026-11-01, "faster user experience"):
+//   EFFORT=low|medium|high   output_config.effort on the model calls
+//   EFFORT_SCOPE=all|revise  'revise' = only the second-look / final calls
+//   FAST=1                   Opus 5.5 fast mode (2× price, beta header)
+// Each row also records callMs (wall ms per model call, in turn order).
+const EFFORT = process.env.EFFORT || null;
+const EFFORT_SCOPE = process.env.EFFORT_SCOPE === 'revise' ? 'revise' : 'all';
+const FAST = process.env.FAST === '1';
 const { registerCatalogEntries } = await import(`${LOOM}/app/catalog.mjs`);
 
 // mount the same guests the deployment mounts (guests.local.mjs URLs → paths)
@@ -126,6 +134,15 @@ async function probe(p) {
   if (p.statedSize) rec.statedSize = p.statedSize;
   const recipe = baseRecipe(p);
   rec.context = structuredClone(recipe);   // the starting document — makes the row a self-contained corpus candidate
+  const callMs = [];
+  const call = async (req) => {
+    let r = req;
+    if (EFFORT && (EFFORT_SCOPE === 'all' || req.messages.length > 1)) r = { ...r, output_config: { ...(r.output_config ?? {}), effort: EFFORT } };
+    if (FAST) r = { ...r, speed: 'fast' };
+    const t = Date.now();
+    try { return await callModel(r); } finally { callMs.push(Date.now() - t); }
+  };
+  if (EFFORT || FAST) rec.variant = { effort: EFFORT, scope: EFFORT ? EFFORT_SCOPE : null, fast: FAST };
   try {
     const t0 = Date.now();
     const weaveRec = (r) => quiet(() => runRecipe(r, controlDefaults(r), FONT_SHELF, syntheticGrids(r)));
@@ -138,7 +155,7 @@ async function probe(p) {
     try {
       out = await runIntentLoop({
         recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE, image, exemplars,
-        call: callModel,
+        call,
         weave: async (r) => weaveRec(r),
       });
     } catch (e) {
@@ -151,6 +168,7 @@ async function probe(p) {
       throw e;
     }
     rec.ms = Date.now() - t0;
+    rec.callMs = callMs;
     rec.usage = out.usage;
     const first = out.turns[0];
     rec.stop_reason = null;

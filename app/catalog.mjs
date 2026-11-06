@@ -36,6 +36,7 @@ import { weldContours, pathToRegions, offsetRegions, booleanRegions } from './sh
 import { TEXTURES, TEXTURE_IDS, sampleTexture, distanceGridForRings, gridSampler, insideGridEvenOdd } from './texture-kernel.mjs';
 import { LATTICE_ENTRIES } from './lattice.mjs';
 import { RIB_CHAIR_ENTRIES } from './ribchair.mjs';
+import { LINKER_LOG_ENTRIES } from './linkerlogs.mjs';
 
 const ringArea = (ring) => {
   let a = 0;
@@ -1760,6 +1761,8 @@ export const CATALOG = {
 Object.assign(CATALOG, LATTICE_ENTRIES);
 // app/ribchair.mjs: rib_chair — sliced side ribs + slats (the cushioned-chair answer)
 Object.assign(CATALOG, RIB_CHAIR_ENTRIES);
+// app/linkerlogs.mjs: linker_logs — a kit of notched play planks (Bill Young's Linker Logs)
+Object.assign(CATALOG, LINKER_LOG_ENTRIES);
 
 export function registerCatalogEntries(entries) {
   const added = [];

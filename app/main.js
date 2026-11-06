@@ -13,9 +13,11 @@ import { runIntentLoop, actionList, promptRecipeView, MODELS, DEFAULT_MODEL, isK
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
+import { weaveToDxf } from './dxf.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
+import { findReference, referenceCredit } from './reference-fetch.mjs';
 import { simulateJob } from './sim.mjs';
 import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
@@ -594,6 +596,7 @@ function whyHtml(r) {
     lines.push(`<b>Stance:</b> ${escapeHtml(st.idiom)}${st.why ? ` — ${escapeHtml(st.why)}` : ''}${st.decisions?.length ? `; so: ${st.decisions.map(escapeHtml).join('; ')}` : ''} <small>(the model's design hypothesis — ask for another idiom to see the same piece differently)</small>`);
   }
   if (recipe.about) lines.push(`<i>${escapeHtml(recipe.about)}</i> <small>(the design plan, in the model's words — everything below is measured, not narrated)</small>`);
+  if (recipe.reference?.title) lines.push(referenceCreditHtml(recipe.reference));
   for (const t of ra.tools) lines.push(whyToolLine(t, ra));
   if (!ra.material) lines.push('feeds are each strategy\'s stock numbers — declare a material in ⚙ Machine &amp; tools to derive them from chipload');
   // ops fold like the measurements: a pattern's instances ("squares bulk
@@ -657,6 +660,9 @@ function render() {
   updateSheetChip(r.preview?.stock);
   $('dlSbp').disabled = !r.ok;
   $('dlNc').disabled = !r.ok;
+  // vectors are design lines, not a machine program: available whenever
+  // something is built, verified or not (VCarve toolpaths them afresh)
+  $('dlDxf').disabled = !(r.preview?.built?.length);
   renderSheetPick(r);
   $('stepCut').style.display = (recipe.pipeline ?? []).length ? '' : 'none';
   renumberSteps();
@@ -1288,6 +1294,66 @@ $('prompt').addEventListener('drop', (e) => {
   if (file) { e.preventDefault(); e.stopPropagation(); takePromptImage(file); }
 });
 
+// ---------------------------------------------------------- reference
+// A named real building: the model asks (find_reference), the page fetches
+// a credited Commons photo and the article's measured facts on the user's
+// connection, and the turn starts over with them attached (intent.mjs).
+// The pick is shown with its credit; "use a different photo" rebuilds the
+// same ask from another one. Off switch: the AI account box.
+const lookupsOn = () => localStorage.getItem('loom:lookup') !== 'off';
+// set for ONE generate() by "use a different photo": the Commons file the
+// user chose, handed to the lookup in place of its own first pick
+let referencePin = null;
+const extLink = (url, text) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+
+// one line of credit, from what the recipe keeps (no bytes, no thumbnail)
+function referenceCreditHtml(c) {
+  const photo = c.photo ? ` · photo ${extLink(c.photo.url, `“${c.photo.title}”`)} by ${escapeHtml(c.photo.artist)}, ${escapeHtml(c.photo.license)}, Wikimedia Commons` : '';
+  return `<b>Reference:</b> ${extLink(c.url, c.title)} (Wikipedia)${photo} <small>(looked at for massing and proportion — nothing in it was traced)</small>`;
+}
+
+// the card under a turn that used a reference: the photo, who made it,
+// what was searched, and the other photos to rebuild from
+function referenceCardHtml(out) {
+  const ref = out.reference;
+  if (!ref) {
+    const miss = out.lookups?.[out.lookups.length - 1];
+    return miss ? `<div class="declined">no reference: ${escapeHtml(miss.message)}</div>` : '';
+  }
+  const p = ref.photo;
+  const thumb = p ? `<a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer"><img src="${escapeHtml(p.thumbUrl)}" alt="reference photo" loading="lazy"></a>` : '';
+  const searched = (out.searches ?? []).filter(x => x.query).map(x => {
+    const top = x.results?.[0];
+    return `“${escapeHtml(x.query)}”${top ? ` → ${extLink(top.url, new URL(top.url).hostname.replace(/^www\./, ''))}${x.results.length > 1 ? ` +${x.results.length - 1}` : ''}` : x.error ? ` (${escapeHtml(x.error)})` : ''}`;
+  });
+  const alts = ref.alternates?.length
+    ? `<details class="ref-alts"><summary>use a different photo</summary><div class="ref-alt-row">${ref.alternates.map((a, i) =>
+      `<button type="button" class="ref-alt" data-alt="${i}" title="${escapeHtml(`${a.title} — ${a.artist}, ${a.license}`)}"><img src="${escapeHtml(a.thumbUrl)}" alt="${escapeHtml(a.title)}" loading="lazy"></button>`).join('')}</div><small>Picking one rebuilds this design from that photo — one more prompt.</small></details>`
+    : '';
+  return `<div class="ref">${thumb}<div class="ref-text">${referenceCreditHtml(referenceCredit(ref))}`
+    + (searched.length ? `<div>searched the web: ${searched.join('; ')}</div>` : '')
+    + (out.searchDropped ? `<div class="declined">web search was not available on this key — proportions came from the article and the photo</div>` : '')
+    + `${alts}</div></div>`;
+}
+
+// "use a different photo": put the design back to what it was before that
+// turn and ask again, with the chosen file pinned as the photo. If the
+// rebuild fails or is stopped, the design the first photo gave comes back.
+async function rebuildFromPhoto({ utterance, before, title }) {
+  if (busy) return;
+  const built = { recipe, controlValues };
+  recipe = structuredClone(before);
+  controlValues = { ...controlDefaults(recipe) };
+  referencePin = { pick: title };
+  $('prompt').value = utterance;
+  const done = await generate();
+  referencePin = null;   // a generate() that never started must not leave the pin for the next ask
+  if (!done) {
+    recipe = built.recipe; controlValues = built.controlValues;
+    persist(); renderControls(); runAndRender();
+  }
+}
+
 async function generate() {
   const typed = $('prompt').value.trim();
   const image = promptImage ? { media_type: promptImage.media_type, data: promptImage.data } : null;
@@ -1305,14 +1371,22 @@ async function generate() {
     addTurn('Add your Anthropic API key first — it stays in this browser. (Opening Loom from a guest-pass link works too.)', true);
     return;
   }
+  const pin = referencePin;
+  referencePin = null;
+  // the design as it stands before this turn — what "use a different photo" rebuilds from
+  const before = structuredClone(recipe);
+  let done = false;
   const turn = { cancelled: false, ac: new AbortController(), stop: null };
   const stopped = new Promise((_, reject) => { turn.stop = () => reject(new Error('stopped')); });
   activeTurn = turn;
   busy = true;
   $('generate').disabled = true;
   $('generate').textContent = 'weaving…';
-  const stopWeave = startWeave($('appPanel'));
-  const setLabel = (s) => { if (!turn.cancelled) stopWeave.setLabel?.(s); };
+  let overlay = startWeave($('appPanel'));
+  const stopWeave = () => { overlay?.(); overlay = null; };
+  // once the first draft is on screen the loom overlay is gone: the stage
+  // moves to the button ("checking the weave…")
+  const setLabel = (s) => { if (turn.cancelled) return; if (overlay) overlay.setLabel?.(s); else $('generate').textContent = s; };
   try {
     // what the model SAW — captured before the loop mutates the recipe
     // (cloned: with no assets promptRecipeView returns the live object).
@@ -1333,7 +1407,30 @@ async function generate() {
     // stale loop may still be mid-weave — its result is dropped below
     const working = runIntentLoop({
       recipe, utterance, shop, model: currentModel(), image, exemplars,
+      // a named real building: the model may ask for a reference first. Not
+      // with a picture attached — the user's picture IS the reference.
+      lookUp: lookupsOn() && !image ? (subject) => findReference(subject, { signal: turn.ac.signal, pick: pin?.pick ?? null }) : null,
+      search: lookupsOn(),
+      onStage: (st) => {
+        if (st.stage === 'lookup') { calls = 0; setLabel(`looking up ${st.subject.slice(0, 40)}…`); }
+        else if (st.stage === 'found') setLabel(st.reference?.ok ? 'reading the reference…' : 'weaving…');
+      },
       call: (req) => { if (calls++ > 0) setLabel(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
+      // The FIRST woven state, shown while the second look runs: the loom
+      // comes down, the verdict badge says "first draft", and every way a
+      // cut could leave the page stays shut until the final state lands.
+      // The recipe itself is not committed yet (the controls wait for the
+      // final) — a fix turn, a claims correction or the rollback guard may
+      // still change it.
+      onDraft: (d) => {
+        if (turn.cancelled || !d.result) return;
+        stopWeave();
+        result = d.result; lastSim = null;
+        render();
+        setBadge('wait', d.ok ? 'FIRST DRAFT · verified · checking…' : 'FIRST DRAFT · checking…');
+        for (const id of ['dlSbp', 'dlNc', 'dlDxf', 'sendFabmo', 'sendRunFabmo']) $(id).disabled = true;
+        window.loomDraft = d;   // test hook
+      },
       weave: async (rec) => {
         setLabel('weaving…');
         const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
@@ -1357,6 +1454,9 @@ async function generate() {
     // the one narrated line above the deterministic decision record
     if (out.summary?.trim()) recipe.about = out.summary.trim();
     if (out.stance) recipe.stance = out.stance;   // the design hypothesis the user can argue with
+    // who made the picture this was built from rides on the recipe — the
+    // credit, never the bytes
+    if (out.reference) recipe.reference = referenceCredit(out.reference);
     controlValues = { ...controlDefaults(recipe), ...pickExisting(controlValues, recipe) };
     persist();
     renderControls();
@@ -1382,6 +1482,9 @@ async function generate() {
             claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
             revisedActions: out.turns.slice(1).flatMap(t => actionList(t.payload)),
             observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped.length, errors: t.observation.errors.slice(0, 3) } : null),
+            // what was looked up (never the picture): the subject asked for, the
+            // article and file it resolved to, and what was searched
+            ...(out.lookups?.length ? { reference: { lookups: out.lookups.map(l => ({ subject: l.subject, ok: l.ok, reason: l.reason ?? null, title: l.page?.title ?? null, photo: l.photo?.title ?? null })), searches: (out.searches ?? []).map(x => x.query), searchDropped: !!out.searchDropped, pinned: !!pin } } : {}),
           },
         },
         usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
@@ -1405,7 +1508,14 @@ async function generate() {
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
     const skipped = lastTurn.skipped.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';
     const pic = promptImage ? `<img src="${promptImage.previewUrl}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:6px">` : '';
-    const turnEl = addTurn(`<div class="you">» ${pic}${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}`);
+    const turnEl = addTurn(`<div class="you">» ${pic}${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}${referenceCardHtml(out)}`);
+    // a different photo: only while this is still the latest turn's design
+    turnEl.querySelectorAll('.ref-alt').forEach(btn => btn.addEventListener('click', () => {
+      const alt = out.reference?.alternates?.[Number(btn.dataset.alt)];
+      if (!alt || $('history').firstElementChild !== turnEl) { addTurn('That design has been changed since — ask for the building again to pick a different photo.'); return; }
+      rebuildFromPhoto({ utterance, before, title: alt.title });
+    }));
+    done = true;
 
     // the funnel's query id, pinned to the turn: "quote this when something
     // came out wrong" — replayable server-side with intent/replay.mjs
@@ -1433,6 +1543,7 @@ async function generate() {
     $('generate').disabled = false;
     $('generate').textContent = 'Generate';
   }
+  return done;
 }
 
 function pickExisting(values, rec) {
@@ -1570,12 +1681,27 @@ $('modelPick')?.addEventListener('change', (e) => {
 });
 renderModelPick();
 
+// reference lookups: on unless this browser turned them off
+if ($('lookupOn')) {
+  $('lookupOn').checked = lookupsOn();
+  $('lookupOn').addEventListener('change', (e) => {
+    localStorage.setItem('loom:lookup', e.target.checked ? 'on' : 'off');
+    addTurn(e.target.checked ? 'Named real buildings will be looked up before they are built.' : 'Lookups are off — a named building is built from what the model knows.');
+  });
+}
+
 $('saveKey').addEventListener('click', () => {
   const v = $('apiKey').value.trim();
   if (v) { localStorage.setItem('loom:apiKey', v); addTurn('Key saved to this browser.'); }
 });
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
 $('dlNc').addEventListener('click', () => result?.ok && download(`${exportStem()}.nc`, result.gcode));
+$('dlDxf').addEventListener('click', () => {
+  const out = weaveToDxf(result, { name: recipe.name });
+  if (out.error) { $('errors').textContent = `vectors: ${out.error}`; return; }
+  if (out.warnings.length) $('warnings').textContent = [$('warnings').textContent, ...out.warnings].filter(Boolean).join('\n');
+  download(`${exportStem()}-vectors.dxf`, out.dxf, 'application/dxf');
+});
 
 // ---- sheets: a layout that needs several sheets/fixturings cuts ONE per
 // weave (the exported file IS one fixturing). The entry reports a setups

@@ -7,7 +7,13 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#f3f3f4">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Loom">
   <link rel="icon" type="image/jpeg" href="../assets/loom-logo.jpg">
+  <!-- installable: Add to Home Screen gives the page an icon and, on iOS,
+       the push notifications that let a guest leave while a build runs -->
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/loom-180.png">
   <style>
     /* the loom mark's palette: navy threads, lime + grey weft, grey pads */
     :root {
@@ -91,6 +97,9 @@
     .actions button { flex: 1; }
     .hint { font-size: 12px; color: var(--muted); margin: 8px 2px 0; }
     #msg { font-size: 14px; color: var(--bad); margin-top: 8px; }
+    #pushLine { display: none; margin-top: 8px; font-size: 13px; color: var(--muted); }
+    #pushLine button { margin-right: 8px; }
+    #ownKeyLine { margin-top: 8px; }
     #msg:empty { display: none; }
     footer { font-size: 12px; color: var(--muted); text-align: center; padding: 10px 0 0; }
     footer a { color: inherit; }
@@ -132,8 +141,10 @@
     </div>
     <button id="build" class="primary" type="button">Build it</button>
     <div id="msg"></div>
+    <div id="pushLine"><button id="pushBtn" class="small ghost" type="button">Ping me when it's ready</button><span id="pushNote"></span></div>
+    <div id="ownKeyLine"><button id="ownKey" class="small ghost" type="button">Use my own API key</button></div>
     <div id="auth">
-      <p>Prompting needs a guest-pass link or your own Anthropic API key. The key stays in this browser.</p>
+      <p>Free builds here are limited to a few a day per network. Your own Anthropic API key lifts that; it stays in this browser.</p>
       <input id="apiKey" type="password" placeholder="sk-ant-…" autocomplete="off">
       <button id="saveKey" class="small" type="button">Save key</button>
     </div>
@@ -168,12 +179,13 @@
     <details class="about" id="aboutWrap"><summary>what was built</summary><p id="about"></p><div id="declined" class="declined"></div></details>
     <div class="actions">
       <button id="dlSbp" type="button" disabled>Download .sbp</button>
+      <button id="dlDxf" class="ghost" type="button" disabled title="The nested vectors as a DXF for VCarve or another CAM program">Vectors .dxf</button>
       <button id="reset" class="ghost" type="button">Start over</button>
     </div>
     <div class="hint">Loom verifies the motion; it cannot check your fixturing, the bit loaded, Z zero or the material. First run cuts air.</div>
   </section>
 
-  <footer>Loom mobile · <span id="app-version">v0.112</span> · <a href="./">open the full Loom app</a></footer>
+  <footer>Loom mobile · <span id="app-version">v0.113</span> · <a href="./">open the full Loom app</a></footer>
   <script type="module" src="mobile.js"></script>
 </body>
 </html>

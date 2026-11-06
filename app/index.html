@@ -315,6 +315,61 @@
       text-decoration: underline;
     }
 
+    /* the reference a turn was built from: photo, credit, other photos */
+    .turn .ref {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+      margin-top: 6px;
+      color: var(--mut);
+    }
+
+    .turn .ref > a > img {
+      width: 72px;
+      height: 72px;
+      object-fit: cover;
+      border-radius: 6px;
+      display: block;
+    }
+
+    .turn .ref .ref-text {
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .turn .ref details {
+      margin-top: 4px;
+    }
+
+    .turn .ref .ref-alt-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 6px 0 4px;
+    }
+
+    .turn .ref .ref-alt {
+      padding: 0;
+      border: 2px solid transparent;
+      border-radius: 6px;
+      background: none;
+      cursor: pointer;
+      line-height: 0;
+    }
+
+    .turn .ref .ref-alt:hover,
+    .turn .ref .ref-alt:focus-visible {
+      border-color: var(--sky);
+    }
+
+    .turn .ref .ref-alt img {
+      width: 64px;
+      height: 64px;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+
     details {
       margin-top: 10px;
     }
@@ -569,7 +624,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.112</span> · <a href="mobile.html" title="Photo → cut file, trimmed down for a phone">phone version</a></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.113</span> · <a href="mobile.html" title="Photo → cut file, trimmed down for a phone">phone version</a></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -614,6 +669,12 @@
           <label for="modelPick" style="margin:0; white-space:nowrap">Model</label>
           <select id="modelPick" title="Which Claude weaves your prompts"></select>
           <span id="modelNote" style="color:var(--mut); font-size:.85rem"></span>
+        </div>
+        <div class="keyrow" style="margin-top:6px; align-items:flex-start; gap:8px">
+          <input id="lookupOn" type="checkbox" style="width:auto; margin-top:3px">
+          <label for="lookupOn" style="margin:0">Look up named real buildings before building them — a credited photo from
+            Wikimedia Commons and facts from Wikipedia, fetched by this browser; one extra model call, and up to two web
+            searches billed to the key in use.</label>
         </div>
         <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the
           key never touches our server. The default model is the one that verified the most builds per dollar in our
@@ -721,6 +782,8 @@
           <button id="sendRunFabmo" class="ghost small" style="display:none" disabled
             title="Queue AND start cutting — only when the machine is idle and the queue is empty">Send &amp; run</button>
           <button id="dlNc" class="ghost small" disabled>Download .nc</button>
+          <button id="dlDxf" class="ghost small" disabled
+            title="The nested vectors as a DXF (inches, X0 Y0 at the board corner, one layer per cut kind) — import into VCarve or another CAM program to toolpath there">Download .dxf vectors</button>
         </div>
         <div class="keynote"><span id="fabmoChip" style="display:none"></span> <span id="sheetChip"></span></div>
       </div>

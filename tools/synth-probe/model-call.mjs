@@ -42,7 +42,8 @@ export function makeCallModel({ key, attempts = 4, baseDelayMs = 2000, onRetry =
           // connection: close — a weave is seconds of synchronous CPU; a
           // kept-alive socket can go stale behind it and the next call on it
           // dies with "other side closed" / EPIPE (same fix as nightly.mjs llm())
-          headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', connection: 'close' },
+          // fast mode (req.speed = 'fast') is a beta: the header rides with it
+          headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', connection: 'close', ...(req.speed ? { 'anthropic-beta': 'fast-mode-2026-02-01' } : {}) },
           body: JSON.stringify(req),
         });
       } catch (e) {

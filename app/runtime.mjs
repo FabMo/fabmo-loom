@@ -876,6 +876,10 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // returns `setups: { count, current, groups }` — the UI's sheet picker
   // flips the entry's `setup` param through them, one exported file each
   const setups = [];
+  // kit manifests: a verb that cuts a KIT OF LOOSE PARTS (linker_logs) has
+  // no assembly to preview; it reports what the kit holds instead, for the
+  // UI and for the model's second look
+  const kits = [];
   // published frames (id → {cx, cy, rot, w, h, ctx}) — see applyFrame above
   const frames = {};
   // framed content's PANEL-LOCAL footprint (pocket / V-carve regions
@@ -1136,6 +1140,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     }
     if (r.assembly) assemblies.push({ opId: op.id, ...r.assembly });
     if (r.setups) setups.push({ opId: op.id, ...r.setups });
+    if (r.kit) kits.push({ opId: op.id, ...r.kit });
     for (const f of r.frames ?? []) frames[f.id] = { ...f, publisher: op.id };
     for (const ing of r.ingredients ?? []) addIngredient(ingredients, ing, op.id);
     // a catalog verb may lower to SEVERAL machine operations (e.g. a bulk
@@ -1458,7 +1463,7 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     report, job, composed, rationale, ingredients,
     // separate pieces this one run frees (nested cutouts count once)
     pieces,
-    preview: { built, placement, stock: autoStock, shapeOutlines, assemblies, setups },
+    preview: { built, placement, stock: autoStock, shapeOutlines, assemblies, setups, kits },
   };
   if (report.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });

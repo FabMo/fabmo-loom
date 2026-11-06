@@ -28,6 +28,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { buildParseRequest } from './step-schema.js';
 import { loadRegistry, saveRegistry, inviteStatus, consumeInvite, refundInvite, recordUsage, newToken, newInvite } from './invites.js';
 import { LoomJobs, validateJobInput } from './loom-jobs.js';
+import { createPush, cleanSubscription } from './loom-push.js';
+import { OpenAllowance } from './open-allowance.js';
 
 const ENV_FILE = '/var/opt/apps/.intent.env';
 const FUNNEL_FILE = '/var/opt/apps/.intent-funnel.jsonl';
@@ -236,14 +238,28 @@ export function mountIntent(app) {
   // whole turn; a backgrounded or closed Safari tab lost the design and the
   // in-flight call was still billed and counted (2026-10-19). One prompt per
   // ask here — the loop's two or three model calls are the server's business.
+  // web push: one ping when a guest build ends (keys self-provisioned, root-only)
+  const push = createPush({ log: console });
+  // OPEN builds — no pass, no key: 3 a day per IP and 100 a day app-wide
+  // (open-allowance.js). Each open build gets a one-off job token ('op_…',
+  // handed back as `pass`) so only that phone can poll, stop or ping it;
+  // openSlots maps the token to its ledger entry for a refund on failure.
+  // (In memory: an open build orphaned by a restart keeps its slot — one
+  // lost build on a bad day, never a lost prompt someone paid for.)
+  const open = new OpenAllowance({ log: console });
+  const openSlots = new Map();
   const jobs = new LoomJobs({
+    notify: (job) => push.notify(job),
     onDone: ({ token, usage }) => {
+      if (openSlots.delete(token)) return;   // an open build: counted, nothing to record
       const reg = loadRegistry();
       if (!reg[token]) return;
       recordUsage(reg[token], { input: usage?.input_tokens, output: usage?.output_tokens });
       saveRegistry(reg);
     },
     onFailed: ({ token }) => {
+      const slot = openSlots.get(token);
+      if (slot) { openSlots.delete(token); open.refund(slot); return; }   // the slot goes back
       const reg = loadRegistry();   // the guest got nothing — give the prompt back
       if (!reg[token]) return;
       refundInvite(reg[token]);
@@ -273,13 +289,24 @@ export function mountIntent(app) {
       const token = req.get('x-loom-invite');
       const reg = loadRegistry();
       const entry = token ? reg[token] : null;
-      if (!entry) {
-        return res.status(401).json({ ok: false, error: 'Prompting here needs a guest-pass link or your own API key.' });
-      }
       const v = validateJobInput(req.body);
       if (!v.ok) return res.status(400).json({ ok: false, error: v.error });
       if (jobs.busy()) {
         return res.status(503).json({ ok: false, reason: 'busy', error: 'Loom is building for several people right now — try again in a minute. Your prompt was not counted.' });
+      }
+      if (!entry) {
+        // no pass: an open build on the shop's key, metered by address and app-wide
+        const take = open.take(ip);
+        if (!take.ok) {
+          return res.status(429).json({ ok: false, reason: take.reason, resetsAt: take.resetsAt, error: take.reason === 'ip'
+            ? 'The free builds from this network are used up for today.'
+            : "Loom's free builds for today are all used up." });
+        }
+        const pass = 'op_' + crypto.randomBytes(12).toString('base64url');
+        openSlots.set(pass, take.id);
+        const id = jobs.start({ token: pass, input: v.input, key });
+        console.log(`[intent] open loom build ${id} from ${ip}${v.input.image ? ' (with a picture)' : ''} — ${take.metered ? `${take.remaining} more today for that address` : 'NOT COUNTED (ledger not writable)'}`);
+        return res.status(202).json({ ok: true, job: id, pass, allowance: { scope: 'open', remaining: take.remaining, resetsAt: take.resetsAt } });
       }
       const take = consumeInvite(entry);
       if (!take.ok) {
@@ -320,6 +347,24 @@ export function mountIntent(app) {
     if (r === null) return res.status(404).json({ ok: false, error: 'That build is not on the server.' });
     if (r) console.log(`[intent] loom build ${req.params.id} stopped by its owner — prompt refunded`);
     return res.json({ ok: true, cancelled: r });
+  });
+
+  // the VAPID public key the phone subscribes with (public by nature)
+  app.get('/api/intent/loom/push/key', (_req, res) => {
+    res.set('cache-control', 'no-store');
+    return res.json({ ok: true, key: push.publicKey });
+  });
+
+  // the phone attaches its push subscription to a running build — one ping
+  // when the build ends; only the pass that started it may
+  app.post('/api/intent/loom/job/:id/push', (req, res) => {
+    const token = req.get('x-loom-invite');
+    res.set('cache-control', 'no-store');
+    const clean = cleanSubscription(req.body);
+    const r = token ? jobs.attachPush(String(req.params.id), token, clean) : null;
+    if (r === null) return res.status(404).json({ ok: false, error: 'That build is not on the server.' });
+    if (!r) return res.status(400).json({ ok: false, error: clean ? 'That build has already ended.' : 'That is not a push subscription.' });
+    return res.json({ ok: true });
   });
 
   // Mint a guest pass from the app. The shop's own Anthropic key is the
