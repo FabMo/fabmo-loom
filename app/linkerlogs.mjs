@@ -72,6 +72,7 @@
 // ornament rides above the plank body (y ≥ W), so the notches, the relief
 // and the wall they leave are exactly a plank's.
 
+import { tabSpecFor } from '../ir/machinability.js';
 import { generateProfile } from '../strategies/profile.js';
 import { formatDiameter } from '../strategies/tool-select.js';
 import { bboxOf } from './lattice.mjs';
@@ -688,7 +689,7 @@ export const LINKER_LOG_ENTRIES = {
       for (const pc of current) {
         const prof = generateProfile({ outer: pc.ring }, { diameter: tool }, {
           side: 'outside', totalDepth: t, depthPerPass: Math.min(0.25, tool), safeZ: ctx.safeZ, entry: 'ramp',
-          tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+          tabs: p.tabs ? tabSpecFor(tool, { height: p.tabHeight, spacing: p.tabSpacing }) : null,
         });
         const name = pc.plank ? `plank ${pc.id}` : `connector ${pc.id}`;
         ops.push({

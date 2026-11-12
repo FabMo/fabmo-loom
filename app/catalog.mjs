@@ -31,6 +31,7 @@ import { generateChamfer, imprintChamfer } from '../strategies/chamfer.js';
 import { generateSurfaceRaster } from '../strategies/surface-raster.js';
 import { coverageCurve, pickChainSlotAware, regionArea, formatDiameter } from '../strategies/tool-select.js';
 import ClipperLib from '../vendor/clipper.js';
+import { passDepthFor, pieceMetrics, retentionNeed, tabSpecFor } from '../ir/machinability.js';
 import { FONTS, DEFAULT_FONT } from './fonts.mjs';
 import { weldContours, pathToRegions, offsetRegions, booleanRegions } from './shape.mjs';
 import { TEXTURES, TEXTURE_IDS, sampleTexture, distanceGridForRings, gridSampler, insideGridEvenOdd } from './texture-kernel.mjs';
@@ -581,6 +582,28 @@ const FONT_PARAM = {
   doc: `typeface id — ${FONTS.map(f => `"${f.id}" = ${f.blurb}`).join('; ')}. When the user may want to switch, bind it to a "choice" control whose options are these ids`,
 };
 
+
+// ---- machining policy (ir/machinability.js), applied by every entry ----
+// Depth per pass comes from the bit that cuts it, never a bare constant: the
+// strategy's usual step, capped at one bit diameter and at what a declared
+// shop material allows.
+export const passFor = (ctx, diameter, base) => passDepthFor(diameter, base, ctx?.shop?.material || null);
+// Holding tabs for a piece a cutout frees: on when the entry asks, AND on by
+// policy when the piece is too small to stay put under the shop's declared
+// hold-down (ctx.shop.holdDown) — a safety default the author cannot forget.
+// Tabs are sized to the bit so they really span its kerf.
+export function holdTabs(ctx, ring, p, diameter) {
+  const need = retentionNeed(pieceMetrics(ring), ctx?.shop?.holdDown);
+  const on = !!p.tabs || need.need;
+  return {
+    tabs: on ? tabSpecFor(diameter, { height: p.tabHeight, spacing: p.tabSpacing }) : null,
+    notes: !p.tabs && need.need ? [`holding tabs added — ${need.why}`] : [],
+  };
+}
+// a profile's own warnings ("ring too small for tabs — cut without") must
+// reach the user: a piece that could not be tabbed is cut loose
+const profNotes = (prof) => (prof.warnings ?? []).filter(w => /too small for tabs/.test(w)).map(w => `${w}: this piece is freed LOOSE — tape it down or make it larger`);
+
 export const CATALOG = {
   vcarve_text: {
     doc: 'V-carve text with a vee bit along the medial axis of real font outlines (classic engraved-sign look, variable-width strokes). Counters (the holes of e/o/p) are preserved. Adds flat-bottom clearing automatically where strokes are wider than the bit reaches.',
@@ -786,8 +809,8 @@ export const CATALOG = {
         const acc = { moves: [], rings: [] };
         for (const region of regions) {
           const g = prev == null
-            ? generatePocket(region, { diameter: d }, params)
-            : generateRestPocket(region, prev, { diameter: d }, params);
+            ? generatePocket(region, { diameter: d }, { ...params, depthPerPass: passFor(ctx, d, params.depthPerPass) })
+            : generateRestPocket(region, prev, { diameter: d }, { ...params, depthPerPass: passFor(ctx, d, params.depthPerPass) });
           if (!g.moves.length) continue;
           if (acc.moves.length) acc.moves.push({ type: 'rapid', z: ctx.safeZ });
           acc.moves.push(...g.moves);
@@ -918,8 +941,8 @@ export const CATALOG = {
         let pieceCut = false;
         for (const { d, prev } of chain) {
           const g = prev == null
-            ? generatePocket(region, { diameter: d }, params)
-            : generateRestPocket(region, prev, { diameter: d }, params);
+            ? generatePocket(region, { diameter: d }, { ...params, depthPerPass: passFor(ctx, d, params.depthPerPass) })
+            : generateRestPocket(region, prev, { diameter: d }, { ...params, depthPerPass: passFor(ctx, d, params.depthPerPass) });
           if (prev == null && !g.moves.length) {
             if (regions.length === 1) {
               return; // fall through to the all-pieces error below
@@ -995,7 +1018,7 @@ export const CATALOG = {
       const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX, originY };
       const maskRing = circleRing(c.x, c.y, r);
       const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
-        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        stepoverPct: p.stepoverPct, depthPerPass: passFor(ctx, p.toolDiameter, 0.125), safeZ: ctx.safeZ,
         mask: { outer: maskRing, holes: [] }, outsideZ: 0,
       });
       if (!g.moves.length) {
@@ -1128,7 +1151,7 @@ export const CATALOG = {
       const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
 
       const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
-        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        stepoverPct: p.stepoverPct, depthPerPass: passFor(ctx, p.toolDiameter, 0.125), safeZ: ctx.safeZ,
         mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
       });
       if (!g.moves.length) {
@@ -1232,7 +1255,7 @@ export const CATALOG = {
       const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
 
       const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
-        stepoverPct: p.stepoverPct, depthPerPass: 0.125, safeZ: ctx.safeZ,
+        stepoverPct: p.stepoverPct, depthPerPass: passFor(ctx, p.toolDiameter, 0.125), safeZ: ctx.safeZ,
         mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
       });
       if (!g.moves.length) {
@@ -1351,7 +1374,7 @@ export const CATALOG = {
       const heightmap = { heights, cols, rows, dx: cell, dy: cell, originX: ox, originY: oy };
 
       const g = generateSurfaceRaster(heightmap, { diameter: p.toolDiameter }, {
-        stepoverPct: p.stepoverPct, depthPerPass: 0.25, safeZ: ctx.safeZ,
+        stepoverPct: p.stepoverPct, depthPerPass: passFor(ctx, p.toolDiameter, 0.25), safeZ: ctx.safeZ,
         mask, outsideZ: 0, feedRate: p.feedRate, plungeRate: 30,
       });
       if (!g.moves.length) {
@@ -1443,7 +1466,7 @@ export const CATALOG = {
       const warnings = [...alongWarnings];
       for (const q of centers) {
         const g = generateBore({ centerX: q.x, centerY: q.y, radius: r }, { diameter: p.toolDiameter }, {
-          totalDepth: depth, depthPerPass: 0.125, safeZ: ctx.safeZ,
+          totalDepth: depth, depthPerPass: passFor(ctx, p.toolDiameter, 0.125), safeZ: ctx.safeZ,
         });
         if (!g.moves.length) {
           return { error: `bore_hole: ${g.warnings[0] ?? 'nothing to cut'} — use a smaller bit or a bigger hole` };
@@ -1469,6 +1492,296 @@ export const CATALOG = {
     },
   },
 
+  // PART-FIRST: the model describes a flat part — its outline and the
+  // features in it, each a shape at a depth — and the PLANNER below does
+  // the CAM: which features nest (a counterbore is a deep hole inside a
+  // shallow one), which become bores and which pockets, which bit each
+  // needs, and the order (shallow before deep, the cutout last, tabs by
+  // policy). No op order, no tool choice, no overlap allowances for the
+  // model to get wrong — the classes the nightly ledger keeps finding
+  // (counterbores, overlapping pockets, bore-vs-pocket, cutout-as-slot).
+  part: {
+    doc: 'A FLAT PART WITH FEATURES, described as geometry and planned by the app — the PREFERRED verb for any plate, jig, bracket, panel, base, tray or enclosure face with holes, slots, pockets or counterbores. Give the OUTLINE and a list of FEATURES, each a shape at a DEPTH ("through" or inches); the app works out the machining: nested features step down correctly (a counterbore is just a shallow circle and a through circle at the same center — list both), round holes are bored, everything else is pocketed, small features get a smaller bit automatically, and the part is cut free LAST with holding tabs when it needs them. Features may overlap or nest freely: where two overlap, the DEEPER one wins. A through feature that crosses the outline becomes a notch in the edge. You never order operations or pick bits for a part. Coordinates are inches, x right and y up, in the outline\'s own frame: a built-in rectangle or circle outline is centered on the origin, a shape id keeps its authored coordinates. Text or a V-carve ON the part: put that op BEFORE the part op (the part wraps content machined so far, like any cutout). Example — a 6 × 3 fence with two counterbored bolt holes and a T-slot: outline "rectangle", width 6, height 3, features [{"shape":"circle","x":-2,"y":0,"diameter":0.75,"depth":0.25},{"shape":"circle","x":-2,"y":0,"diameter":0.3125,"depth":"through"},{"shape":"circle","x":2,"y":0,"diameter":0.75,"depth":0.25},{"shape":"circle","x":2,"y":0,"diameter":0.3125,"depth":"through"},{"shape":"slot","x":0,"y":0.8,"width":3,"height":0.375,"depth":"through"}].',
+    wrapsContent: true,
+    params: {
+      outline: { type: 'string', default: 'rectangle', doc: '"rectangle" (width × height, cornerRadius), "circle" (diameter), or the id of a closed shapes-section entry' },
+      width: { type: 'number', default: 6, template: true, doc: 'rectangle outline: width, inches', bindable: true },
+      height: { type: 'number', default: 4, template: true, doc: 'rectangle outline: height, inches', bindable: true },
+      cornerRadius: { type: 'number', default: 0.125, doc: 'rectangle outline: corner radius, inches' },
+      diameter: { type: 'number', default: 4, template: true, doc: 'circle outline: diameter, inches', bindable: true },
+      features: { type: 'object', default: [], doc: 'the features, any order: [{shape, depth, …}]. shape "circle" {x, y, diameter}; "rectangle" {x, y, width, height, cornerRadius?, angle?}; "slot" {x, y, width, height, angle?} (a round-ended slot, width the long way); or a closed shape id {shape:"<id>"} in authored coordinates (x/y then SHIFT it). depth: "through" or inches below the top face. angle: degrees counter-clockwise about the feature center. Repeat one feature at several places with at: "x y; x y; …" instead of x/y. Every number may be a number, or arithmetic over control and derived ids ("len/2 - 1").' },
+      toolDiameter: { type: 'number', default: 0.25, doc: 'the main endmill, inches — used for the cutout and every feature it fits; smaller features get a smaller bit from the drawer automatically' },
+      feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
+      posX: { type: 'number', default: 0, template: true, doc: 'built-in outlines only: ABSOLUTE X of the part\'s center, inches; 0/absent = centered on the content machined so far (or the origin)' },
+      posY: { type: 'number', default: 0, template: true, doc: 'built-in outlines only: ABSOLUTE Y of the part\'s center, inches' },
+      tabs: { type: 'boolean', default: false, doc: 'force holding tabs; leave false — the app adds them itself when the freed part is small enough to move' },
+      tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
+      tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches' },
+    },
+    run(p, ctx) {
+      const T = ctx.stock.thickness;
+      const D = p.toolDiameter;
+      const warnings = [];
+      // ---- the outline, and the frame the features live in ----
+      let outer, origin = { x: 0, y: 0 };
+      if (p.outline === 'rectangle' || p.outline === 'circle') {
+        const c = contentCenter(ctx);
+        if (Number.isFinite(p.posX) && p.posX !== 0) c.x = p.posX;
+        if (Number.isFinite(p.posY) && p.posY !== 0) c.y = p.posY;
+        origin = c;
+        if (p.outline === 'circle') {
+          if (!(p.diameter > 0)) return { error: 'part: a circle outline needs a diameter' };
+          outer = circleRing(c.x, c.y, p.diameter / 2);
+        } else {
+          if (!(p.width > 0 && p.height > 0)) return { error: 'part: a rectangle outline needs a width and a height' };
+          outer = roundedRectRing(c.x - p.width / 2, c.y - p.height / 2, c.x + p.width / 2, c.y + p.height / 2, Math.max(0, Math.min(p.cornerRadius, p.width / 2, p.height / 2)));
+        }
+      } else {
+        const cs = namedShapeRegion(ctx, p.outline, 'a part outline');
+        if (cs.error) return { error: `part: ${cs.error} (outline is "rectangle", "circle" or a closed shape id)` };
+        warnings.push(...cs.warnings);
+        outer = cs.region.outer;
+      }
+      let outline = [{ outer: ccw(outer), holes: [] }];
+
+      // ---- features → regions at a depth ----
+      const list = Array.isArray(p.features) ? p.features : (p.features && typeof p.features === 'object' ? Object.values(p.features) : []);
+      if (list.length > 200) return { error: 'part: more than 200 features — use a pattern shape and pocket_shape for a dense field' };
+      const num = (v0, what, fi, dflt) => {
+        let v = v0;
+        if (v === undefined || v === null || v === '') return dflt === undefined ? { error: `part: feature ${fi + 1} needs ${what}` } : { value: dflt };
+        // a control binding, the same form every op param takes
+        if (v && typeof v === 'object') {
+          if (typeof v.ctrl !== 'string') return { error: `part: feature ${fi + 1} ${what} must be a number, arithmetic, or {"ctrl":"id"}` };
+          v = v.ctrl;
+        }
+        const r = ctx.evalNumber(v);
+        if (r.error || !Number.isFinite(r.value)) return { error: `part: feature ${fi + 1} ${what}: ${r.error ?? 'not a number'}` };
+        return r;
+      };
+      const feats = [];   // { regions, depth, through, circle?: {x, y, r}, label }
+      for (let fi = 0; fi < list.length; fi++) {
+        const f = list[fi];
+        if (!f || typeof f !== 'object') return { error: `part: feature ${fi + 1} is not an object` };
+        const kind = String(f.shape ?? 'circle');
+        let depth, through = false;
+        if (typeof f.depth === 'string' && /^(through|thru|full)$/i.test(f.depth.trim())) { depth = T; through = true; }
+        else {
+          const d = num(f.depth, 'a depth ("through" or inches)', fi);
+          if (d.error) return d;
+          depth = d.value;
+          if (!(depth > 0)) return { error: `part: feature ${fi + 1} depth must be more than 0 (or "through")` };
+          if (depth >= T - 1e-6) { depth = T; through = true; }
+        }
+        // where: one x/y, or several in `at`
+        const spots = [];
+        if (typeof f.at === 'string' && f.at.trim()) {
+          for (const pair of f.at.split(';')) {
+            if (!pair.trim()) continue;
+            const xy = pair.trim().split(/[\s,]+/);
+            if (xy.length !== 2) return { error: `part: feature ${fi + 1}: could not read "${pair.trim()}" in at — each entry is one "x y" pair` };
+            const ax = num(xy[0], 'at x', fi), ay = num(xy[1], 'at y', fi);
+            if (ax.error) return ax; if (ay.error) return ay;
+            spots.push({ x: ax.value, y: ay.value });
+          }
+          if (!spots.length) return { error: `part: feature ${fi + 1}: "at" holds no positions` };
+        } else {
+          const fx = num(f.x, 'x', fi, 0), fy = num(f.y, 'y', fi, 0);
+          if (fx.error) return fx; if (fy.error) return fy;
+          spots.push({ x: fx.value, y: fy.value });
+        }
+        const ang = num(f.angle, 'angle', fi, 0);
+        if (ang.error) return ang;
+        const ca = Math.cos(ang.value * Math.PI / 180), sa = Math.sin(ang.value * Math.PI / 180);
+        for (const sp of spots) {
+          const cx = origin.x + sp.x, cy = origin.y + sp.y;
+          const turn = (ring) => (ang.value ? ring.map(q => ({ x: cx + (q.x - cx) * ca - (q.y - cy) * sa, y: cy + (q.x - cx) * sa + (q.y - cy) * ca })) : ring);
+          if (kind === 'circle') {
+            const dia = num(f.diameter, 'a diameter', fi);
+            if (dia.error) return dia;
+            if (!(dia.value > 0)) return { error: `part: feature ${fi + 1} diameter must be more than 0` };
+            feats.push({ regions: [{ outer: circleRing(cx, cy, dia.value / 2), holes: [] }], depth, through, circle: { x: cx, y: cy, r: dia.value / 2 }, label: `${formatDiameter(dia.value)} hole` });
+          } else if (kind === 'rectangle' || kind === 'slot') {
+            const w = num(f.width, 'a width', fi), h = num(f.height, 'a height', fi);
+            if (w.error) return w; if (h.error) return h;
+            if (!(w.value > 0 && h.value > 0)) return { error: `part: feature ${fi + 1} width and height must be more than 0` };
+            const cr = kind === 'slot' ? { value: Math.min(w.value, h.value) / 2 } : num(f.cornerRadius, 'cornerRadius', fi, 0);
+            if (cr.error) return cr;
+            const rad = Math.max(0, Math.min(cr.value, w.value / 2, h.value / 2));
+            feats.push({ regions: [{ outer: turn(roundedRectRing(cx - w.value / 2, cy - h.value / 2, cx + w.value / 2, cy + h.value / 2, rad)), holes: [] }], depth, through, label: `${+w.value.toFixed(3)}" × ${+h.value.toFixed(3)}" ${kind}` });
+          } else {
+            const cs = namedShapeRegionsAll(ctx, kind, 'a part feature');
+            if (cs.error) return { error: `part: feature ${fi + 1}: ${cs.error} (shape is "circle", "rectangle", "slot" or a closed shape id)` };
+            // a shape id keeps its authored coordinates; x/y shift it
+            const mv = (ring) => turn(ring.map(q => ({ x: q.x + sp.x, y: q.y + sp.y })));
+            feats.push({ regions: cs.regions.map(r => ({ outer: mv(r.outer), holes: r.holes.map(mv) })), depth, through, label: `shape "${kind}"` });
+          }
+        }
+      }
+
+      // ---- features against the outline ----
+      // through features that reach the edge are NOTCHES: they come out
+      // of the outline itself. Everything else is clipped to the part.
+      const outlineArea0 = regionArea(outline[0]);
+      const interior = [];
+      const areaOf = (regs) => regs.reduce((a, r) => a + regionArea(r), 0);
+      const against = (f) => {
+        const inside = booleanRegions('intersect', [f.regions, outline]).regions ?? [];
+        const aIn = areaOf(inside), aAll = areaOf(f.regions);
+        return { inside, aIn, crosses: aIn < aAll - Math.max(1e-4, aAll * 0.002) };
+      };
+      // Notches first, and to a fixed point: taking a notch out of the
+      // outline can open ANOTHER through feature to the edge (a tube hole
+      // with a snap mouth cut into it from the edge — the mouth is a notch,
+      // and then so is the hole). Only when no through feature crosses the
+      // outline any more are the rest judged against it.
+      let pending = feats;
+      for (let pass = 0, changed = true; changed && pass <= feats.length; pass++) {
+        changed = false;
+        const keep = [];
+        for (const f of pending) {
+          const t = f.through ? against(f) : null;
+          if (!t || !t.crosses || t.aIn < 1e-6) { keep.push(f); continue; }
+          const cut = booleanRegions('difference', [outline, f.regions]).regions ?? [];
+          if (!cut.length) return { error: `part: a through ${f.label} removes the whole part` };
+          cut.sort((a, b) => regionArea(b) - regionArea(a));
+          if (cut.length > 1) warnings.push(`a through ${f.label} cuts the part in two — keeping the larger piece`);
+          // a notch that leaves an island becomes an interior through feature instead
+          for (const h of cut[0].holes) keep.push({ regions: [{ outer: ccw(h), holes: [] }], depth: T, through: true, label: f.label });
+          outline = [{ outer: ccw(cut[0].outer), holes: [] }];
+          changed = true;
+        }
+        pending = keep;
+      }
+      for (const f of pending) {
+        const { inside, aIn, crosses } = against(f);
+        if (aIn < 1e-6) { warnings.push(`a ${f.label} lies outside the part — ignored`); continue; }
+        // a blind feature that reaches the edge is an OPEN pocket (a rabbet,
+        // a ledge): it overruns the edge a little into the cutout's kerf, so
+        // no sliver is left standing — the one overlap with the cutout that
+        // is meant, and it is scoped to this part's own cutout below
+        if (crosses) {
+          const reach = booleanRegions('intersect', [f.regions, offsetRegions(outline, EDGE_GRACE)]).regions ?? inside;
+          interior.push({ ...f, regions: reach.length ? reach : inside, circle: undefined, edge: true });
+        } else interior.push(f);
+      }
+      if (regionArea(outline[0]) < outlineArea0 * 0.05) return { error: 'part: the notches leave almost nothing of the part' };
+      const ring = outline[0].outer;
+
+      // ---- the depth map, as stepped levels per group of touching features ----
+      // union-find over features whose regions overlap
+      const parent = interior.map((_, i) => i);
+      const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+      const fbox = interior.map(f => ringBBox(f.regions.map(r => r.outer)));
+      for (let i = 0; i < interior.length; i++) for (let j = i + 1; j < interior.length; j++) {
+        const a = fbox[i], b = fbox[j];
+        if (a.minX > b.maxX || b.minX > a.maxX || a.minY > b.maxY || b.minY > a.maxY) continue;
+        const x = booleanRegions('intersect', [interior[i].regions, interior[j].regions]).regions ?? [];
+        if (x.reduce((s, r) => s + regionArea(r), 0) > 1e-6) parent[find(i)] = find(j);
+      }
+      const groups = new Map();
+      interior.forEach((f, i) => { const g = find(i); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(f); });
+
+      const ops = [];
+      // unique per part op on the board (the outline's own geometry), so two
+      // parts in one job never excuse each other's overlaps
+      const ob = ringBBox([ring]);
+      const partKey = `part:${ctx.opId ?? ''}:${ob.minX.toFixed(3)},${ob.minY.toFixed(3)},${ob.maxX.toFixed(3)},${ob.maxY.toFixed(3)}`;
+      const edgeToken = `${partKey}:edge`;
+      const drawerFor = (dia) => [D, ...DRAWER.filter(d => d < D)].find(d => d <= dia + 1e-9 && dia <= 3 * d + 1e-9) ?? null;
+      let gi = 0;
+      for (const members of groups.values()) {
+        gi++;
+        const depths = [...new Set(members.map(f => +f.depth.toFixed(5)))].sort((a, b) => a - b);
+        // several depths in one group = steps cut one inside another: their
+        // footprints overlap BY DESIGN, and only with each other
+        const edge = members.some(f => f.edge);
+        // (an open pocket shares the EDGE token with the cutout instead)
+        const token = edge ? edgeToken : depths.length > 1 ? `${partKey}:${gi}` : undefined;
+        for (const depth of depths) {
+          const at = members.filter(f => f.depth >= depth - 1e-6);
+          const level = at.length === 1 ? at[0].regions : (booleanRegions('union', at.map(f => f.regions)).regions ?? []);
+          const through = depth >= T - 1e-6;
+          for (const region of level) {
+            // a piece of this level that IS one circle is a bore; anything else is a pocket
+            const area = regionArea(region);
+            const circ = !region.holes.length ? at.find(f => f.circle && Math.abs(Math.PI * f.circle.r * f.circle.r - area) < 0.02 * area + 1e-4
+              && pointInPolygon(f.circle.x, f.circle.y, region)) : null;
+            const boreTool = circ ? drawerFor(circ.circle.r * 2) : null;
+            const what = `${through ? 'through' : `${+depth.toFixed(3)}" deep`} ${circ ? formatDiameter(circ.circle.r * 2) + ' hole' : 'feature'}`;
+            if (boreTool) {
+              const g = generateBore({ centerX: circ.circle.x, centerY: circ.circle.y, radius: circ.circle.r }, { diameter: boreTool }, { totalDepth: depth, depthPerPass: passFor(ctx, boreTool, 0.125), safeZ: ctx.safeZ });
+              if (g.moves.length) {
+                ops.push({
+                  _d: boreTool, _depth: depth, subName: `bore ${ops.length + 1}`,
+                  tool: { name: `${formatDiameter(boreTool)} endmill`, diameter: boreTool }, cutter: { type: 'flat', diameter: boreTool },
+                  feedRate: Math.min(p.feedRate, 60), plungeRate: 30, moves: g.moves,
+                  target: { type: 'region', rings: g.target.rings, depth },
+                  previewRegions: [region], edgeScopeRoot: token, cutsRoot: token,
+                  why: [boreTool === D ? paramToolWhy(D) : `${formatDiameter(boreTool)} endmill: the ${formatDiameter(circ.circle.r * 2)} hole is smaller than the ${formatDiameter(D)} main bit`],
+                });
+                continue;
+              }
+            }
+            if (circ && circ.circle.r * 2 < DRAWER[DRAWER.length - 1]) return { error: `part: a ${formatDiameter(circ.circle.r * 2)} hole is smaller than the smallest bit in the drawer` };
+            // pocket: the main bit when it fits, else the drawer's pick
+            const pp = { stepoverPct: 40, totalDepth: depth, safeZ: ctx.safeZ, feedRate: p.feedRate, plungeRate: 30 };
+            let chain = [{ d: D, prev: null }], toolWhy = paramToolWhy(D), toolCurve;
+            let first = generatePocket(region, { diameter: D }, { ...pp, depthPerPass: passFor(ctx, D, 0.125) });
+            if (!first.moves.length) {
+              const auto = autoToolChain([region], depth);
+              if (auto.error) return { error: `part: a ${what} cannot be cut — ${auto.error}` };
+              chain = auto.chain; toolWhy = pickedToolWhy(auto); toolCurve = auto.curve; first = null;
+            }
+            let cut = false;
+            for (const { d, prev } of chain) {
+              const g = prev == null
+                ? (first ?? generatePocket(region, { diameter: d }, { ...pp, depthPerPass: passFor(ctx, d, 0.125) }))
+                : generateRestPocket(region, prev, { diameter: d }, { ...pp, depthPerPass: passFor(ctx, d, 0.125) });
+              if (!g.moves.length) continue;
+              cut = true;
+              ops.push({
+                _d: d, _depth: depth, subName: `${prev == null ? 'pocket' : 'rest'} ${ops.length + 1}`,
+                allowOverlap: prev != null,
+                tool: { name: `${formatDiameter(d)} endmill`, diameter: d }, cutter: { type: 'flat', diameter: d },
+                feedRate: p.feedRate, plungeRate: 30, moves: g.moves,
+                target: g.target ?? { type: 'region', rings: [ccw(region.outer), ...region.holes.map(cwr)], depth },
+                ...(prev == null ? { previewRegions: [region], why: [toolWhy], toolCurve } : { why: [restWhy(d, prev)] }),
+                ...(prev == null ? { edgeScopeRoot: token, cutsRoot: token } : {}),
+              });
+            }
+            if (!cut) return { error: `part: no bit fits a ${what} — enlarge it` };
+          }
+        }
+      }
+      // shallow before deep, and one bit at a time: the main bit's
+      // features first, then each smaller bit, then back for the cutout
+      ops.sort((a, b) => (b._d - a._d) || (a._depth - b._depth));
+      for (const o of ops) { delete o._d; delete o._depth; if (!o.edgeScopeRoot) { delete o.edgeScopeRoot; delete o.cutsRoot; } }
+
+      // ---- the cutout, last ----
+      noteContent(ctx, [ring]);
+      const hold = holdTabs(ctx, ring, p, D);
+      const prof = generateProfile({ outer: ring, holes: [] }, { diameter: D }, {
+        side: 'outside', totalDepth: T, depthPerPass: passFor(ctx, D, 0.25), safeZ: ctx.safeZ, entry: 'ramp', tabs: hold.tabs,
+      });
+      if (!prof.moves?.length) return { error: 'part: the outline could not be cut — it is too small or too tight for the bit' };
+      const throughN = interior.filter(f => f.through).length;
+      ops.push({
+        subName: 'cut free',
+        tool: { name: `${formatDiameter(D)} endmill`, diameter: D }, cutter: { type: 'flat', diameter: D },
+        feedRate: p.feedRate, plungeRate: 30, moves: prof.moves,
+        target: { type: 'profile', side: 'outside', rings: [ring], depth: T },
+        previewRing: ring, previewTabs: prof.tabs,
+        cutsRoot: edgeToken,
+        warnings: [...warnings, ...hold.notes, ...profNotes(prof)],
+        why: [`planned by the app: ${interior.length} feature${interior.length === 1 ? '' : 's'} (${throughN} through) in ${groups.size} group${groups.size === 1 ? '' : 's'}, cut shallow to deep, the outline last`],
+      });
+      const bb = ringBBox([ring]);
+      return { ops, bbox: { minX: bb.minX - D / 2, minY: bb.minY - D / 2, maxX: bb.maxX + D / 2, maxY: bb.maxY + D / 2 } };
+    },
+  },
+
   disc_cutout: {
     doc: 'Cut out a ROUND part of an explicit diameter — coasters, discs, wheels — through the full stock thickness with an endmill (ramp entry, depth passes), centered on the content machined so far (or standing alone) — or PINNED at an explicit posX/posY center so off-center layouts hold still. Use this, not tag_cutout, when the user names a round part or gives its diameter. Everything machined since the previous cutout (this piece\'s content) must fit inside the disc. A cutout FREES A PIECE AND ENDS IT: the ops after it belong to the NEXT piece — author that one about the origin too (its own holes/engraving, then its own cutout) and the app lays the pieces out side by side, so a SET (six stacking rings = six × [bore_hole, disc_cutout], a base and its lid, a run of coasters) cuts in ONE job. A disc that encloses the previous piece whole instead NESTS it (a ring from a disc: disc_cutout 1" then disc_cutout 3"). Holding tabs available, same behavior as tag_cutout; without tabs, hold with tape/onion skin.',
     wrapsContent: true,   // centers on content; pinnable via posX/posY
@@ -1478,7 +1791,7 @@ export const CATALOG = {
       posY: { type: 'number', default: 0, template: true, doc: 'ABSOLUTE Y of the disc\'s center, inches, {arithmetic} allowed; 0/absent = center on content' },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
-      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabs: { type: 'boolean', default: false, doc: 'force triangular holding tabs on the final passes. Leave false: the app ADDS tabs by itself whenever the freed piece is too small to stay put under the shop\'s hold-down (and says so in the weave report), sized to the bit' },
       tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
       tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches; at least 4 regardless' },
       chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the disc\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
@@ -1511,10 +1824,11 @@ export const CATALOG = {
         return { error: `a ${p.diameter}" disc ${pinned ? `pinned at (${c.x.toFixed(2)}, ${c.y.toFixed(2)}) ` : ''}is too small for the content so far (needs ≥ ${need.toFixed(2)}" diameter${pinned ? ' around that center — move the content, enlarge the disc, or clear posX/posY to recenter' : ''})${who}` };
       }
       const ring = circleRing(c.x, c.y, R);
+      const hold = holdTabs(ctx, ring, p, p.toolDiameter);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
-        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
+        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: passFor(ctx, p.toolDiameter, 0.25),
         safeZ: ctx.safeZ, entry: 'ramp',
-        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+        tabs: hold.tabs,
       });
       const ops = [];
       if (p.chamfer > 0) {
@@ -1531,6 +1845,7 @@ export const CATALOG = {
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
         previewRing: ring,
         previewTabs: prof.tabs,
+        warnings: [...hold.notes, ...profNotes(prof)],
       });
       return {
         ops,
@@ -1554,7 +1869,7 @@ export const CATALOG = {
       height: { type: 'number', default: 0, doc: 'inline path only: finished part height, inches; 0 = scale uniformly from width (aspect preserved), or true size if width is also 0', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
-      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabs: { type: 'boolean', default: false, doc: 'force triangular holding tabs on the final passes. Leave false: the app ADDS tabs by itself whenever the freed piece is too small to stay put under the shop\'s hold-down (and says so in the weave report), sized to the bit' },
       tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches' },
       tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs, inches; at least 4 regardless' },
       chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the part\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
@@ -1620,10 +1935,11 @@ export const CATALOG = {
         for (let y = b.minY; y <= b.maxY + 1e-9; y += step) { walk.push([b.minX, y], [b.maxX, y]); }
         if (walk.some(([x, y]) => !pointInPolygon(x, y, graceRegion))) return cutoutFitError(ctx, ring, [], why);
       }
+      const hold = holdTabs(ctx, ring, p, p.toolDiameter);
       const prof = generateProfile(shapeRegion, { diameter: p.toolDiameter }, {
-        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
+        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: passFor(ctx, p.toolDiameter, 0.25),
         safeZ: ctx.safeZ, entry: 'ramp',
-        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+        tabs: hold.tabs,
       });
       const ops = [];
       if (p.chamfer > 0) {
@@ -1640,7 +1956,7 @@ export const CATALOG = {
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
         previewRing: ring,
         previewTabs: prof.tabs,
-        warnings,
+        warnings: [...warnings, ...hold.notes, ...profNotes(prof)],
       });
       const bb = ring.reduce((a, q) => ({
         minX: Math.min(a.minX, q.x), minY: Math.min(a.minY, q.y),
@@ -1671,7 +1987,7 @@ export const CATALOG = {
       height: { type: 'number', default: 0, template: true, doc: 'explicit tag height, inches, {arithmetic} allowed; 0/absent = size from the content + buffer', bindable: true },
       toolDiameter: { type: 'number', default: 0.25, doc: 'endmill diameter, inches' },
       feedRate: { type: 'number', default: 80, doc: 'inches per minute' },
-      tabs: { type: 'boolean', default: false, doc: 'leave triangular holding tabs on the final passes' },
+      tabs: { type: 'boolean', default: false, doc: 'force triangular holding tabs on the final passes. Leave false: the app ADDS tabs by itself whenever the freed piece is too small to stay put under the shop\'s hold-down (and says so in the weave report), sized to the bit' },
       tabHeight: { type: 'number', default: 0.08, doc: 'tab height above the cut bottom, inches (capped at half the stock thickness)' },
       tabSpacing: { type: 'number', default: 6, doc: 'target spacing between tabs along the profile, inches; at least 4 tabs regardless' },
       chamfer: { type: 'number', default: 0, min: 0, max: 0.2, doc: '0 = square edge; otherwise ease the tag\'s top rim with a 45° chamfer this wide (inches), cut by a 90° V-bit before the part is freed (adds a toolchange)', bindable: true },
@@ -1716,10 +2032,11 @@ export const CATALOG = {
         return { error: `the pinned tag (${f(w)}" × ${f(h)}" centered at ${f(cx)}, ${f(cy)}) no longer contains the content (${f(b.minX)}..${f(b.maxX)} × ${f(b.minY)}..${f(b.maxY)}, ${f(b.maxX - b.minX)}" × ${f(b.maxY - b.minY)}" in all)${who ? ` — ops ${who}. Shrink or move those until the whole content fits` : ' — move the content back inside'}, or enlarge width/height (at least ${f(needW)}" × ${f(needH)}" around this center), or clear posX/posY/width/height to let the tag size itself again` };
       }
       const ring = roundedRectRing(x0, y0, x1, y1, p.cornerRadius);
+      const hold = holdTabs(ctx, ring, p, p.toolDiameter);
       const prof = generateProfile({ outer: ring }, { diameter: p.toolDiameter }, {
-        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: 0.25,
+        side: 'outside', totalDepth: ctx.stock.thickness, depthPerPass: passFor(ctx, p.toolDiameter, 0.25),
         safeZ: ctx.safeZ, entry: 'ramp',
-        tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+        tabs: hold.tabs,
       });
       const ops = [];
       if (p.chamfer > 0) {
@@ -1736,6 +2053,7 @@ export const CATALOG = {
         target: { type: 'profile', side: 'outside', rings: [ring], depth: ctx.stock.thickness },
         previewRing: ring,
         previewTabs: prof.tabs,
+        warnings: [...hold.notes, ...profNotes(prof)],
       });
       return {
         ops,
@@ -1779,8 +2097,9 @@ export function registerCatalogEntries(entries) {
 }
 
 // Human/LLM-readable catalog documentation, assembled for the grounding prompt.
-export function catalogDoc() {
-  return Object.entries(CATALOG).map(([key, e]) => {
+// `only(key)` limits the listing to some entries (prompt routing); omitted = all
+export function catalogDoc(only = null) {
+  return Object.entries(CATALOG).filter(([key]) => !only || only(key)).map(([key, e]) => {
     const params = Object.entries(e.params).map(([k, s]) =>
       `    ${k} (${s.type}${s.default !== undefined ? `, default ${s.default}` : ''}${s.bindable ? ', bindable to a control' : ''}): ${s.doc}`
     ).join('\n');

@@ -23,6 +23,7 @@ import { svgAssetToRegions } from './svg.mjs';
 import { GLYPHS, glyphById } from './glyphs.mjs';
 import { composeJob, postJobToSbp, postJobToGcode } from '../ir/job.js';
 import { verifyJob } from '../ir/verify.js';
+import { checkMachinability } from '../ir/machinability.js';
 import { recommendFeeds, DEFAULT_MACHINE, MATERIALS } from '../ir/tools.js';
 
 export const EMPTY_RECIPE = {
@@ -729,6 +730,13 @@ function resolveParams(entry, op, controlValues, vars, errors, warnings) {
   return out;
 }
 
+
+// Which machinability checks REFUSE a job and which only warn. All four
+// start as warnings: the corpus sweep (tools/synth-probe/
+// machinability-sweep.mjs) counts what each would refuse, and a check is
+// promoted to 'error' only once that count has been looked at.
+export const MACHINABILITY_LEVELS = { reach: 'warn', passDepth: 'warn', retention: 'warn', web: 'warn' };
+
 /**
  * @param {Object} fonts  font id → ArrayBuffer (the loaded font shelf,
  *                        see fonts.mjs); strategies look up by param
@@ -1345,6 +1353,9 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
     const t = { name: r.tool.name, diameter: r.tool.diameter };
     if (r.tool.kind) t.kind = r.tool.kind;
     if (r.tool.angleDeg) t.angleDeg = r.tool.angleDeg;
+    // a rack bit's declared cutting length is its reach for the
+    // machinability gate (absent: 4× diameter)
+    if (fromRack && hit.maxDepth > 0) t.maxDepth = hit.maxDepth;
     const rec = toolFeeds.get(key);
     if (rec) t.rpm = rec.rpm;   // per-tool TR/S at the toolchange
     tools[n] = t;
@@ -1422,6 +1433,18 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   // coverage residual is meaningless for line engraving (see engraver notes);
   // gouge/depth/intrusion stay hard errors.
   const report = verifyJob(job, composed, { coverageWarnPct: 100 });
+  // the second gate: is the cut physically sound (ir/machinability.js) —
+  // bit reach, material met per pass, loose pieces, thin walls. Measured
+  // from the placed motion, reported beside the verifier's verdict, never
+  // folded into it. MACHINABILITY_LEVELS says which checks refuse a job and
+  // which only warn.
+  let machinability;
+  try {
+    machinability = checkMachinability(job, { holdDown: shop?.holdDown, levels: MACHINABILITY_LEVELS });
+  } catch (e) {
+    // the gate must never take a weave down with it; say so instead
+    machinability = { ok: true, errors: [], warnings: [`machinability not checked: ${String(e?.message ?? e).slice(0, 160)}`], ops: [], pieces: [], webs: [], failed: true };
+  }
 
   // ---- why-these-choices: the decision record, accumulated instead of
   // discarded. Every entry is the deterministic evidence behind a choice
@@ -1457,15 +1480,15 @@ export function runRecipe(recipe, controlValues, fonts, terrains = {}, shop = {}
   }
 
   const result = {
-    ok: report.ok,
-    errors: report.errors,
-    warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings],
-    report, job, composed, rationale, ingredients,
+    ok: report.ok && machinability.ok,
+    errors: [...report.errors, ...machinability.errors],
+    warnings: [...shapesWarnings, ...strategyWarnings, ...report.warnings, ...machinability.warnings],
+    report, machinability, job, composed, rationale, ingredients,
     // separate pieces this one run frees (nested cutouts count once)
     pieces,
     preview: { built, placement, stock: autoStock, shapeOutlines, assemblies, setups, kits },
   };
-  if (report.ok) {
+  if (result.ok) {
     result.sbp = postJobToSbp(job, composed, { title: `Loom — ${recipe.name}` });
     result.gcode = postJobToGcode(job, composed, { title: `Loom — ${recipe.name}` });
   }

@@ -16,6 +16,7 @@
 // — a notch that would cut a rib in two, or land where the rib is thinner
 // than half a slat plus a wall, is dropped or refused BY NAME.
 
+import { passDepthFor, tabSpecFor } from '../ir/machinability.js';
 import { generateProfile } from '../strategies/profile.js';
 import { booleanRegions, offsetRegions } from './shape.mjs';
 import { formatDiameter } from '../strategies/tool-select.js';
@@ -266,8 +267,8 @@ export const RIB_CHAIR_ENTRIES = {
       let all = null;
       for (const pc of current) {
         const prof = generateProfile({ outer: pc.ring }, { diameter: p.toolDiameter }, {
-          side: 'outside', totalDepth: t, depthPerPass: 0.25, safeZ: ctx.safeZ, entry: 'ramp',
-          tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+          side: 'outside', totalDepth: t, depthPerPass: passDepthFor(p.toolDiameter, 0.25, ctx.shop?.material || null), safeZ: ctx.safeZ, entry: 'ramp',
+          tabs: p.tabs ? tabSpecFor(p.toolDiameter, { height: p.tabHeight, spacing: p.tabSpacing }) : null,
         });
         ops.push({
           subName: `${pc.kind} ${pc.id}`,

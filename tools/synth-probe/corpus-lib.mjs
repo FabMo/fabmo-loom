@@ -64,7 +64,7 @@ export function usesGuestStrategy(row, env) {
 
 // deterministic stand-in grids for terrain references (the browser
 // resolver can't run here; the reference is what's under test)
-function syntheticGrids(recipe) {
+export function syntheticGrids(recipe) {
   const grids = {};
   for (const t of recipe.terrains ?? []) {
     const cols = 200, rows = 150, elev = new Float32Array(cols * rows);

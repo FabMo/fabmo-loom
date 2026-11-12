@@ -260,10 +260,102 @@ const PHOTO_LIKENESS_RULE = `- A LIKENESS FROM THE PICTURE: when the subject the
 
 const PICTURE_RULE = `- FROM A PICTURE: the user attached an image of what they want. Read it like a shop designer handed a photo and a tape-measure note. The PICTURE decides kind, structure and proportion (a 5-bay cube unit two rows high; a plaque with a name over a symbol; a bench with a stretcher). The TEXT decides the numbers — perspective makes pixel measurement worthless, so never derive a dimension from the picture when the user stated one; use it for RATIOS scaled to the stated size, and when nothing is stated choose real-world sizes and SAY in the summary that they are guesses. Reinterpret into this catalog, don't transcribe: a dowelled or face-framed cabinet becomes a furniture_design in tenoned panels; add what the picture hides but the piece needs (a back, a stretcher) and name the addition in the summary. A recognizable likeness, a logo or lettering style in the picture still cannot be traced from it (the likeness rule above holds — offer draw or an SVG upload); turned legs, carved or profiled moulding, upholstery and hardware go to declined, but a SILHOUETTE is not freeform: a shaped side (a chair or bench side with its wing, arm and legs, a bracket, a scrolled apron) is a panel "outline" of a dozen points and arcs traced from the picture's side view, and rounded corners, coved feet, arched aprons and toe kicks, scalloped shelf fronts, cloud-lift rails and ROUND or OVAL tops are corner cuts with "arc", edge "profiles" and a panel "shape" — but a FLAT band, face frame or plinth where the picture shows moulding or a base is furniture_assembly's trim / face_frame / plinth (build it and say so). LETTERING IN THE PICTURE (a sign, plaque, menu board, label, house number): transcribe it line by line in reading order and keep the SAME LINE BREAKS — one text op per written line with the same words on it, never merging two lines into one or splitting one in two; keep the relative letter sizes (a headline twice the body stays twice) and the sign's ORIENTATION — a sign taller than wide must weave into a board taller than wide, so size the letters (the longest line sets the width) and the gaps so the text block has the picture's proportion; the observation reports the board's proportion against the picture's, and a mismatch on a single sign is yours to fix on the second look. Finish the summary with one line starting "Assumed:" listing every number or part you guessed, specific enough to check with a tape measure.`;
 
-export function buildSystemPrompt(recipe, shop = {}, { hasImage = false, canDraw = true, reference = null } = {}) {
+// ------------------------------------------------------- prompt routing
+//
+// Most asks need a fraction of the strategy documentation: a sign never
+// reads the furniture compiler's 40,000 characters, a bracket never reads
+// the plank kit's 14,000. The catalog is split into a CORE every request
+// gets (text, shapes, holes, pockets, cutouts, the flat part) and SHELVES
+// that ride only when the ask points at them — picked from the words of
+// the ask, the strategies already in the recipe and the worked examples
+// chosen for it, with no model call. A shelf left out is still LISTED by
+// name with what it makes, and the model can pull it mid-turn with
+// read_docs, so a wrong pick costs one round trip, not the build.
+// OFF unless the caller asks (runIntentLoop `route`).
+const RIB_RULES = `- A RIB / WAFFLE / EGG-CRATE FORM (flat ribs standing in two directions, slotted into each other — a "sliced" stool, lamp body, vase, plinth, sculpture base) is ONE rib_lattice op, never hand-authored cutouts: describe the form as profile stations of width × depth against height, pick ribsX/ribsY, bind height and the counts to controls. It frees every rib itself (claims.pieces = ribsX + ribsY) and previews its own assembly (no set_assembly). Its waist limit is in its doc: when it refuses, use fewer ribs or soften the waist and say so.
+- A SLICED / RIBBED CHAIR, ARMCHAIR, LOUNGE CHAIR, BENCH or SOFA SECTION — and ANY ask for a cushioned, upholstered, padded or "comfortable" chair in wood (a wingback, a club chair, a reading chair) — is ONE rib_chair op, never hand-authored side panels or a furniture_design: give the SIDE SILHOUETTE as outline points (y up from the floor, z from the back, like profile_chair, arcs for the wing sweep and rolled arm), flag the seat, the back's front and the arm tops with "slats":true, bind width / ribs / slatSpacing to controls (claims.pieces = ribs + slats, read the count from the observation). It frees every rib and slat itself and previews its own assembly (no set_assembly, no cutouts). Dropped-slat warnings name where the silhouette is too thin — thicken the material behind that surface and say so.`;
+const KIT_RULE = `- LINKER LOGS / PLAY PLANKS / a plywood LOG-CABIN, FORT or CONSTRUCTION-PLANK BUILDING SET (flat planks notched on both long edges that cross-lap into each other — Bill Young's Linker Logs) is ONE linker_logs op, never hand-authored cutouts and never a furniture verb: leave its planks list at the default for a standard set (50 planks on one 4×8 of 1/2" plywood), set_thickness to the plywood the user names (the notch width follows it), leave toolDiameter and reliefDiameter at 0 so the bit is sized to the planks (name the bit the observation reports — the user has to load it; set a diameter only when the user names their bit), bind sets to a control, and bind setup too when the observation reports more than one sheet. Its ANGLE CONNECTORS (connectors [{angle, count}] — notched ring segments that hold two planks at 15°, 30°, 45° or any angle up to about 70°) are part of the same op: add them when the user asks for connectors, angled or round walls, or a pitched roof (Bill's connector sheet is 12 each at 15, 30 and 45), and tell the user their angle labels are scored with a V-bit before the cut — a tool change — unless you set labelToolDiameter to the cutting bit or labels false. It frees every piece itself (claims.pieces = the piece count in the observation's kit line, planks plus connectors) and is a KIT OF LOOSE PARTS with no assembled view. A STRUCTURE that is stacked rectangular boxes — a tower, a skyscraper's massing with its setbacks, a stepped pyramid, a fort or keep, a hall or temple with several spires, twin towers on a podium — is the SAME op with tiers [{w, d, courses}] (footprints in grid cells, bottom to top; several tiers may stand on the same one with "on", a clear cell apart; see its doc): it cuts exactly the planks that structure needs and shows it assembled, so claims.pieces is the count in the observation's tower line. This is massing from numbers, not a freehand outline, so the likeness rule does not block it: for a NAMED building, take the tier proportions from the picture when one is attached or from dimensions the user states; with neither they are YOUR ESTIMATE — say so in the summary. Its SKYLINE is a tier's "top": give the tier(s) nothing stands on top {shape, height, count?} — "spire", "dome", "ogee", "crown" (terraced arches: the Chrysler Building's), "crenellation" or "steps" — picked from that vocabulary and sized by number (height above the plank, from the picture's proportion or the user's words), never traced; name the top you chose in the summary. Everything else a building wears — windows, columns, statues, arches in the walls, a needle finer than a spire, anything round or sloped in the massing itself — is still declined by name: the stepped block form and its top are what is built. Report the height and footprint the observation gives, never ones you intended. A structure that is not stacked rectangles (a round tower, a dome, a pitched roof, a bridge, a particular castle plan) is still a loose kit plus that structure under declined.`;
+const TERRAIN_SECTION = `\n\nTERRAIN (real-world elevation carving): set_terrain {id, query:"<place name>"} stores a REFERENCE — the app geocodes it and downloads public elevation tiles IN THE USER'S BROWSER on the next weave (you never fetch or invent elevation data), then pins the resolved lat/lng box and metadata into the recipe. Reference it from terrain_relief's terrain param. Once resolved, the terrain entry in CURRENT RECIPE carries meta (center lat/lng, elevation range, place name) — when the user wants coordinates CARVED on the piece, prefer those resolved numbers over memory; on the first turn (before any weave) your best-knowledge coordinates are fine and can be corrected after resolution. The classic terrain plaque, in full — NOTE: no coordinates anywhere (never posX/posY plaque text onto a terrain; you cannot know rendered text widths — the plaque param places the pad): add_control {id:"place", type:"text", default:"Grand Canyon"}; set_terrain {id:"land", query:"Grand Canyon"}; vcarve_text text:{ctrl:"place"} letterHeight 0.5 (default position); vcarve_text "36.06°N 112.14°W" letterHeight 0.3 place:"below" (stacks under the name); terrain_relief terrain:"land" width 10 plaque:"sw" (the terrain rectangle positions itself so the text's flat pad sits in the lower-left corner); tag_cutout buffer 0.4 LAST. For a precise region ("the stretch of coast from X to Y") give set_terrain an explicit south/west/north/east box instead of a query.`;
+export const SHELVES = {
+  furniture: {
+    has: (k) => /^furniture_/.test(k),
+    blurb: 'FLAT-PANEL FURNITURE and BOXES from panels with real joinery (tenons, dadoes, box joints): cabinets, bookcases, shelves, nightstands, dressers, desks, tables, benches, stools, chairs from a side profile, crates, totes and toolboxes, with drawers, doors, face frames and plinths; also a small A-frame house',
+    words: /\b(furniture|nightstand|bookshel\w*|bookcase|shel(f|ves|ving)|cabinet\w*|cupboard|drawers?|dresser|chest|bench\w*|desk|tables?|stools?|chairs?|rocker|cubb\w+|wardrobe|closet|racks?|hutch|sideboard|credenza|vanity|crates?|toolbox|totes?|box(es)?|carcass|plinth|stands?|house|cabin|a-?frame|birdhouse|dollhouse|planter|bed|doors?|caddy|organi[sz]er|bins?|step|joinery|tenons?|dado\w*|pedestal|console|locker|trunk|hamper|feeder|kennel|shed|enclosures?|case|housing|flat-?pack\w*|knock-?down|holders?|risers?|lectern|panels|walls?|legs|frames?|tabbed|lid|display|assembl\w*|towers?|cornhole|ramp|tilted|sloped?|lean\w*|angled|easel|3d|free-?standing|standing|upright|fold\w*|hinged?|compartments?|dividers?|brackets?|slots? together|slot-together|interlocking)\b/i,
+  },
+  kits: {
+    has: (k) => k === 'linker_logs',
+    rules: KIT_RULE,
+    blurb: 'LINKER LOGS — a notched-plank building set (log-cabin / fort / construction planks, with angle connectors), and STACKED-BLOCK STRUCTURES built from those planks: a tower, a skyscraper\'s massing, a stepped pyramid, a fort or keep, with a spire, dome or crenellated top',
+    words: /\b(linker|lincoln|logs?|log-?cabin|planks?|fort\w*|towers?|skyscraper|pyramid|castle|keep|temple|spires?|cathedral|building|buildings|skyline|construction|kit|playset|ziggurat|pagoda|lighthouse|monument|landmark|architecture|architectural|massing)\b/i,
+  },
+  ribs: {
+    has: (k) => k === 'rib_chair' || k === 'rib_lattice',
+    rules: RIB_RULES,
+    blurb: 'RIB / WAFFLE / EGG-CRATE forms (flat ribs slotted together in two directions: a sliced stool, lamp body, vase, plinth, sculptural solid) and SLICED / RIBBED SEATING (a chair, armchair, lounge, bench or sofa section built from parallel profile ribs — the answer to any cushioned, upholstered or "comfortable" chair)',
+    words: /\b(ribs?|ribbed|waffle|egg-?crate|sliced?|slices|lattice|interlock\w*|lounge\w*|armchair|sofa|couch|upholster\w*|cushion\w*|padded|comfortable|comfy|chairs?|stools?|bench\w*|seat\w*|lamp\w*|vase|sculpt\w*|plinth|pedestal|organic|contoured?|curvy|3d|solid|form)\b/i,
+  },
+  terrain: {
+    has: (k) => k === 'terrain_relief',
+    section: TERRAIN_SECTION,
+    blurb: 'TERRAIN RELIEF — carve the real elevation of a named place (a mountain, a canyon, a coastline, a lake\'s surroundings) from public elevation data, as a plaque or map',
+    words: /\b(terrain|topo\w*|relief|elevation|mountains?|mount|mt|lakes?|bathymetr\w*|contours?|maps?|island|canyon|valley|coast\w*|rivers?|volcano|peaks?|range|ridge|park|landscape|hills?|glacier|bay|fjord|crater|summit|geograph\w*|trail)\b/i,
+  },
+  texture: {
+    has: (k) => k === 'texture_text' || k === 'texture_field',
+    blurb: 'CARVED TEXTURES — a surface pattern (waves, ripples, flutes, scales, dimples and more) carved inside letters or filling a shape, a panel or the background around other content',
+    words: /\b(textur\w*|patterns?|patterned|flut\w*|waves?|wavy|rippl\w*|knurl\w*|dimpl\w*|stippl\w*|hammered|scal(e|es|ed|loped)|weave|woven|basket\w*|carved|carving|background|rough\w*|tactile|grippy|bumpy|bumps|surface|ribbed|fancy|decorat\w*|ornate|rustic|bark|stone|brick|hatch\w*|quilted)\b/i,
+  },
+};
+// shelves that exist on THIS deployment (the furniture shelf is all guests)
+const shelfNames = () => Object.keys(SHELVES).filter(n => Object.keys(CATALOG).some(k => SHELVES[n].has(k)));
+const shelfOf = (strategy) => Object.keys(SHELVES).find(n => SHELVES[n].has(String(strategy ?? ''))) ?? null;
+
+// Which shelves an ask needs — no model call. Returns an array (possibly
+// empty: the core alone), or null for "send everything": a picture decides
+// the kind of thing, so a picture turn is never routed.
+export function pickShelves({ utterance = '', recipe = null, image = null, exemplars = null } = {}) {
+  if (image) return null;
+  const names = shelfNames();
+  const picked = new Set();
+  const text = String(utterance ?? '');
+  for (const n of names) if (SHELVES[n].words.test(text)) picked.add(n);
+  // what is already built stays documented: a refinement turn edits it
+  for (const op of recipe?.pipeline ?? []) { const n = shelfOf(op.strategy); if (n) picked.add(n); }
+  if ((recipe?.terrains ?? recipe?.terrain ?? []).length) picked.add('terrain');
+  // the worked examples chosen for this ask are a second opinion on its kind
+  for (const ex of exemplars ?? []) for (const a of actionList(ex)) { const n = shelfOf(a?.operation?.strategy ?? a?.strategy); if (n) picked.add(n); }
+  const out = names.filter(n => picked.has(n));
+  return out.length === names.length ? null : out;
+}
+
+// the full documentation of one shelf, as read_docs returns it
+export function shelfDoc(name) {
+  const sh = SHELVES[name];
+  if (!sh) return '';
+  return [`STRATEGIES (${name}):\n${catalogDoc(sh.has)}`, sh.section ? sh.section.trim() : '', sh.rules ? `RULES for these:\n${sh.rules}` : ''].filter(Boolean).join('\n\n');
+}
+const otherStrategies = (hidden) => `\n\nOTHER STRATEGIES (real and available on this machine; their documentation is NOT loaded on this turn — call read_docs with the shelf name BEFORE you build anything one of them covers, and never decline, or improvise a substitute from the strategies above, for something on this list):\n${hidden.map(n => `- shelf "${n}" (${Object.keys(CATALOG).filter(k => SHELVES[n].has(k)).join(', ')}): ${SHELVES[n].blurb}`).join('\n')}`;
+export const READ_DOCS_TOOL = {
+  name: 'read_docs',
+  description: 'Fetch the full documentation (params, rules, worked examples) of one shelf of strategies listed under OTHER STRATEGIES. Call it before building with a strategy whose documentation is not shown. It changes nothing; afterwards call apply_recipe_actions.',
+  input_schema: { type: 'object', properties: { shelf: { type: 'string', description: 'the shelf name exactly as listed under OTHER STRATEGIES' } }, required: ['shelf'] },
+};
+export const MAX_READS = 3;         // read_docs calls per user turn
+
+export function buildSystemPrompt(recipe, shop = {}, { hasImage = false, canDraw = true, reference = null, measure = false, ladder = false, subjects = false, shelves = null } = {}) {
+  // shelves: null = every strategy documented (the prompt as it always was);
+  // an array = prompt routing — only those shelves are documented in full,
+  // the rest are listed by name with read_docs to fetch them
+  const hidden = Array.isArray(shelves) ? shelfNames().filter(n => !shelves.includes(n)) : [];
+  const routed = hidden.length > 0;
+  const on = (name) => !hidden.includes(name);
   // reference: 'offer' — find_reference rides on this request; 'attached' —
   // the app already fetched one (the rule then points at its notes)
-  const referenceRule = reference === 'offer' ? `\n${REFERENCE_RULE}` : reference === 'attached' ? `\n${REFERENCE_ATTACHED_RULE}` : '';
+  // 'subject' — the attached reference is a photograph for a LIKENESS
+  // (opt-in `subjects`): the photo-likeness rule rides with it
+  const referenceRule = reference === 'offer' ? `\n${REFERENCE_RULE}${subjects ? `\n${SUBJECT_RULE}` : ''}`
+    : reference === 'attached' ? `\n${REFERENCE_ATTACHED_RULE}`
+    : reference === 'subject' ? `\n${SUBJECT_ATTACHED_RULE}\n${PHOTO_LIKENESS_RULE}` : '';
   // the user's declared physical limits (app settings, not the recipe) —
   // grounding the model in what the shop can actually cut turns "make it
   // fit my machine" from a guess into arithmetic
@@ -286,21 +378,18 @@ An SVG asset IS usable as a shape: set_shape with asset {of: "<name>", width: <i
   const glyphSection = `\n\nGLYPH LIBRARY (built-in signage symbols, the AIGA/DOT set — no upload needed; set_shape with glyph {of: "<id>", width: <inches or {arithmetic}>} lowers one to a closed outline exactly like an SVG asset, then pocket_shape recesses it or shape_cutout cuts it out):\n${GLYPHS.map(g => `- "${g.id}" — ${g.blurb}`).join('\n')}
 GLYPH DROPDOWN: to let the user SWITCH the symbol, first add a "choice" control whose option VALUES are glyph ids (label them nicely) and bind glyph.of to it: add_control {id:"symbol", type:"choice", default:"men", options:[{value:"men",label:"Men"},{value:"women",label:"Women"},{value:"restroom",label:"All-gender"},{value:"accessible",label:"Accessible"}]} then set_shape {id:"fig", glyph:{of:{ctrl:"symbol"}, width:2}}. Offer the glyphs relevant to the sign. Create the control BEFORE the set_shape.
 SIGN LAYOUT — pipeline order is MACHINING order, NOT position: every text/glyph/braille element defaults to the SAME spot (centered on the content so far) and they OVERLAP unless you stack them. To stack a sign vertically, set place:"below" on each element after the top one — it drops that element a gap beneath everything machined so far, with NO coordinates to compute. Top-to-bottom = pipeline order. Pick the SPECIFIC glyph: a men's room sign is glyph "men" + text "Men"; women's is "women"; only an all-gender/family restroom uses "restroom". SIGN TEXT IS EDITABLE: bind the visible text AND the braille to text controls so the user can retype them — and when the braille says the same thing as the visible sign text, bind BOTH to the SAME control (ADA wants them identical, and one edit then updates both). A men's sign, in full: add_control {id:"label", type:"text", default:"Men"}; set_shape fig = glyph {of:"men", width:2}; pocket_shape shape:"fig" (the glyph, on top); vcarve_text text:{ctrl:"label"} place:"below" (drops under the glyph); braille_text text:{ctrl:"label"} place:"below" (same control — braille tracks the text); tag_cutout last (the plaque). Only reach for posX/posY when the user wants a specific off-center position.`;
-  const terrainSection = `\n\nTERRAIN (real-world elevation carving): set_terrain {id, query:"<place name>"} stores a REFERENCE — the app geocodes it and downloads public elevation tiles IN THE USER'S BROWSER on the next weave (you never fetch or invent elevation data), then pins the resolved lat/lng box and metadata into the recipe. Reference it from terrain_relief's terrain param. Once resolved, the terrain entry in CURRENT RECIPE carries meta (center lat/lng, elevation range, place name) — when the user wants coordinates CARVED on the piece, prefer those resolved numbers over memory; on the first turn (before any weave) your best-knowledge coordinates are fine and can be corrected after resolution. The classic terrain plaque, in full — NOTE: no coordinates anywhere (never posX/posY plaque text onto a terrain; you cannot know rendered text widths — the plaque param places the pad): add_control {id:"place", type:"text", default:"Grand Canyon"}; set_terrain {id:"land", query:"Grand Canyon"}; vcarve_text text:{ctrl:"place"} letterHeight 0.5 (default position); vcarve_text "36.06°N 112.14°W" letterHeight 0.3 place:"below" (stacks under the name); terrain_relief terrain:"land" width 10 plaque:"sw" (the terrain rectangle positions itself so the text's flat pad sits in the lower-left corner); tag_cutout buffer 0.4 LAST. For a precise region ("the stretch of coast from X to Y") give set_terrain an explicit south/west/north/east box instead of a query.`;
   return `You edit a "recipe" — the declarative document behind a small CNC app. The user speaks; you emit recipe actions via the apply_recipe_actions tool. You NEVER write code, G-code, or toolpaths: strategies below do the machining and an independent verifier gates every export.
 
-AVAILABLE STRATEGIES (the complete list — nothing else exists):
-${catalogDoc()}${assetSection}${glyphSection}${terrainSection}
+${routed ? 'AVAILABLE STRATEGIES (documented in full below — MORE exist, see OTHER STRATEGIES):' : 'AVAILABLE STRATEGIES (the complete list — nothing else exists):'}
+${catalogDoc(routed ? (k) => !hidden.some(n => SHELVES[n].has(k)) : null)}${routed ? otherStrategies(hidden) : ''}${assetSection}${glyphSection}${on('terrain') ? TERRAIN_SECTION : ''}
 
 RULES:
 - Only these strategies and their listed params. A request needing anything else (raster images/photos, other fonts, STL models, rotated text, ROUNDED-over edges — chamfer cuts a flat 45° face, not a roundover...) goes on the declined channel with what+why. Partial fulfillment is good: apply what you can, decline the rest.
 - Quantities a user would tweak (their text, letter height, tag buffer...) should be BOUND to controls ({"ctrl":"id"}), creating the control if needed with a sensible label/default/min/max. One control may feed several ops. A param that picks from a fixed set (the font) binds to a "choice" control whose options are the allowed values (use the ids as values and friendlier labels).
 - Params marked bindable are the usual candidates; other params are usually literals. EVERY number param accepts a plain number, a {"ctrl":"id"} binding, or an arithmetic string over control/derived ids — "{slotW/2}" or bare "slotW/2" (a slot's cornerRadius, a ring's diameter, a hole count). Arithmetic is + - * / ( ) plus floor() ceil() round() abs() sqrt() min(a,b) max(a,b); use floor/round where a whole number is wanted (count: "floor((w - 2)/spacing) + 1"). The param's own min/max still clamp the result.
 - Operation order is machining order: engraving, pockets, dishes, and holes first, any cutout (tag_cutout, disc_cutout, shape_cutout) LAST — the cutout frees the part. A hole positioned "above"/"corners" etc. must come BEFORE the cutout so the tag wraps around it.
-- SEVERAL SEPARATE PIECES IN ONE JOB (a set of ornaments, stacking rings, puzzle pieces, lift-out letters beside their tray) is NOT a decline: a cutout frees a piece and ENDS it, so write the pieces one after another — each piece's content ops, then its own cutout — all authored about the origin exactly as if each were alone (a stacking ring = bore_hole then disc_cutout; the next ring = bore_hole then disc_cutout again). The app lays the pieces out side by side and verifies the whole board; claims.pieces counts them. Do NOT pin pieces apart with posX/posY to avoid each other, and do not fall back to "one piece per run, pick it with a control" unless the user asks for that. When the pieces GLUE UP INTO ONE OBJECT — stacked or laminated slices (a sliced stool, a vase, a contour-layer topo model), rings that go on a peg — also set_assembly {kind:"stack"}: the assembled preview then shows the pieces rising from the board and stacking up in pipeline order, one stock thickness per layer, lined up on each piece's first hole (align "center" when there are no holes). Author the BOTTOM piece first, and give every slice its dowel hole.
-- A RIB / WAFFLE / EGG-CRATE FORM (flat ribs standing in two directions, slotted into each other — a "sliced" stool, lamp body, vase, plinth, sculpture base) is ONE rib_lattice op, never hand-authored cutouts: describe the form as profile stations of width × depth against height, pick ribsX/ribsY, bind height and the counts to controls. It frees every rib itself (claims.pieces = ribsX + ribsY) and previews its own assembly (no set_assembly). Its waist limit is in its doc: when it refuses, use fewer ribs or soften the waist and say so.
-- A SLICED / RIBBED CHAIR, ARMCHAIR, LOUNGE CHAIR, BENCH or SOFA SECTION — and ANY ask for a cushioned, upholstered, padded or "comfortable" chair in wood (a wingback, a club chair, a reading chair) — is ONE rib_chair op, never hand-authored side panels or a furniture_design: give the SIDE SILHOUETTE as outline points (y up from the floor, z from the back, like profile_chair, arcs for the wing sweep and rolled arm), flag the seat, the back's front and the arm tops with "slats":true, bind width / ribs / slatSpacing to controls (claims.pieces = ribs + slats, read the count from the observation). It frees every rib and slat itself and previews its own assembly (no set_assembly, no cutouts). Dropped-slat warnings name where the silhouette is too thin — thicken the material behind that surface and say so.
-- LINKER LOGS / PLAY PLANKS / a plywood LOG-CABIN, FORT or CONSTRUCTION-PLANK BUILDING SET (flat planks notched on both long edges that cross-lap into each other — Bill Young's Linker Logs) is ONE linker_logs op, never hand-authored cutouts and never a furniture verb: leave its planks list at the default for a standard set (50 planks on one 4×8 of 1/2" plywood), set_thickness to the plywood the user names (the notch width follows it), leave toolDiameter and reliefDiameter at 0 so the bit is sized to the planks (name the bit the observation reports — the user has to load it; set a diameter only when the user names their bit), bind sets to a control, and bind setup too when the observation reports more than one sheet. Its ANGLE CONNECTORS (connectors [{angle, count}] — notched ring segments that hold two planks at 15°, 30°, 45° or any angle up to about 70°) are part of the same op: add them when the user asks for connectors, angled or round walls, or a pitched roof (Bill's connector sheet is 12 each at 15, 30 and 45), and tell the user their angle labels are scored with a V-bit before the cut — a tool change — unless you set labelToolDiameter to the cutting bit or labels false. It frees every piece itself (claims.pieces = the piece count in the observation's kit line, planks plus connectors) and is a KIT OF LOOSE PARTS with no assembled view. A STRUCTURE that is stacked rectangular boxes — a tower, a skyscraper's massing with its setbacks, a stepped pyramid, a fort or keep, a hall or temple with several spires, twin towers on a podium — is the SAME op with tiers [{w, d, courses}] (footprints in grid cells, bottom to top; several tiers may stand on the same one with "on", a clear cell apart; see its doc): it cuts exactly the planks that structure needs and shows it assembled, so claims.pieces is the count in the observation's tower line. This is massing from numbers, not a freehand outline, so the likeness rule does not block it: for a NAMED building, take the tier proportions from the picture when one is attached or from dimensions the user states; with neither they are YOUR ESTIMATE — say so in the summary. Its SKYLINE is a tier's "top": give the tier(s) nothing stands on top {shape, height, count?} — "spire", "dome", "ogee", "crown" (terraced arches: the Chrysler Building's), "crenellation" or "steps" — picked from that vocabulary and sized by number (height above the plank, from the picture's proportion or the user's words), never traced; name the top you chose in the summary. Everything else a building wears — windows, columns, statues, arches in the walls, a needle finer than a spire, anything round or sloped in the massing itself — is still declined by name: the stepped block form and its top are what is built. Report the height and footprint the observation gives, never ones you intended. A structure that is not stacked rectangles (a round tower, a dome, a pitched roof, a bridge, a particular castle plan) is still a loose kit plus that structure under declined.
+- A FLAT PART WITH HOLES, SLOTS, POCKETS OR COUNTERBORES (a jig, fence, plate, bracket, base, tray, panel, enclosure face, game board) is ONE part op: give its outline and list its features, each a shape at a depth, and the app plans the machining — nesting, bores versus pockets, bit sizes, order, tabs. Prefer it over hand-sequencing pocket_shape / bore_hole / a cutout whenever the piece is mostly such features: a counterbore is two circles at one center (shallow wide, through narrow), a T-slot or keyhole is two overlapping slots at different depths, an edge notch is a through feature that crosses the outline — none of which you could author as separate ops without overlap errors. Still use the op-level strategies for what a part does not hold: text and V-carving (place those ops BEFORE the part), textures, dishes, terrain, chamfered rims, holes spaced along a curve, and anything fitted around content (tag_cutout, fit).
+- SEVERAL SEPARATE PIECES IN ONE JOB (a set of ornaments, stacking rings, puzzle pieces, lift-out letters beside their tray) is NOT a decline: a cutout frees a piece and ENDS it, so write the pieces one after another — each piece's content ops, then its own cutout — all authored about the origin exactly as if each were alone (a stacking ring = bore_hole then disc_cutout; the next ring = bore_hole then disc_cutout again). The app lays the pieces out side by side and verifies the whole board; claims.pieces counts them. Do NOT pin pieces apart with posX/posY to avoid each other, and do not fall back to "one piece per run, pick it with a control" unless the user asks for that. When the pieces GLUE UP INTO ONE OBJECT — stacked or laminated slices (a sliced stool, a vase, a contour-layer topo model), rings that go on a peg — also set_assembly {kind:"stack"}: the assembled preview then shows the pieces rising from the board and stacking up in pipeline order, one stock thickness per layer, lined up on each piece's first hole (align "center" when there are no holes). Author the BOTTOM piece first, and give every slice its dowel hole.${on('ribs') ? `\n${RIB_RULES}` : ''}${on('kits') ? `\n${KIT_RULE}` : ''}
 - A GEOMETRIC or SYMBOLIC outline the catalog does not name (ellipse, star, heart, arch, hexagon, shield, arrow, cloud, chevron, crescent, gear, cross, simple leaf…) is NOT a decline: check the GLYPH LIBRARY first — a standard signage symbol (restroom figures, wheelchair access, stairs, first aid…) comes from there, never hand-drawn. Otherwise AUTHOR it yourself as an SVG path via shape_cutout (or pocket_shape with shape "custom") — the path authoring rules are in shape_cutout's doc. (But NOT a recognizable likeness — see the next rule.)
 - A RECOGNIZABLE, REPRESENTATIONAL subject is the ONE kind of outline you must NEVER freehand: a specific animal (a bull, an eagle), a person or face, a vehicle, a building, a brand/team LOGO, the map of a real place. You author outlines from a handful of geometric primitives, and a likeness needs visual detail you cannot see — so a hand-drawn one is a blob that passes every toolpath check yet looks nothing like the subject, which is WORSE than nothing (a naive user just sees a bad drawing and gets frustrated). DECLINE that part — what: the drawing (e.g. "a bull outline"); why: "I build shapes from geometry (circles, stars, hearts, arches), so I can't reliably freehand a recognizable bull — it would come out as a blob." Then in the SUMMARY, give the real paths forward AND head off the wrong one: the user can DRAW it themselves (set_shape draw — see the DRAWN SHAPES rule; best when they have the picture in their head, not in a file) or UPLOAD the artwork as an SVG or image (set_shape asset) — either becomes a shape, and a name inside it or a cutout of it then composes normally — while MORE DESCRIPTION WILL NOT HELP, because you don't turn words into pictures; the outline has to come from their hand or a file. Never author a substitute blob to seem helpful: if the likeness is the whole point (a cutout OF the bull), decline the AUTHORED shape and offer the drawn one. The line: if recognizing it would take more than a few arcs/béziers, or leans on detail you can't see, don't author it — a drawn or uploaded outline beats a bad one you invented.
 - DRAWN SHAPES — a HAND-DRAWN, sketched, traced, or tablet/stylus outline is NOT a decline: set_shape draw {of:"<name>", width:…} is an outline the USER sketches in the app (authoring it puts a Draw “<name>” button at the top of the panel; mouse or tablet pen), and it is an ordinary shape from then on — shape_cutout of it, pocket_shape it, bore_hole along it, fit content inside it. Size it with width (uniform), or with maxWidth + maxHeight to scale the sketch down evenly until it just fits that box (aspect kept — the right sizing when the part must stay within a window, like a 3.5×2.5 badge). Author it EVEN THOUGH NOTHING IS DRAWN YET: the ops referencing it skip with a "waiting on the drawing" note while the rest of the recipe (typed text, controls, other cutouts) previews normally, and the moment the user draws, everything referencing it weaves. So build the WHOLE app in one pass and say in the summary which name to draw. Redrawing under the same name re-weaves every op that uses it — that is the PER-PERSON / per-part shape input (each nametag its own drawn outline, same typed-name machinery). Prefer draw over declining whenever the outline lives in the user's hand rather than in a file; prefer an SVG asset when they already have the file; prefer a glyph or an authored path when it's a standard symbol or plain geometry.
@@ -321,7 +410,7 @@ RULES:
 - If the recipe is empty and the user asks for an app, also set_name it.
 - CLAIMS: on every call that builds, fill the claims field — faces, pieces, parts, dataSource, mating. The app CHECKS each claim against the recipe (not against your words) and shows you the result on your second look; a claim it cannot substantiate is refused, and if the summary still asserts it, the user's text is corrected and the item declined for you. Things no recipe can claim: a second machined face, underwater depth, a plug that mates with a pocket, more pieces per run than there are cutout ops. Decline those parts instead of describing them as done.
 - YOU GET A SECOND LOOK. After your actions are applied, the app weaves the recipe and shows you the result as a tool result: what applied, what was skipped and why, the pipeline as it now stands, and the verifier's verdict. You then get one more call to correct anything that failed and to write the FINAL summary with the built thing in view. So: on this first call build boldly and write a plain summary; do not hedge about outcomes you have not seen yet.
-${STANCE_RULE}${hasImage ? `\n${PICTURE_RULE}\n${PHOTO_LIKENESS_RULE}` : ''}${canDraw ? '' : `\n${NO_DRAW_RULE}`}${referenceRule}
+${STANCE_RULE}${hasImage ? `\n${PICTURE_RULE}\n${PHOTO_LIKENESS_RULE}` : ''}${canDraw ? '' : `\n${NO_DRAW_RULE}`}${referenceRule}${measure ? `\n${MEASURE_RULE}` : ''}${ladder ? `\n${LADDER_RULE}` : ''}
 - SUGGESTED NEXT PROMPTS (the suggest field): always offer 2–3. They are the user's second turn, pre-written — the refinements THIS design most invites, each a complete sentence they could type verbatim, each within the strategies above. ___ marks a blank the user fills. An UNREQUESTED design move (a feature you added on taste, not on ask) must surface here as an adjust-or-remove suggestion — proactive choices stay visible as choices. When the build's INGREDIENTS (in your second look) need more than one stock thickness or any bought hardware, one chip must let the user say what they don't have ("I only have 3/4\" plywood — redesign for one thickness", "no drawer slides — use wood runners"): the ingredients list is a question to the shop, not an order.
 - ${blankRule} Stock THICKNESS is ${JSON.stringify(recipe.stock.thickness)}" — DESIGN CUT DEPTHS WITHIN IT: a pocket or engraving is shallower than the stock, a through-cut goes exactly through, and nothing is cut deeper than the material. set_thickness when the user names a different material thickness.${shopRule}
 
@@ -335,7 +424,15 @@ ${JSON.stringify(promptRecipeView(recipe), null, 1)}`;
 // tool. Those models also always think, so the same budget has to cover
 // reasoning AND the action list. Unknown models get the forced form and a
 // one-shot fallback to 'auto' in runIntentLoop when the API says no.
-export const FORCED_TOOL_CHOICE_UNSUPPORTED = /fable|mythos|opus-5-5/i;
+// Haiku 5.5 accepts a forced tool call, but a forced call switches its
+// thinking OFF (thinking_tokens 0, 2026-11-12) and it then writes a third
+// of the build and calls the rest "not authored yet". On the 'auto' path
+// it thinks first, so it rides there with the others.
+export const FORCED_TOOL_CHOICE_UNSUPPORTED = /fable|mythos|opus-5-5|haiku-5-5/i;
+// Small models treat the loop as a conversation with many building turns.
+// It is not: say so.
+const SMALL_MODEL = /haiku/i;
+const WHOLE_BUILD_RULE = `- BUILD THE WHOLE THING IN THIS ONE CALL. You do not get further building turns: the second look exists to FIX what failed, not to add what you left out. Before you call the tool, plan every piece and feature the request names and check each against the strategy list — a grid or row of holes is a pattern shape or bore_hole along/at; a flat piece with holes, slots, pockets or counterbores is ONE part op with all of them as features (features take an angle); several pieces are several cutouts or part ops in the same call. Never leave a placeholder, never write "not authored yet": author it now, or decline it only when no strategy can make it.`;
 
 // The models Loom offers, measured 2026-09-26 on the same 25 prompts with
 // the loop on (ledger.md, "Model-generation A/B"): Opus 5.5 verified 20/25
@@ -350,6 +447,26 @@ export const MODELS = [
 export const DEFAULT_MODEL = MODELS[0].id;
 export const isKnownModel = (id) => MODELS.some(m => m.id === id);
 const CALL_TOOL_RULE = `- RESPOND ONLY BY CALLING apply_recipe_actions, exactly once, every time — even to decline (empty actions + declined) or to answer a question (empty actions + the answer in summary). Never reply in plain text.`;
+
+// Prompt caching. The system prompt is ~55,000 tokens and almost all of it
+// is the same for every request; only the CURRENT RECIPE at its end changes.
+// Sent as one string it is billed in full on every call (live traffic to
+// 2026-11-06: ~59,000 uncached input tokens per call, no cache reads at
+// all). Split at the recipe, the fixed part is marked cacheable — a later
+// call in the same turn, the next prompt, a refinement turn on a non-empty
+// recipe and a cascade fix turn all read it at a tenth of the price. The
+// request means exactly the same thing; only the billing changes.
+export function withPromptCache(req) {
+  if (typeof req?.system !== 'string' || !req.system) return req;
+  const at = req.system.lastIndexOf('\n\nCURRENT RECIPE:');
+  const cached = { type: 'ephemeral' };
+  return {
+    ...req,
+    system: at > 0
+      ? [{ type: 'text', text: req.system.slice(0, at), cache_control: cached }, { type: 'text', text: req.system.slice(at + 2) }]
+      : [{ type: 'text', text: req.system, cache_control: cached }],
+  };
+}
 
 export function withAutoToolChoice(req) {
   if (req.tool_choice?.type === 'auto') return req;
@@ -426,6 +543,28 @@ export const REFERENCE_TOOL = {
     required: ['subject'],
   },
 };
+// With `subjects` on (opt-in), the same tool also fetches a photograph of a
+// GENERIC subject — a bull, an eagle, a tractor — so a text-only likeness
+// ask is DRAWN by the model from a picture it can see (the photo-likeness
+// path, proven on fair-animal photos: identified correctly, charmingly
+// low fidelity) instead of declined. Nothing anyone else drew reaches the
+// cut: the photo is looked at, never traced, and people / characters /
+// logos / brands stay refused by the app (reference-fetch REFUSED_KINDS).
+export const REFERENCE_TOOL_SUBJECTS = {
+  ...REFERENCE_TOOL,
+  description: `${REFERENCE_TOOL.description} ALSO, with kind "subject": fetch a credited photograph of a GENERIC subject the user wants a likeness of and attached no picture for — an animal, a plant, a vehicle type, an everyday object ("bull", "bald eagle", "farm tractor", "sailboat") — so you can draw your own simple impression of it from what you see. A kind, never an individual or a design: not a person, a character, a mascot, a logo, a brand or a specific product model.`,
+  input_schema: {
+    type: 'object',
+    properties: {
+      subject: { type: 'string', description: 'kind "structure": the structure as an encyclopedia would title it, with the place when the name is ambiguous ("Chrysler Building"). kind "subject": the plain encyclopedia name of the kind of thing, singular ("Bull", "Bald eagle", "Tractor")' },
+      kind: { type: 'string', enum: ['structure', 'subject'], description: '"structure" (default) = a named real building or landmark, for a model of its massing; "subject" = a generic animal, plant, vehicle or object, for a likeness you draw from the photo' },
+    },
+    required: ['subject'],
+  },
+};
+const SUBJECT_RULE = `- A LIKENESS WITH NO PICTURE ATTACHED (a bull, an eagle, a horse, a tractor, a sailboat, an oak leaf — any generic animal, plant, vehicle or object whose outline you would otherwise have to decline under the RECOGNIZABLE rule): do NOT decline it and do NOT draw it from memory. Call find_reference FIRST and ALONE with kind "subject" and the plain name of the thing; the app fetches a credited photograph and hands this same request back with it attached, and you then draw your own simple impression from what you can see. This is for a KIND of thing only. A person, a character or mascot, a logo, a brand, a team mark, a specific product or the map of a real place is still declined exactly as the RECOGNIZABLE rule says — never look those up.`;
+const SUBJECT_ATTACHED_RULE = `- A REFERENCE PHOTOGRAPH IS ATTACHED to this request — the app fetched it because you called find_reference for a likeness. Follow the HOW TO USE IT notes in it. For this subject the RECOGNIZABLE rule's "never freehand" does not apply, because you can see it: the next rule says how to draw it. The photograph is looked at, never traced, and the likeness rule still holds for everything else in the request.`;
+
 export const MAX_LOOKUPS = 2;        // one lookup, plus one retry when the first found the wrong article
 export const MAX_WEB_SEARCHES = 2;   // billed per search to whichever key pays for the request
 // Anthropic's server-side web search: the API runs the searches inside the
@@ -448,6 +587,7 @@ const dims = (list) => list.map(m => `${m} m (${feet(m)} ft)`);
 // search tool rides on this request.
 export function referenceText(ref, { again = false, search = false } = {}) {
   const others = ref?.others?.length ? ref.others.map(o => `${o.title}${o.description ? ` (${o.description})` : ''}`).join('; ') : '';
+  if (ref?.kind === 'subject') return subjectReferenceText(ref, { again, others });
   if (!ref?.ok) {
     const refused = ref?.reason === 'refused';
     return [
@@ -483,6 +623,173 @@ export function referenceText(ref, { again = false, search = false } = {}) {
   return lines.filter(Boolean).join('\n');
 }
 
+// --------------------------------------------------------------- measure
+//
+// The model cannot know how wide "WELCOME" comes out in a font, or how big
+// a glyph or an authored path really is — so it guesses coordinates, and
+// each guess used to earn its own param. measure is a client tool it may
+// call BEFORE authoring: the app lowers the text or shape with the same
+// font and shape code a weave uses and answers with inches. Unlike
+// find_reference this continues the SAME conversation (a tool_result), so
+// the tool list never changes mid-turn and the cached prefix is reused.
+// Offered only when the caller opts in (runIntentLoop's `measure`) and the
+// model can choose its tool.
+export const MEASURE_TOOL = {
+  name: 'measure',
+  description: 'Ask the app how big something will really come out BEFORE you author around it: text in a font at a letter height, or a shape (a glyph, an uploaded asset, a path, a derivation, or a shape id already in the recipe). The app answers with width × height in inches, computed by the same font and shape code that cuts. Call it ALONE, instead of apply_recipe_actions, only when a layout depends on a size you would otherwise guess (text that must fit a fixed part, elements that must clear each other, a pinned blank). Up to 6 items per call. Not needed for content that a fit / around shape or tag_cutout wraps automatically.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'the text to measure (use \\n between lines exactly as you would author it)' },
+            letterHeight: { type: 'number', description: 'text: letter height in inches, as the text strategy takes it' },
+            font: { type: 'string', description: 'text: a font id from the strategy\'s font param (default: the strategy\'s default)' },
+            strategy: { type: 'string', description: 'text: the text strategy it will be cut with (default vcarve_text; line_text has its own single-line fonts)' },
+            shapeId: { type: 'string', description: 'a shape id already in the recipe' },
+            shape: { type: 'object', description: 'a shape exactly as set_shape takes it, without an id: { path } | { glyph: {of, width} } | { asset: {of, width} } | one derivation over shapes in the recipe' },
+          },
+        },
+      },
+    },
+    required: ['items'],
+  },
+};
+export const MAX_MEASURES = 2;       // measure calls per user turn; each is one more model round trip
+const MAX_MEASURE_ITEMS = 6;
+const MEASURE_RULE = `- MEASURE BEFORE YOU GUESS: you cannot know how wide a word comes out in a font or how big a glyph or path really is. When a layout DEPENDS on such a size — text that must fit a part of fixed size or a pinned blank, elements placed with posX/posY that must clear each other, a shape that must match another — call measure FIRST and ALONE (instead of apply_recipe_actions) with the text or shapes in question; the app answers in inches and you then author with real numbers. At most ${MAX_MEASURES} measure calls per request, so put everything you need in one. Skip it when the catalog sizes things for you (tag_cutout, fit, around, place:"below") — and never measure just to be safe: each call makes the user wait.`;
+
+const LADDER_RULE = `- NEVER END AT NOTHING when something honest can be cut. Before you decline a WHOLE request, walk down this ladder and stop at the first rung that holds: (1) the strategy that makes the thing; (2) a plain flat part that does its job (an outline with the holes, slots and pockets it needs) from shapes and the generic strategies; (3) a DEPICTION of the subject — a plaque or sign that names it, a GLYPH LIBRARY symbol, simple geometry that stands for it, or a draw shape the user sketches where the client can draw. A rung-2 or rung-3 build is PARTIAL fulfilment: say plainly in the summary what the user is getting instead, and put what was NOT made on declined. The likeness rule still stands on every rung — a depiction of an animal, person, vehicle or logo is its NAME on a plaque or the user's own drawing, never an outline you freehand. Stay at a full decline (empty actions) only when the ask is unsafe or unlawful, or when no single-sided flat piece could honestly stand for it and a plaque would be a joke at the user's expense.`;
+
+const round3 = (v) => +(+v).toFixed(3);
+const boxOfRings = (rings) => {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const ring of rings) for (const q of ring ?? []) {
+    if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x;
+    if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y;
+  }
+  return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+};
+// The footprint of ONE operation in a weave: its sub-ops' boxes united.
+// A built entry carries a bbox only when its strategy returned a single
+// op; a multi-op entry (bulk + rest pocket) is flattened into several
+// built entries without one, so the outline, regions and holes it will
+// machine are measured instead.
+function builtBox(entries) {
+  let box = null;
+  const grow = (b) => { if (b && Number.isFinite(b.minX) && Number.isFinite(b.maxX)) box = box ? { minX: Math.min(box.minX, b.minX), minY: Math.min(box.minY, b.minY), maxX: Math.max(box.maxX, b.maxX), maxY: Math.max(box.maxY, b.maxY) } : { ...b }; };
+  for (const e of entries) {
+    const r = e?.r ?? {};
+    if (r.bbox) { grow(r.bbox); continue; }
+    const rings = [];
+    if (r.previewRing?.length) rings.push(r.previewRing);
+    for (const reg of r.previewRegions ?? []) if (reg?.outer?.length) rings.push(reg.outer);
+    for (const reg of r.previewVee?.regions ?? []) if (reg?.outer?.length) rings.push(reg.outer);
+    grow(boxOfRings(rings));
+    for (const h of r.previewHoles ?? []) if (Number.isFinite(h?.x) && h.r > 0) grow({ minX: h.x - h.r, minY: h.y - h.r, maxX: h.x + h.r, maxY: h.y + h.r });
+  }
+  return box;
+}
+
+// Answer a measure call. Text goes through the caller's own weave (the
+// fonts live there) as a one-op scratch recipe; shapes lower through
+// buildShapes directly. Every failure is an answer, never a throw.
+// Returns { text, items: [{ what, w, h } | { what, error }] }.
+export async function measureItems(recipe, input, weave) {
+  const raw = Array.isArray(input?.items) ? input.items : (input && typeof input === 'object' && (input.text || input.shape || input.shapeId) ? [input] : []);
+  const items = raw.filter(x => x && typeof x === 'object').slice(0, MAX_MEASURE_ITEMS);
+  const out = [];
+  for (const it of items) {
+    try {
+      if (typeof it.text === 'string' && it.text.trim()) {
+        const strategy = typeof it.strategy === 'string' && CATALOG[it.strategy]?.params?.text ? it.strategy : 'vcarve_text';
+        const params = { text: it.text };
+        if (Number.isFinite(it.letterHeight) && it.letterHeight > 0) params.letterHeight = it.letterHeight;
+        if (typeof it.font === 'string' && it.font) params.font = it.font;
+        const lh = params.letterHeight ?? CATALOG[strategy].params.letterHeight?.default;
+        const what = `text ${JSON.stringify(clip(it.text, 60))}${params.font ? ` in ${params.font}` : ''} at letterHeight ${lh} (${strategy})`;
+        if (!weave) { out.push({ what, error: 'no weave is available to measure text with' }); continue; }
+        // a scratch document: this one op alone, on an auto-sized board
+        const scratch = { ...recipe, stock: { thickness: recipe.stock?.thickness ?? 0.5 }, pipeline: [{ id: 'measure', strategy, params }], assembly: undefined, terrains: [] };
+        const r = await weave(scratch);
+        const b = builtBox(r?.preview?.built ?? []);
+        if (b) out.push({ what, w: round3(b.maxX - b.minX), h: round3(b.maxY - b.minY) });
+        else out.push({ what, error: clip(String(r?.errors?.[0] ?? 'it produced no geometry'), 240) });
+        continue;
+      }
+      const spec = it.shape && typeof it.shape === 'object' ? it.shape : null;
+      const id = typeof it.shapeId === 'string' ? it.shapeId : null;
+      if (spec || id) {
+        const forms = ['path', 'asset', 'draw', 'glyph', 'inset', 'outset', 'band', 'union', 'difference', 'intersect', 'fit', 'around', 'pattern'];
+        const form = spec ? forms.find(k => spec[k] !== undefined) : null;
+        const what = id ? `shape "${id}"` : `shape (${form ?? 'unknown form'}${form === 'glyph' || form === 'asset' ? ` "${spec[form]?.of}"${spec[form]?.width != null ? ` at width ${spec[form].width}` : ''}` : ''})`;
+        if (spec && !form) { out.push({ what, error: 'give a path, glyph, asset or one derivation, as set_shape takes it' }); continue; }
+        if (form === 'fit' || form === 'around') { out.push({ what, error: `${form} wraps content already machined, so it has no size until the weave — it is reported under SIZES on your second look` }); continue; }
+        const probeVals = {};
+        for (const c of recipe.controls ?? []) probeVals[c.id] = c.default;
+        const bv = buildVars({ derived: recipe.derived ?? [] }, probeVals);
+        if (bv.error) { out.push({ what, error: bv.error }); continue; }
+        const key = id ?? '_measure';
+        const shapes = id ? (recipe.shapes ?? []) : [...(recipe.shapes ?? []), { id: key, [form]: spec[form], ...(form === 'path' && spec.open ? { open: true } : {}) }];
+        if (id && !shapes.some(x => x.id === id)) { out.push({ what, error: `no shape "${id}" in the recipe` }); continue; }
+        const bs = buildShapes({ shapes, assets: recipe.assets ?? [] }, bv.vars);
+        if (bs.error) { out.push({ what, error: clip(String(bs.error), 240) }); continue; }
+        const sh = bs.shapes?.[key];
+        const rings = !sh ? [] : sh.kind === 'region' ? sh.regions.flatMap(r => [r.outer, ...(r.holes ?? [])]) : (sh.polylines ?? []).map(pl => pl.points);
+        const b = boxOfRings(rings);
+        if (!b) { out.push({ what, error: sh?.kind === 'undrawn' ? 'the user has not drawn it yet' : 'it has no size until the weave (it depends on content machined before it)' }); continue; }
+        out.push({ what, w: round3(b.maxX - b.minX), h: round3(b.maxY - b.minY), center: [round3((b.minX + b.maxX) / 2), round3((b.minY + b.maxY) / 2)] });
+        continue;
+      }
+      out.push({ what: 'an item with neither text nor a shape', error: 'give text + letterHeight, a shapeId, or a shape' });
+    } catch (e) {
+      out.push({ what: 'an item', error: clip(String(e?.message ?? e), 240) });
+    }
+  }
+  const lines = out.length
+    ? out.map((m, i) => `${i + 1}. ${m.what}: ${m.error ? `NOT MEASURED — ${m.error}` : `${m.w}" wide × ${m.h}" tall${m.center && (m.center[0] || m.center[1]) ? `, centered at (${m.center[0]}, ${m.center[1]})` : ''}`}`)
+    : ['nothing to measure — items was empty'];
+  return { items: out, text: `MEASURED by the app (inches, the same font and shape code that cuts):\n${lines.join('\n')}${raw.length > items.length ? `\n(only the first ${MAX_MEASURE_ITEMS} items are measured per call)` : ''}` };
+}
+
+// The reference for a LIKENESS (find_reference kind "subject"): a photo to
+// look at and draw from. Without a photo there is nothing in view, so the
+// likeness rule stands — never a drawing from memory.
+function subjectReferenceText(ref, { again = false, others = '' } = {}) {
+  const noPicture = `Nothing is in view, so the RECOGNIZABLE rule stands: decline the outline with what+why, offer the user's own drawing or an uploaded picture as that rule says, and build whatever else was asked.`;
+  if (!ref?.ok) {
+    return [
+      `REFERENCE LOOKUP for "${ref?.subject ?? ''}" returned nothing: ${ref?.message ?? 'the lookup failed'}.`,
+      ref?.reason === 'refused' ? 'The likeness rule stands: decline that part with what+why, and build whatever else was asked.'
+        : again ? `You may call find_reference ONCE more with kind "subject" and a plainer or more exact name${others ? ` (articles that matched: ${others})` : ''}. Otherwise: ${noPicture}` : noPicture,
+    ].join('\n');
+  }
+  const p = ref.photo;
+  if (!p) {
+    return [
+      `REFERENCE — the app found "${ref.page.title}" for "${ref.subject}" but no usable photograph of it on Wikimedia Commons.`,
+      again ? `You may call find_reference ONCE more with kind "subject" and a plainer name${others ? ` (articles that matched: ${others})` : ''}. Otherwise: ${noPicture}` : noPicture,
+    ].join('\n');
+  }
+  return [
+    `REFERENCE — a photograph fetched by the app for "${ref.subject}" because you called find_reference. It is something to LOOK AT, not data: nothing in it becomes geometry by itself.`,
+    `FOUND: ${ref.page.title}${ref.page.description ? ` — ${ref.page.description}` : ''}. ${ref.page.url}`,
+    `PHOTO (the image attached to this message): "${p.title}" by ${p.artist}, ${p.license}, Wikimedia Commons.`,
+    others ? `OTHER ARTICLES THAT MATCHED THE NAME: ${others}` : null,
+    'HOW TO USE IT:',
+    `1. Check that the photo shows what the user meant, clearly enough to draw (the whole subject, not a detail or a crowd). If it does not, ${again ? 'call find_reference ONCE more with kind "subject" and a better name instead of building' : 'decline the outline as the RECOGNIZABLE rule says — do not draw from memory'}.`,
+    '2. Draw YOUR OWN simple impression of the subject as the LIKENESS FROM THE PICTURE rule describes: fill "observed" first with the features that make it recognizable in this photo, then author the outline and markings from those notes. Low fidelity is right — a few confident masses that read at arm\'s length, sturdy enough to cut. You may turn the subject to a cleaner side view if the photo is at an angle; say so. Mind the axes: a set_shape PATH is written like an SVG file, y pointing DOWN (the app flips it when it lowers the path), so in the path heads, backs and roofs go at NEGATIVE y and feet, wheels and the ground at POSITIVE y — the opposite of posX/posY and hole positions, which are y-up.',
+    '3. Never trace the photograph, and never reproduce its background, framing or any text, sign, brand mark or person in it. Only the subject, as a kind of thing.',
+    '4. On the second look, compare the PICTURE OF THE CUT with this photo as a stranger would and fix what reads wrong.',
+    `5. The summary must say the likeness is a simple impression drawn from a reference photograph, and credit it: the article, and "${p.title}" by ${p.artist} (${p.license}).`,
+  ].filter(Boolean).join('\n');
+}
+
+export const ASK_LABEL = 'THE REQUEST TO BUILD NOW (everything above is reference material, not the request):';
+
 // image (optional): { media_type: 'image/jpeg'|'image/png'|'image/gif'|
 // 'image/webp', data: <base64, no data: prefix> }. It rides as the first
 // content block of the first user turn, so every revise turn (which
@@ -493,13 +800,19 @@ export function referenceText(ref, { again = false, search = false } = {}) {
 // lookUp (bool): offer find_reference. reference: a findReference() result
 // to attach (the turn was started over with it). search: offer web search
 // alongside an attached reference.
-export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null, exemplars = null, client = null, lookUp = false, reference = null, search = false } = {}) {
-  const text = (utterance ?? '').trim() || (image ? DEFAULT_IMAGE_UTTERANCE : utterance);
+export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, shop = {}, image = null, exemplars = null, client = null, lookUp = false, reference = null, search = false, measure = false, ladder = false, subjects = false, review = null, shelves = null } = {}) {
+  const asked = (utterance ?? '').trim() || (image ? DEFAULT_IMAGE_UTTERANCE : utterance);
+  // a checker's findings on an earlier attempt (the cascade): after the ask, never in place of it
+  const text = review ? `${asked}\n\n${review}` : asked;
   const examples = exemplarBlock(exemplars);
   // a model that must be FORCED onto apply_recipe_actions cannot choose
   // find_reference, so the tool (and its rule) is not offered to it
   const canChoose = FORCED_TOOL_CHOICE_UNSUPPORTED.test(model);
   const offer = !!lookUp && canChoose && !image;
+  const canMeasure = !!measure && canChoose;   // same reason: a forced model could never call it
+  // routing needs read_docs as the way back, so it is for models that can choose a tool
+  const routedShelves = Array.isArray(shelves) && canChoose && !image ? shelves : null;
+  const canRead = !!routedShelves && shelfNames().some(n => !routedShelves.includes(n));
   // a fetched reference rides like an attached picture — first in the first
   // user turn, so every revise turn keeps it in view — but it is NOT the
   // user's picture: the picture rules and the picture-vs-board comparison
@@ -511,7 +824,11 @@ export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, sh
       ...(picture ? [{ type: 'image', source: { type: 'base64', media_type: picture.media_type, data: picture.data } }] : []),
       ...(reference ? [{ type: 'text', text: referenceText(reference, { again: offer, search: !!search }) }] : []),
       ...(examples ? [{ type: 'text', text: examples }] : []),
-      { type: 'text', text },
+      // After worked examples or a reference the ask is LABELLED: a bare
+      // sentence trailing 5,000 characters of examples reads as nothing to
+      // a small model (Haiku 5.5, 2026-11-12: "I need more detail" on 6 of
+      // 25 prompts, and a copy of the example on 3 more that VERIFIED).
+      { type: 'text', text: examples || reference ? `${ASK_LABEL}\n${text}` : text },
     ]
     : text;
   const req = {
@@ -525,12 +842,16 @@ export function buildParseRequest(recipe, utterance, { model = DEFAULT_MODEL, sh
     // were hitting 2000 and truncating mid-action-list, which reads as a
     // silent half-build — the app also surfaces stop_reason max_tokens
     max_tokens: 8000,
-    system: buildSystemPrompt(recipe, shop, { hasImage: !!image, canDraw: client !== 'phone', reference: reference?.ok ? 'attached' : offer ? 'offer' : null }),   // client: 'phone' = the mobile page (no sketch dialog)
+    system: buildSystemPrompt(recipe, shop, { hasImage: !!image, canDraw: client !== 'phone', reference: reference?.ok ? (reference.kind === 'subject' ? (reference.photo ? 'subject' : null) : 'attached') : offer ? 'offer' : null, measure: canMeasure, ladder: !!ladder, subjects: !!subjects && offer, shelves: routedShelves }),   // client: 'phone' = the mobile page (no sketch dialog)
     messages: [{ role: 'user', content }],
-    tools: [ACTION_TOOL, ...(offer ? [REFERENCE_TOOL] : []), ...(search && reference ? [WEB_SEARCH_TOOL] : [])],
-    tool_choice: { type: 'tool', name: 'apply_recipe_actions' },
+    tools: [ACTION_TOOL, ...(offer ? [subjects ? REFERENCE_TOOL_SUBJECTS : REFERENCE_TOOL] : []), ...(search && reference ? [WEB_SEARCH_TOOL] : []), ...(canMeasure ? [MEASURE_TOOL] : []), ...(canRead ? [READ_DOCS_TOOL] : [])],
+    // one call per reply: a small model otherwise splits its actions over
+    // several parallel calls, and this loop acts on (and answers) exactly one
+    tool_choice: { type: 'tool', name: 'apply_recipe_actions', disable_parallel_tool_use: true },
   };
-  return FORCED_TOOL_CHOICE_UNSUPPORTED.test(model) ? withAutoToolChoice(req) : req;
+  if (!FORCED_TOOL_CHOICE_UNSUPPORTED.test(model)) return req;
+  const auto = withAutoToolChoice(req);
+  return SMALL_MODEL.test(model) ? { ...auto, system: auto.system.replace('\n\nCURRENT RECIPE:', `\n${WHOLE_BUILD_RULE}\n\nCURRENT RECIPE:`) } : auto;
 }
 
 // ------------------------------------------------------------------ apply
@@ -973,7 +1294,7 @@ const clip = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n - 1
 
 // What the app did with a turn's actions, as data. weaveResult is a
 // runRecipe() result or null (no weave available / not run).
-export function buildObservation(applyOut, weaveResult, recipe, { picture = null, snapshot = null } = {}) {
+export function buildObservation(applyOut, weaveResult, recipe, { picture = null, snapshot = null, sizes = false } = {}) {
   const rec = recipe ?? applyOut.recipe;
   const r = weaveResult;
   const stats = r?.report?.stats;
@@ -1012,8 +1333,30 @@ export function buildObservation(applyOut, weaveResult, recipe, { picture = null
     // the picture of the cut (app/snapshot.mjs) rides as an image block in
     // the tool_result; the observation records only its size and content
     snapshot: snapshot ? { w: snapshot.w, h: snapshot.h, parts: snapshot.parts, marks: snapshot.marks } : null,
+    // what each operation really came out as, in the frame the model
+    // authors in (opt-in: runIntentLoop's `look`)
+    sizes: sizes ? opSizes(r) : null,
     claimIssues: [],   // filled by checkClaims
   };
+}
+
+// Each built operation's footprint from the weave: width × height and
+// where its center landed, in the shared authoring frame. The numbers the
+// model would otherwise guess on its second look.
+const MAX_SIZES = 14;
+function opSizes(r) {
+  const byOp = new Map();   // op id → its built entries, in pipeline order
+  for (const e of r?.preview?.built ?? []) {
+    const id = e?.op?.id ?? '?';
+    if (!byOp.has(id)) byOp.set(id, []);
+    byOp.get(id).push(e);
+  }
+  const out = [];
+  for (const [id, entries] of byOp) {
+    const b = builtBox(entries);
+    if (b) out.push({ id, w: round3(b.maxX - b.minX), h: round3(b.maxY - b.minY), cx: round3((b.minX + b.maxX) / 2), cy: round3((b.minY + b.maxY) / 2) });
+  }
+  return out;
 }
 
 // Anything here that a second look could improve?
@@ -1074,7 +1417,8 @@ export function observationText(obs) {
       ? ' — if the picture shows ONE flat piece (a sign, plaque, panel, tray), it should keep the picture\'s proportion: re-size letters, gaps or content so the board matches, and say so; a 3D piece or a scene is not held to this'
       : ''}`);
   }
-  if (obs.snapshot) lines.push(`PICTURE OF THE CUT: attached as the image in this result — ${obs.snapshot.parts} cutout outline${obs.snapshot.parts === 1 ? '' : 's'} (light) with ${obs.snapshot.marks} recessed area${obs.snapshot.marks === 1 ? '' : 's'} (dark), rendered by the app from the geometry that will actually be machined. Compare it with the user's picture: pose, proportion, where the markings sit.`);
+  if (obs.sizes?.length) lines.push(`SIZES (measured by the app, inches, in the frame you author in — x right, y up): ${obs.sizes.slice(0, MAX_SIZES).map(z => `${z.id} ${z.w} × ${z.h} centered at (${z.cx}, ${z.cy})`).join('; ')}${obs.sizes.length > MAX_SIZES ? `; …and ${obs.sizes.length - MAX_SIZES} more` : ''}`);
+  if (obs.snapshot) lines.push(`PICTURE OF THE CUT: attached as the image in this result — ${obs.snapshot.parts} cutout outline${obs.snapshot.parts === 1 ? '' : 's'} (light) with ${obs.snapshot.marks} recessed area${obs.snapshot.marks === 1 ? '' : 's'} (dark${obs.picture ? '' : '; darker = deeper'}), rendered by the app from the geometry that will actually be machined. ${obs.picture ? "Compare it with the user's picture: pose, proportion, where the markings sit." : 'Look at it as someone who never read the request: what would they say this piece is? Check for text running off its part, elements stacked on each other or far off-center, and a part left blank.'}`);
   if (obs.warnings.length) lines.push(`WARNINGS:\n${list(obs.warnings)}`);
   if (obs.awaitingDraw.length) lines.push(`AWAITING THE USER'S DRAWING: ${obs.awaitingDraw.join(', ')} (ops using these skip until drawn — that is expected, not a failure)`);
   if (obs.claimIssues?.length) lines.push(`CLAIMS CHECK — REFUSED (the recipe does not substantiate these; fix the recipe if the catalog can, otherwise move the item to declined and reword the summary):\n${list(obs.claimIssues.map(c => c.message))}`);
@@ -1095,7 +1439,7 @@ export function observationText(obs) {
 // same promises when the claims are silent. Deterministic; the model's
 // words are data here, never evidence.
 
-const CUTOUT_STRATEGIES = new Set(['tag_cutout', 'disc_cutout', 'shape_cutout']);
+const CUTOUT_STRATEGIES = new Set(['tag_cutout', 'disc_cutout', 'shape_cutout', 'part']);
 // every furniture verb (furniture_design, and the furniture_assembly guest
 // that lowers to the same interpreter) frees panels made to fit each other.
 // Matching the family by name, not one id: for ten days after
@@ -1185,13 +1529,25 @@ const REVISE_TEXT = `That is what the app did with your actions: the recipe as i
 5. Keep 2–3 suggest chips.
 An empty actions list is the right answer when nothing needs to change.`;
 
+// with the look on (sizes + a picture every time) the model is asked to use them
+const LOOK_STEP = `
+6. LOOK at the PICTURE OF THE CUT and the SIZES before you answer: would a stranger handed this piece name the thing that was asked for? Text wider than the part it sits on, two elements on top of each other, something far off-center, or a part with nothing on it is a fault even when the weave verifies — fix it now with real numbers from SIZES.`;
+
+// A whole-request decline with nothing built: one more call to walk the
+// fallback ladder (see LADDER_RULE) before the user is left empty-handed.
+const LADDER_TEXT = `NOTHING WAS BUILT: you declined the whole request and the pipeline is empty, so the user gets no cut file at all. Walk the ladder once more before leaving it there:
+1. Is there a strategy that makes the thing after all?
+2. Would a plain flat part that does its job (an outline with the holes, slots and pockets it needs) serve?
+3. Would a DEPICTION serve — a plaque or sign naming the subject, a GLYPH LIBRARY symbol, simple geometry that stands for it, or a draw shape the user sketches? The likeness rule still stands: never freehand an animal, person, vehicle or logo.
+If a rung holds, emit the actions now, say plainly in the summary what the user is getting INSTEAD of what they asked for, and keep what was not made on declined. If the ask is unsafe or unlawful, or no single-sided flat piece could honestly stand for it, answer with empty actions and the same decline — that is a correct answer too.`;
+
 const FINAL_TEXT = `That is the result after your corrections. This is the LAST call: emit NO actions. Give only the honest summary of the state shown (built and verified, or what still fails and why), the declined list, and 2–3 suggest chips.`;
 
 // The next request in the same conversation: the model's previous content
 // (with its tool_use) as the assistant turn, then our observation as the
 // tool_result plus the instruction. System, tools, and tool_choice are
 // unchanged so the cached prefix is reused.
-export function buildReviseRequest(prevReq, assistantContent, toolUseId, observation, { final = false, image = null } = {}) {
+export function buildReviseRequest(prevReq, assistantContent, toolUseId, observation, { final = false, image = null, look = false, ladder = false, alsoAnswer = [] } = {}) {
   // the picture of the cut rides INSIDE the tool_result (a tool result may
   // carry image blocks), so it is unmistakably the app's observation
   const resultContent = image
@@ -1206,7 +1562,9 @@ export function buildReviseRequest(prevReq, assistantContent, toolUseId, observa
         role: 'user',
         content: [
           { type: 'tool_result', tool_use_id: toolUseId, content: resultContent },
-          { type: 'text', text: final ? FINAL_TEXT : REVISE_TEXT },
+          // other calls in the same reply were applied with this one
+          ...alsoAnswer.map(id => ({ type: 'tool_result', tool_use_id: id, content: 'Applied together with your other call in that reply — see its result. Send ONE apply_recipe_actions call per reply.' })),
+          { type: 'text', text: ladder ? LADDER_TEXT : final ? FINAL_TEXT : look ? REVISE_TEXT.replace('\nAn empty actions list', `${LOOK_STEP}\nAn empty actions list`) : REVISE_TEXT },
         ],
       },
     ],
@@ -1267,6 +1625,21 @@ export function webSearches(content) {
   return out;
 }
 
+// several payloads from one reply, folded into one: actions and declines
+// concatenated in order, the last summary / claims / stance / suggest kept
+function mergePayloads(payloads) {
+  const out = { actions: [], declined: [] };
+  for (const p of payloads) {
+    out.actions.push(...actionList(p));
+    out.declined.push(...declinedList(p));
+    for (const k of ['summary', 'claims', 'stance', 'suggest', 'observed']) {
+      const v = p?.[k];
+      if (v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)) out[k] = v;
+    }
+  }
+  return out;
+}
+
 const dedupeDeclined = (list) => {
   const seen = new Set(), out = [];
   for (const d of list) {
@@ -1277,6 +1650,22 @@ const dedupeDeclined = (list) => {
   }
   return out;
 };
+
+// The app's own sentence for a verified build whose builder left the
+// summary blank: what it is called, what was machined, on what board, and
+// how many pieces come free — every word from the recipe and the weave.
+export function plainBuiltSummary(recipe, obs) {
+  const counts = new Map();
+  for (const op of recipe?.pipeline ?? []) { const k = String(op.strategy ?? '').replace(/_/g, ' '); counts.set(k, (counts.get(k) ?? 0) + 1); }
+  const kinds = [...counts].map(([k, n]) => (n > 1 ? `${k} ×${n}` : k));
+  const n = recipe?.pipeline?.length ?? 0;
+  const name = typeof recipe?.name === 'string' && recipe.name.trim() && !/^untitled/i.test(recipe.name.trim()) ? recipe.name.trim() : '';
+  let out = `Built and verified${name ? `: ${name}` : ''}`;
+  if (n) out += ` — ${n} operation${n === 1 ? '' : 's'} (${clip(kinds.join(', '), 160)})`;
+  if (obs?.stock) out += ` on a ${obs.stock.w}" × ${obs.stock.h}" × ${obs.stock.thickness}" board`;
+  if (obs?.pieces != null && obs.pieces > 0) out += `, ${obs.pieces} piece${obs.pieces === 1 ? '' : 's'} cut free`;
+  return out + '.';
+}
 
 // Drive a full intent turn: parse → apply → weave → (revise → apply →
 // weave)* until the model has nothing left to change, up to maxTurns
@@ -1298,7 +1687,9 @@ const dedupeDeclined = (list) => {
 // a spinner. It is PROVISIONAL — a fix turn, a claims correction or the
 // rollback guard may still change it — so a renderer labels it a draft and
 // keeps export shut until the loop returns.
-export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null, exemplars = null, client = null, onDraft = null, lookUp = null, search = false, onStage = null }) {
+export async function runIntentLoop({ recipe, utterance, shop = {}, model, call, weave = null, maxTurns = 3, mode = 'always', image = null, exemplars = null, client = null, onDraft = null, lookUp = null, search = false, onStage = null, measure = false, look = false, ladder = false, subjects = false, review = null, route = false, cache = false }) {
+  // cache: mark the fixed part of the system prompt cacheable on every call this turn makes
+  if (cache) { const send = call; call = (r) => send(withPromptCache(r)); }
   const turns = [];
   // Anthropic's usage fields, summed across calls (the probe prices from them)
   const usage = { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, web_search_requests: 0 };
@@ -1310,7 +1701,12 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     searches.push(...webSearches(data?.content));
   };
   const stage = (info) => { try { onStage?.(info); } catch { /* a label must never break a turn */ } };
-  const base = { ...(model ? { model } : {}), shop, image, exemplars, client };
+  const base = { ...(model ? { model } : {}), shop, image, exemplars, client, measure: !!measure && !!weave, ladder: !!ladder, subjects: !!subjects && !!lookUp, review: review || null,
+    // prompt routing (opt-in): only the shelves this ask points at are documented
+    shelves: route ? pickShelves({ utterance, recipe, image, exemplars }) : null };
+  const reads = [];      // shelves the model pulled with read_docs this turn
+  const measures = [];   // every measure call this turn: { items } as answered
+  let laddered = false;
   let req = buildParseRequest(recipe, utterance, { ...base, lookUp: !!lookUp });
   const lookups = [];    // every findReference() result this turn, in order
   let searchDropped = null;
@@ -1341,11 +1737,13 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       const subject = String(ask.input?.subject ?? '').trim();
       stage({ stage: 'lookup', subject });
       const found = await safeLookUp(lookUp, subject);
+      // a likeness lookup (opt-in): the photo is drawn from, not measured
+      found.kind = base.subjects && ask.input?.kind === 'subject' ? 'subject' : 'structure';
       lookups.push(found);
       stage({ stage: 'found', subject, reference: found });
       const more = n + 1 < MAX_LOOKUPS;
       // no search for a refused subject: nothing is going to be built from it
-      const withSearch = !!search && found.reason !== 'refused';
+      const withSearch = !!search && found.reason !== 'refused' && found.kind !== 'subject';   // …and a likeness has no dimensions to search for
       req = buildParseRequest(recipe, utterance, { ...base, lookUp: more, reference: found, search: withSearch });
       try {
         data = await call(req);
@@ -1368,13 +1766,55 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       tally(data);
     }
     // only apply_recipe_actions is acted on: a find_reference past its
-    // allowance (or on a later turn) is not a build
-    const isAction = (b) => b.type === 'tool_use' && b.name !== REFERENCE_TOOL.name;
+    // allowance (or on a later turn) is not a build, and neither is measure
+    const isAction = (b) => b.type === 'tool_use' && b.name !== REFERENCE_TOOL.name && b.name !== MEASURE_TOOL.name && b.name !== READ_DOCS_TOOL.name;
+    // The model asked how big something comes out: answer in the SAME
+    // conversation and let it author. MAX_MEASURES answers per user turn;
+    // one call past that is told so (a tool_use must always be answered).
+    for (let n = 0; base.measure && n <= MAX_MEASURES; n++) {
+      const ask = Array.isArray(data?.content) && !data.content.some(isAction) ? data.content.find(b => b.type === 'tool_use' && b.name === MEASURE_TOOL.name) : null;
+      if (!ask || data.stop_reason === 'max_tokens') break;
+      const over = measures.length >= MAX_MEASURES;
+      let answer;
+      if (over) answer = `No more measurements this turn (${MAX_MEASURES} allowed). Call apply_recipe_actions now with what you have.`;
+      else {
+        stage({ stage: 'measure' });
+        const m = await measureItems(cur, ask.input, weave ? (rec) => safeWeave(weave, rec) : null);
+        measures.push({ turn: t, items: m.items });
+        answer = `${m.text}\n${measures.length >= MAX_MEASURES ? 'That was the last measurement this turn. ' : ''}Now call apply_recipe_actions.`;
+      }
+      req = { ...req, messages: [...req.messages, { role: 'assistant', content: data.content }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: ask.id, content: answer, ...(over ? { is_error: true } : {}) }] }] };
+      data = await call(req);
+      tally(data);
+    }
+    // The model asked for documentation that was not loaded (prompt
+    // routing): hand it over as the tool's result, same conversation — the
+    // system prompt and its cache are untouched. A measure call may follow.
+    for (let n = 0; base.shelves && n <= MAX_READS + MAX_MEASURES; n++) {
+      const asks = Array.isArray(data?.content) && !data.content.some(isAction) && data.stop_reason !== 'max_tokens' ? data.content.filter(b => b.type === 'tool_use' && (b.name === READ_DOCS_TOOL.name || b.name === MEASURE_TOOL.name)) : [];
+      if (!asks.some(b => b.name === READ_DOCS_TOOL.name)) break;
+      const results = asks.map(b => {
+        if (b.name !== READ_DOCS_TOOL.name) return { type: 'tool_result', tool_use_id: b.id, content: 'Not answered — ask again on its own after reading the documentation.', is_error: true };
+        const name = String(b.input?.shelf ?? '').trim().toLowerCase();
+        const known = shelfNames().includes(name);
+        if (!known) return { type: 'tool_result', tool_use_id: b.id, content: `No shelf "${name}". Shelves: ${shelfNames().join(', ')}.`, is_error: true };
+        if (reads.length >= MAX_READS) return { type: 'tool_result', tool_use_id: b.id, content: 'No more documentation this turn. Call apply_recipe_actions now with what you have.', is_error: true };
+        stage({ stage: 'docs', shelf: name });
+        reads.push({ turn: t, shelf: name });
+        return { type: 'tool_result', tool_use_id: b.id, content: `${shelfDoc(name)}\n\nThat is the documentation. Now call apply_recipe_actions.` };
+      });
+      req = { ...req, messages: [...req.messages, { role: 'assistant', content: data.content }, { role: 'user', content: results }] };
+      data = await call(req);
+      tally(data);
+    }
     let toolUse = data?.content?.find(isAction);
     // under tool_choice 'auto' a model may answer in prose instead of calling
     // the tool (Fable 5.1, 1 of 25 probe rows): nudge once, same conversation
     if (!toolUse && t === 0 && req.tool_choice?.type === 'auto' && Array.isArray(data?.content)) {
-      req = { ...req, messages: [...req.messages, { role: 'assistant', content: data.content }, { role: 'user', content: 'Call apply_recipe_actions now with what you just described (or an empty actions list plus declined entries). Do not answer in text.' }] };
+      const nudge = 'Call apply_recipe_actions now with what you just described (or an empty actions list plus declined entries). Do not answer in text.';
+      // a tool call left open (a measure past its allowance) must be answered or the API refuses the conversation
+      const open = data.content.filter(b => b.type === 'tool_use' && (b.name === MEASURE_TOOL.name || b.name === READ_DOCS_TOOL.name));
+      req = { ...req, messages: [...req.messages, { role: 'assistant', content: data.content }, { role: 'user', content: open.length ? [...open.map(b => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not available now.', is_error: true })), { type: 'text', text: nudge }] : nudge }] };
       data = await call(req);
       tally(data);
       toolUse = data?.content?.find(isAction);
@@ -1390,7 +1830,13 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       if (t === 0) throw new IntentError('that answer overran its budget mid-build, so nothing was applied — ask for it in smaller pieces (and describe repeated layouts as a pattern rather than listing every piece)');
       break;
     }
-    const p0 = toolUse.input ?? {};
+    // Several apply_recipe_actions calls in ONE reply (seen from a small
+    // model even when told not to): they are one answer written in pieces.
+    // Apply them together, in order, and answer every call — an unanswered
+    // tool_use makes the API refuse the next request.
+    const allUses = data.content.filter(isAction);
+    const extraUses = allUses.filter(b => b !== toolUse);
+    const p0 = extraUses.length ? mergePayloads(allUses.map(b => b.input ?? {})) : (toolUse.input ?? {});
     const p0Actions = actionList(p0);
     if (t === 0 && !p0Actions.length && !declinedList(p0).length && !(typeof p0.summary === 'string' && p0.summary.trim())) {
       throw new IntentError('the model came back empty-handed — nothing was applied; hit Generate again');
@@ -1405,14 +1851,28 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     const hadActions = p0Actions.length > 0;
     // nothing changed → nothing new to look at: a pure decline on turn 0,
     // or a revise turn that wrote its summary with the state already in view
-    if (!hadActions) break;
+    if (!hadActions) {
+      // …unless that leaves the user with NOTHING: a whole-request decline
+      // on an empty recipe earns one walk down the fallback ladder
+      if (ladder && !laddered && t === 0 && cap > 1 && !cur.pipeline.length && out.declined.length) {
+        laddered = true;
+        turn.laddered = true;
+        turn.observation = buildObservation(out, null, cur, { picture });
+        turn.recipe = cur;
+        req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { ladder: true, alsoAnswer: extraUses.map(b => b.id) });
+        continue;
+      }
+      break;
+    }
     if (t === cap - 1) break;
     const result = weave ? await safeWeave(weave, cur) : null;
     // with a picture in play, the second look also SEES the cut (rendered
-    // from the lowered geometry) next to the user's picture
-    const snapshot = picture && result ? safeSnapshot(result) : null;
+    // from the lowered geometry) next to the user's picture; with `look`
+    // on it sees the cut every time, picture or not
+    const drawnFromReference = lookups.some(r => r.ok && r.kind === 'subject' && r.photo);   // a likeness is compared with its photo
+    const snapshot = (picture || look || drawnFromReference) && result ? safeSnapshot(result) : null;
     turn.snapshot = snapshot ? { w: snapshot.w, h: snapshot.h, parts: snapshot.parts, marks: snapshot.marks } : null;
-    turn.observation = buildObservation(out, result, cur, { picture, snapshot });
+    turn.observation = buildObservation(out, result, cur, { picture, snapshot, sizes: !!look });
     turn.recipe = cur;   // the state this observation describes (applyActions never mutates it later)
     turn.claims = p0.claims && typeof p0.claims === 'object' ? p0.claims : (turns[turns.length - 2]?.claims ?? null);
     const cc = checkClaims(turn.claims, cur, out.summary, out.declined, result?.ok ? result.pieces : null);
@@ -1424,7 +1884,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
       try { const p = onDraft({ turn: t, recipe: cur, summary: out.summary, declined: out.declined, result, ok: result ? !!result.ok : null }); p?.catch?.(() => {}); } catch { /* ignored */ }
     }
     if (mode === 'trouble' && !observationTroubled(turn.observation)) break;
-    req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2, image: snapshot });
+    req = buildReviseRequest(req, data.content, toolUse.id, turn.observation, { final: t === cap - 2, image: snapshot, look: !!look, alsoAnswer: extraUses.map(b => b.id) });
   }
   const first = turns[0], last = turns[turns.length - 1];
   const suggest = last.suggest?.length ? last.suggest : first.suggest;
@@ -1440,7 +1900,7 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     const obs = [...turns].reverse().find(x => x.observation)?.observation ?? null;
     const declined = dedupeDeclined(turns.flatMap(x => x.declined ?? []));
     const bits = [];
-    if (obs?.ok) bits.push('Built and verified.');
+    if (obs?.ok) bits.push(plainBuiltSummary(cur, obs));
     else if (obs && !obs.pipeline.length) bits.push('Nothing was built.');
     else if (obs) bits.push(`The build does not verify yet${obs.errors[0] ? `: ${obs.errors[0]}` : '.'}`);
     else if (!cur.pipeline.length) bits.push('Nothing was built.');
@@ -1522,9 +1982,246 @@ export async function runIntentLoop({ recipe, utterance, shop = {}, model, call,
     claimsCaught: turns.some(x => x.observation?.claimIssues?.length) && !claimIssues.length,   // the second look fixed them    // the reference this build was made from (the last lookup that found
     // something), every lookup tried, what was searched, and why search was
     // dropped if the API refused it — for the page to show and credit
+    measures,                        // what the model asked the app to measure, and the answers
+    laddered,                        // a whole-request decline was sent back down the fallback ladder
+    route: route ? { shelves: base.shelves, reads } : null,   // which shelves were documented (null = everything), and what the model pulled
     reference: [...lookups].reverse().find(r => r.ok) ?? null,
     lookups,
     searches,
     searchDropped,
   };
+}
+
+// ------------------------------------------------------------- the cascade
+//
+// Small model first, escalate on failure. The verifier is a judge that
+// costs nothing, so a cheap attempt that does not hold is simply tried
+// again one rung up — the user never receives the cheap failure. An
+// attempt is kept only when it built something, the final state verifies,
+// nothing was declined and nothing had to be corrected after the fact;
+// anything else escalates. The top rung also walks the fallback ladder
+// (`ladder`), so the last word on a hard ask is a depiction, not a refusal.
+// A question answered without actions is not a failure and stays put.
+//
+// Measured 2026-11-12 on 25 prompts: Haiku 5.5 alone costs about 1.5% of
+// Opus 5.5 per prompt and answers in a quarter of the time; the cascade's
+// cost is the cheap attempt plus the fraction that escalates.
+export const CASCADE_MODELS = ['claude-haiku-5-5', DEFAULT_MODEL];
+
+// What the next rung is told when the judge sent a build up: the findings,
+// and whether to FIX the earlier build (it is the right thing, short of the
+// ask) or start over (it is the wrong thing). Null when there is nothing
+// specific to say.
+export function reviewNote(verdict, { fixing = false } = {}) {
+  if (!verdict || verdict.verdict !== 'redo') return null;
+  const found = [];
+  if (verdict.onSubject === false) found.push(`it built the wrong thing (${verdict.subject || 'something else'}) instead of what is asked for`);
+  if (verdict.reduced) found.push('it is a cut-down version of the request (one of a set, a placeholder, or a sample where the whole was asked)');
+  for (const m of verdict.missing ?? []) found.push(`missing: ${m}`);
+  for (const m of verdict.makeable ?? []) found.push(`declined, though a 3-axis router cutting flat sheet from the top can make it: ${m}`);
+  if (!found.length && verdict.why) found.push(verdict.why);
+  if (!found.length) return null;
+  const list = found.map(x => `- ${x}`).join('\n');
+  return fixing
+    ? `A CHECKER'S FINDINGS ON THE BUILD IN THE CURRENT RECIPE (a first attempt at this same request — it verifies, but it falls short of the request):\n${list}\nMake the recipe the WHOLE request. Keep what is sound and change or add what the findings name (set_operation / add_operation / set_shape on top of what is there); where the first attempt's approach cannot get there, remove those operations and build that part your own way. The findings are a checker's reading of the request, not the request: if one asks for something the request does not, or for something this machine truly cannot make, leave it and say so. Write the summary for the user as the answer to their request — do not mention the first attempt or the checker.`
+    : `A CHECKER'S FINDINGS ON AN EARLIER ATTEMPT AT THIS REQUEST (discarded — the recipe is as it was before it):\n${list}\nBuild the request itself, and do not repeat that. Do not mention the earlier attempt or the checker in the summary.`;
+}
+
+// why an attempt is not good enough to hand to the user (null = keep it)
+export function escalateReason(out, finalWeave, startRecipe, { declinesToJudge = false } = {}) {
+  if (!out) return 'no answer';
+  const built = out.recipe?.pipeline?.length ?? 0;
+  const acted = out.turns.some(t => t.applied?.length);
+  // a partial decline on a build that stands is the JUDGE's to rule on
+  // (a real limit of the machine is not worth a second, dearer attempt)
+  if (out.declined?.length && !(declinesToJudge && built)) return built ? 'declined part of the request' : 'declined the request';
+  if (!acted) return null;                       // an answered question: nothing to verify
+  if (!built) return 'built nothing';
+  if (finalWeave && finalWeave.ok === false) return `did not verify: ${clip(String(finalWeave.errors?.[0] ?? 'no error text'), 160)}`;
+  if (out.rolledBack) return 'a correction broke the build and was rolled back';
+  if (out.claimIssues?.length) return 'claimed something the recipe does not deliver';
+  if (out.turns[out.turns.length - 1].skipped?.length) return 'left actions that did not apply';
+  if ((out.recipe.shapes ?? []).some(sh => sh.draw) && !(startRecipe?.shapes ?? []).some(sh => sh.draw)) return 'left the drawing to the user';
+  return null;
+}
+
+/**
+ * runIntentLoop over a ladder of models, cheapest first.
+ *   opts     everything runIntentLoop takes (its `model` is ignored)
+ *   models   cheapest → most capable (default CASCADE_MODELS)
+ *   onTier({ tier, model, reason })  called before each attempt after the
+ *            first, with why the previous one was not kept
+ * Returns the kept attempt's result plus { model, tier, attempts: [{ model,
+ * reason, ok, usage, ms }], usageByModel } — `usage` stays the kept
+ * attempt's own; cost is summed from attempts.
+ */
+export async function runIntentCascade(opts, { models = CASCADE_MODELS, onTier = null, judge = true, judgeModel = undefined } = {}) {
+  const attempts = [];
+  let verified = null;   // the best earlier attempt that at least verified
+  let handoff = null;    // { recipe?, review } — the judge's findings on the rung below, for this rung
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i], top = i === models.length - 1;
+    if (i > 0) { try { onTier?.({ tier: i, model, reason: attempts[i - 1].reason }); } catch { /* a label never breaks a turn */ } }
+    const t0 = Date.now();
+    let out = null, final = null, reason = null, verdict = null;
+    try {
+      // a build the judge sent up arrives WITH its findings: the right thing
+      // built short is fixed in place, the wrong thing is started over
+      const given = handoff; handoff = null;
+      out = await runIntentLoop({ ...opts, model, ...(top && models.length > 1 ? { ladder: true } : {}), ...(given?.recipe ? { recipe: given.recipe } : {}), ...(given?.review ? { review: given.review } : {}) });
+      if (given) out.handoff = { fixing: !!given.recipe, review: given.review };
+      // a fix turn that changed nothing answers with the build it was
+      // handed: its declines are the earlier attempt's as well as its own
+      if (given?.recipe && given.declined?.length) out.declined = dedupeDeclined([...(out.declined ?? []), ...given.declined]);
+      final = opts.weave && out.recipe.pipeline.length ? await safeWeave(opts.weave, out.recipe) : null;
+      reason = escalateReason(out, final, opts.recipe, { declinesToJudge: judge && !top });
+      // It built, it verifies, it declined nothing — but is it the thing
+      // that was asked for? Below the top rung a separate judge rules on
+      // that from the facts and the picture; a build it will not pass, or
+      // could not rule on, goes up a rung. (The top rung has nowhere to go.)
+      if (!reason && judge && !top && final && out.turns.some(x => x.applied?.length)) {
+        verdict = await judgeBuild(opts.call, { utterance: opts.utterance, recipe: out.recipe, weaveResult: final, declined: out.declined, image: opts.image ?? null, ...(judgeModel ? { model: judgeModel } : {}) });
+        if (verdict.verdict !== 'keep') {
+          reason = verdict.verdict === null ? `not judged: ${verdict.why}`
+            : `judge: ${!verdict.onSubject ? `off-subject (${verdict.subject})` : verdict.reduced ? 'a reduced version of the ask' : verdict.missing.length ? `missing ${verdict.missing.slice(0, 3).join('; ')}` : verdict.makeable.length ? `declined what this machine can make: ${verdict.makeable.slice(0, 3).join('; ')}` : verdict.why}`;
+          const fixing = verdict.verdict === 'redo' && verdict.onSubject !== false && final.ok;
+          const review = reviewNote(verdict, { fixing });
+          if (review) handoff = fixing ? { recipe: out.recipe, review, declined: (out.declined ?? []).filter(d => !verdict.makeable.includes(clip(String(d.what ?? '').trim(), 120))) } : { review };
+        }
+      }
+    } catch (e) {
+      // the user stopped it, or there is nowhere left to go: that is the answer
+      if (e?.name === 'AbortError' || /cancel|stopped/i.test(e?.message ?? '') || (top && !verified)) throw e;
+      reason = `failed: ${clip(String(e?.message ?? e), 160)}`;
+    }
+    attempts.push({ model, reason, ok: final ? !!final.ok : null, errors: final && !final.ok ? (final.errors ?? []).slice(0, 3).map(e => clip(String(e), 300)) : [], usage: out?.usage ?? null, ms: Date.now() - t0, ...(out?.handoff ? { handoff: out.handoff.fixing ? 'fix' : 'findings' } : {}), ...(verdict ? { judge: { model: verdict.model, verdict: verdict.verdict, onSubject: verdict.onSubject ?? null, reduced: verdict.reduced ?? null, missing: verdict.missing ?? [], makeable: verdict.makeable ?? [], subject: verdict.subject ?? '', why: verdict.why, usage: verdict.usage } } : {}) });
+    const pack = (o, tier) => ({ ...o, model: models[tier], tier, attempts, usageByModel: Object.fromEntries(attempts.filter(a => a.usage).map(a => [a.model, a.usage])) });
+    if (out && !reason) return pack(out, i);
+    if (out && final?.ok && (!verified || top)) verified = { out, tier: i };
+    if (top) {
+      // the top rung's answer stands — unless it does not verify and a
+      // cheaper rung's did: a build that cuts beats one that does not
+      if (out && (final?.ok || !verified || !out.recipe.pipeline.length && !verified)) return pack(out, i);
+      if (verified) return pack(verified.out, verified.tier);
+      return pack(out, i);
+    }
+  }
+  throw new IntentError('no model was configured');
+}
+
+// ------------------------------------------------- did it build what was asked
+//
+// The verifier proves a build will cut; it cannot tell a router jig from a
+// name tag. On 2026-11-12 three small-model builds verified while being the
+// WRONG THING (name tags for a jig, a fretboard and a kalimba), and nothing
+// escalated. This gate is the check for that: one small request — no
+// catalog, no rules — that shows a judge the ask, the facts of the build
+// as the app computed them, and the picture of the cut, and asks whether
+// this is the thing that was asked for and whether anything named is
+// missing. The builder's own summary is deliberately NOT shown: the judge
+// rules on what will be cut, not on what was said about it.
+export const JUDGE_TOOL = {
+  name: 'report_check',
+  description: 'Report whether the build matches the request.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      subject: { type: 'string', description: 'in a few words, what the BUILD is, judged only from the facts and the picture (e.g. "a rectangular name tag", "a plate with a 4×4 grid of holes")' },
+      on_subject: { type: 'boolean', description: 'true if the build is an attempt at the thing the request asks for; false if it is a different thing (a name tag when a jig was asked for) or generic filler' },
+      missing: { type: 'array', items: { type: 'string' }, description: 'pieces or features the request NAMES that are absent from the build and are not on the declined list — each in a few words. Empty when nothing named is missing. Do not list things the request never asked for, choices of size or style, or anything on the declined list.' },
+      reduced: { type: 'boolean', description: 'true if the build is a clearly cut-down version of the ask: one of a set that was asked for, a placeholder outline, a sample row where a full pattern was asked' },
+      declined_makeable: { type: 'array', items: { type: 'string' }, description: 'the DECLINED items, copied word for word, that this machine COULD have made: anything a flat-sheet, top-face, 3-axis job does — holes, slots, pockets, engraving, an outline, more pieces of the same kind, a pattern or grid, panels joined into a box. Leave out declines that are real limits: the back face, turned or round parts, true 3D forms, bends, bought hardware, moving mechanisms, data the app does not have. Empty when nothing was declined or every decline is a real limit.' },
+      verdict: { type: 'string', enum: ['keep', 'redo'], description: '"keep" when it is the thing asked for, nothing named is missing, and every decline is a real limit; "redo" when it is off-subject, reduced, missing something the request names, or declined something this machine could have made' },
+      why: { type: 'string', description: 'one sentence, for the log' },
+    },
+    required: ['subject', 'on_subject', 'missing', 'reduced', 'declined_makeable', 'verdict', 'why'],
+  },
+};
+export const JUDGE_MODEL = 'claude-haiku-5-5';
+const JUDGE_SYSTEM = `You check CNC router builds. A person asked for something to be cut on a 3-axis router from flat sheet stock, top face only, and a builder produced a job. You are shown the request, the FACTS of the job as the machine software computed them, and usually a top-down PICTURE of what will be cut (light grey = the part's outline, darker = recessed, darker still = deeper, near black = cut through).
+
+Decide two things, from the facts and the picture only:
+1. Is this the thing that was asked for? A build of a different object, or a generic sign or tag standing in for the object, is off-subject.
+2. Is anything the request NAMES missing — a piece, a feature, a count ("eight bars", "six holes", "two lanes") — that is not on the DECLINED list?
+
+3. For each item on the DECLINED list: could this machine have made it? The builder refused those openly, so they are never "missing" — but a refusal is only acceptable when it is a real limit of the machine. It cuts flat sheet from the top face with a spinning bit: holes, slots, pockets at a depth, engraved text, any outline, many pieces in one job, grids and patterns, flat panels that slot together into a box or frame. It cannot cut the back face, turn round parts, make true 3D or undercut forms, bend material, supply hardware (bearings, clips, hinges, screws) or make moving mechanisms. "I only built one of the eight", "not authored yet", "would need more operations" and "the catalog has no way" for something in the first list are NOT real limits: list those under declined_makeable.
+
+Be strict about the object and the things the request names. Be relaxed about everything the request left open: exact sizes, proportions, fonts, corner radii, bit sizes, where on the piece a feature sits, added holding tabs, and sensible extras. A rough count is fine when the picture is small; a set of one where several were asked is not. A flat piece that does the job of something this machine cannot make whole is on-subject.
+
+Answer only by calling report_check.`;
+
+const digestParams = (params) => {
+  const out = [];
+  for (const [k, v] of Object.entries(params ?? {})) {
+    if (v === '' || v === null || v === undefined || k === 'feedRate' || k === 'toolDiameter') continue;
+    const s = Array.isArray(v) ? `[${v.length} item${v.length === 1 ? '' : 's'}: ${clip(JSON.stringify(v), 220)}]` : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    out.push(`${k}=${clip(s, 260)}`);
+  }
+  return out.join(', ');
+};
+
+// What the judge is shown about a build — computed from the recipe and the
+// weave, never from the builder's words.
+export function buildFacts(recipe, weaveResult, declined = []) {
+  const vals = Object.fromEntries((recipe.controls ?? []).map(c => [c.id, c.default]));
+  const lines = [];
+  lines.push(`NAME: ${recipe.name ?? 'Untitled'}; stock ${recipe.stock?.thickness}" thick`);
+  if (recipe.controls?.length) lines.push(`CONTROLS (the sliders and text boxes the user gets, with defaults): ${recipe.controls.slice(0, 24).map(c => `${c.label ?? c.id} = ${JSON.stringify(c.default)}`).join('; ')}${recipe.controls.length > 24 ? `; …and ${recipe.controls.length - 24} more` : ''}`);
+  if (recipe.shapes?.length) lines.push(`SHAPES DEFINED: ${recipe.shapes.slice(0, 30).map(sh => `${sh.id} (${Object.keys(sh).filter(k => k !== 'id' && k !== 'open')[0] ?? 'path'})`).join(', ')}`);
+  lines.push(`OPERATIONS, in machining order (${recipe.pipeline.length}):`);
+  for (const op of recipe.pipeline.slice(0, 40)) {
+    // bound values shown resolved, so "text={ctrl:label}" reads as the text
+    const params = Object.fromEntries(Object.entries(op.params ?? {}).map(([k, v]) => [k, v && typeof v === 'object' && 'ctrl' in v ? vals[v.ctrl] : v]));
+    lines.push(`- ${op.id}: ${op.strategy}${op.frame ? ` on ${op.frame}` : ''} — ${digestParams(params) || 'defaults'}`);
+  }
+  if (recipe.pipeline.length > 40) lines.push(`- …and ${recipe.pipeline.length - 40} more`);
+  const obs = buildObservation({ applied: [], skipped: [] }, weaveResult, recipe, { sizes: true });
+  if (obs.stock) lines.push(`BOARD: ${obs.stock.w}" × ${obs.stock.h}" × ${obs.stock.thickness}"`);
+  if (obs.pieces != null) lines.push(`SEPARATE PIECES CUT FREE: ${obs.pieces}`);
+  if (obs.sizes?.length) lines.push(`SIZES of each operation as cut (inches): ${obs.sizes.slice(0, 30).map(z => `${z.id} ${z.w} × ${z.h}`).join('; ')}`);
+  for (const k of ['stack', 'chair', 'tower', 'lattice']) if (obs[k]) lines.push(`ASSEMBLY (${k}): ${clip(JSON.stringify(obs[k]), 300)}`);
+  if (obs.kit) lines.push(`KIT: ${clip(JSON.stringify({ planks: obs.kit.planks, tops: obs.kit.tops, connectors: obs.kit.connectors }), 300)}`);
+  if (obs.ingredients?.length) lines.push(`MATERIALS: ${obs.ingredients.join('; ')}`);
+  lines.push(`VERIFIED BY THE MACHINE SOFTWARE: ${weaveResult ? (weaveResult.ok ? 'yes' : 'NO') : 'not checked'}`);
+  lines.push(declined.length ? `DECLINED openly by the builder, with its reason:\n${declined.slice(0, 8).map(d => `- ${clip(String(d.what ?? ''), 110)} — ${clip(String(d.why ?? ''), 200)}`).join('\n')}` : 'DECLINED: nothing');
+  return lines.join('\n');
+}
+
+export function buildJudgeRequest({ utterance, recipe, weaveResult, declined = [], image = null, model = JUDGE_MODEL }) {
+  // a long thin part (a 42" neck) rasters into a picture thousands of
+  // pixels tall at full width: shrink it until it is a reasonable image
+  let snap = weaveResult ? safeSnapshot(weaveResult) : null;
+  if (snap && snap.h > 1200) { try { snap = snapshotWeave(weaveResult, { w: Math.max(120, Math.floor(480 * 1200 / snap.h)) }) ?? snap; } catch { /* keep the tall one */ } }
+  const content = [
+    ...(image ? [{ type: 'image', source: { type: 'base64', media_type: image.media_type, data: image.data } }, { type: 'text', text: 'Above: the picture the person attached to their request.' }] : []),
+    { type: 'text', text: `THE REQUEST:\n${(utterance ?? '').trim() || DEFAULT_IMAGE_UTTERANCE}\n\nTHE FACTS OF THE BUILD:\n${buildFacts(recipe, weaveResult, declined)}` },
+    ...(snap ? [{ type: 'image', source: { type: 'base64', media_type: snap.media_type, data: snap.data } }, { type: 'text', text: 'Above: the PICTURE of what will be cut.' }] : [{ type: 'text', text: '(No picture of the cut is available for this build — judge from the facts.)' }]),
+  ];
+  return {
+    model, max_tokens: 8000, system: JUDGE_SYSTEM,
+    messages: [{ role: 'user', content }],
+    tools: [JUDGE_TOOL],
+    tool_choice: { type: 'auto', disable_parallel_tool_use: true },
+  };
+}
+
+// Run the judge. Never throws: a judge that cannot be reached or does not
+// answer in form returns verdict null, and the caller decides what an
+// unjudged build is worth (the cascade treats it as "redo" — unproven).
+export async function judgeBuild(call, args) {
+  const req = buildJudgeRequest(args);
+  try {
+    const data = await call(req);
+    const use = data?.content?.find(b => b.type === 'tool_use' && b.name === JUDGE_TOOL.name);
+    const v = use?.input;
+    if (!v || typeof v !== 'object' || !['keep', 'redo'].includes(v.verdict)) return { verdict: null, why: 'the judge did not answer in form', usage: data?.usage ?? null, model: req.model };
+    const missing = (Array.isArray(v.missing) ? v.missing : []).filter(x => typeof x === 'string' && x.trim()).map(x => clip(x.trim(), 120)).slice(0, 8);
+    // the verdict follows from the findings, whatever word the judge chose
+    const makeable = (Array.isArray(v.declined_makeable) ? v.declined_makeable : []).filter(x => typeof x === 'string' && x.trim()).map(x => clip(x.trim(), 120)).slice(0, 8);
+    const redo = v.on_subject === false || v.reduced === true || missing.length > 0 || makeable.length > 0 || v.verdict === 'redo';
+    return { verdict: redo ? 'redo' : 'keep', onSubject: v.on_subject !== false, reduced: v.reduced === true, missing, makeable, subject: clip(String(v.subject ?? ''), 120), why: clip(String(v.why ?? ''), 240), usage: data.usage ?? null, model: req.model };
+  } catch (e) {
+    if (e?.name === 'AbortError' || /cancel|stopped/i.test(e?.message ?? '')) throw e;
+    return { verdict: null, why: `the judge could not be reached: ${clip(String(e?.message ?? e), 120)}`, usage: null, model: req.model };
+  }
 }

@@ -51,6 +51,9 @@ machine with a real spindle. These rules are not style preferences.
   `postJobToSbp`, `postJobToGcode`.
 - `ir/verify.js` — `verifyJob(job, composed, opts)` → `{ ok, errors,
   warnings, stats }`. The admission gate.
+- `ir/machinability.js` — `checkMachinability(job, opts)` → `{ ok, errors,
+  warnings, ops, pieces, webs }`. The SECOND gate: is the cut physically
+  sound. See "The machinability gate" below.
 - `ir/placement.js` — op-local → job coords. `scale` is XY-only and
   invalid for V-carves (depth is a function of XY geometry — scale the
   input geometry before lowering instead).
@@ -85,6 +88,50 @@ machine with a real spindle. These rules are not style preferences.
   probe excludes a prompt's own prior answer (`EXEMPLARS=off` measures
   without retrieval). Tune STOP / ALIAS / CLASS_WORDS there when the
   funnel's `intent.exemplars` keys show off-subject picks.
+
+## The machinability gate
+
+`verifyJob` proves the motion matches its declaration. It cannot see a job
+that is faithful and still unsound: a 2" piece freed with nothing holding
+it, a 1/16" bit buried 1/4" in one pass. `ir/machinability.js` measures
+those from the placed motion, independently of the strategies (same rule
+as the verifier), and the Loom runtime reports it beside the verifier's
+verdict as `result.machinability` — never folded into `report`.
+
+- **reach** — deepest cut vs the bit's cutting length (`tool.maxDepth`,
+  default 4× diameter).
+- **pass depth** — the op is replayed into a height grid and the uncut
+  stock ahead of the cutter is read at every step; limit 1× diameter for
+  flat and ball bits. Point-model V-bits (0.002" table diameter) are not
+  judged by diameter.
+- **retention** — every through outside-profile frees a piece. Whether it
+  needs holding comes from its size and the shop's declared hold-down
+  (`RETENTION`: undeclared / vacuum / fixed); whether it IS held is read
+  from the motion: bridges standing at least `MIN_BRIDGE` across the whole
+  kerf. A flag saying "tabs" proves nothing — 0.3" tabs under a 1/2" bit
+  are cut away along the kerf centre by the bit's own edges and measure as
+  zero bridges (test/machinability-test.mjs).
+- **thin webs** — a flat-bit feature closer to its part's edge, or to
+  another feature of the same part, than a third of its depth (0.03" to
+  0.125").
+
+The policy half lives in the same file so planner and gate share one
+table. An entry that frees a piece or takes depth passes MUST use it:
+
+- `holdTabs(ctx, ring, p, diameter)` (app/catalog.mjs) for the profile's
+  `tabs`: on when asked, and on by policy when the piece is too small for
+  the shop's hold-down (`ctx.shop.holdDown`). Tabs come from
+  `tabSpecFor(diameter)`, sized to the bit. Surface its `notes` as sub-op
+  warnings.
+- `passFor(ctx, diameter, base)` for every `depthPerPass`: the strategy's
+  usual step, capped at one bit diameter and at what a declared shop
+  material allows. Never a bare constant.
+
+`MACHINABILITY_LEVELS` in app/runtime.mjs says which checks refuse a job
+and which warn. Promote a check to `error` only after
+`tools/synth-probe/machinability-sweep.mjs` has counted what it would
+refuse across the corpus (run it with 2 workers — the server has 3 GB).
+Never relax a threshold to make a job pass; fix the planner.
 
 ## Adding a strategy
 
@@ -133,6 +180,40 @@ yet in the catalog) → catalog integration here. The integration checklist:
 
 Declines logged by users are the backlog for this section — a decline
 converts to a feature by exactly this list.
+
+### The part verb (part-first authoring)
+
+`part` (in `app/catalog.mjs`) inverts the usual authoring: the model gives
+an OUTLINE (rectangle, circle or a shape id) and a list of FEATURES, each a
+shape at a depth (`"through"` or inches), and the entry's planner does the
+CAM. It exists because the model sequencing ops by hand kept producing the
+same ledger classes (counterbores, overlapping pockets, bore-vs-pocket,
+cutout-as-slot). What the planner does, in order:
+
+1. Features against the outline: a THROUGH feature that crosses the edge
+   is subtracted from the outline (a notch); a BLIND one that crosses it
+   is an open pocket, overrunning the edge by `EDGE_GRACE`; one wholly
+   outside is dropped with a warning.
+2. Features that overlap are grouped (union-find). In a group, each
+   distinct depth is a LEVEL: the union of the group's features at least
+   that deep, cut to that depth - so the deepest always wins and a
+   counterbore is just two circles. Levels of one group overlap by design
+   and are scoped to each other with the runtime's `edgeScopeRoot` /
+   `cutsRoot` tokens (unique per part, from the outline's box); an open
+   pocket shares its token with the part's own cutout. Nothing gets the
+   blanket `allowOverlap`, so the verifier still catches a feature
+   overlapping anything it should not.
+3. A level piece that IS one circle is bored (main bit, else the largest
+   drawer bit that fits and is at least a third of the hole); anything
+   else is pocketed with the main bit when it fits, else `autoToolChain`.
+4. Ops are ordered one bit at a time, shallow before deep; the outside
+   profile is last, with `holdTabs` and `passFor` like every cutout.
+
+It is `wrapsContent` (a part ends a piece; text machined before it sits on
+it) and counts as a cutout in `checkClaims`. Through windows are milled
+away entirely - no inside profile, so no loose slug. `test/part-test.mjs`
+SIMULATES each case and samples the cut surface where the description
+fixes a depth; add a case there for any planner change.
 
 ### Piece scopes (several loose pieces in one job)
 
@@ -248,7 +329,81 @@ declined: the `PHOTO_LIKENESS_RULE` (with a picture only) asks for
 picture — before the geometry, and the second look compares the picture of
 the cut with the photo. Text-only likeness asks still decline (nothing is
 in view). Markings inside markings are `set_shape difference`, never two
-overlapping pockets.
+overlapping pockets. Recesses shade by depth (a skim mid-grey, a through
+cut near black), deeper ones painted last.
+
+### Measure, look, ladder (opt-in loop features)
+
+Three `runIntentLoop` options, all OFF by default — a caller that does not
+pass them sends byte-identical requests (`test/look-test.mjs` proves it).
+They are switched on per caller only after an A/B on the probe
+(`EYES=measure,look,ladder node tools/synth-probe/probe.mjs …`, any
+subset) shows they pay.
+
+- `route: true` — prompt routing (`EYES=route`). Only the CORE strategies
+  plus the `SHELVES` the ask points at (`pickShelves`: words, strategies in
+  the recipe, strategies in the worked examples) are documented in full;
+  the rest are listed under OTHER STRATEGIES and `read_docs` returns a
+  shelf as a tool_result. A new strategy that is not for every request
+  belongs on a shelf, with its rule and trigger words; a rule that only
+  serves a shelf strategy lives in that shelf's `rules`, not in the
+  template. Never routed: a picture turn, a model on forced tool choice.
+- `cache: true` — `withPromptCache` splits the system prompt at CURRENT
+  RECIPE and marks the fixed part cacheable. ON in every live caller.
+  Anything per-request must go AFTER the split (in or after CURRENT
+  RECIPE) or it breaks the shared cache; nothing may be inserted before
+  it per request except what is stable for a session.
+- `measure: true` — offers the `measure` client tool (`MEASURE_TOOL`, last
+  in the tool list, only to models that can choose a tool). The model may
+  call it ALONE before authoring; `measureItems` answers in the SAME
+  conversation as a tool_result, so the tool list never changes mid-turn
+  (the Claude 5 thinking-block constraint that makes `find_reference`
+  restart the turn does not bite). Text is measured by weaving a one-op
+  scratch recipe through the caller's own `weave` (the fonts live there);
+  shapes lower through `buildShapes`. `MAX_MEASURES` (2) answers per user
+  turn; a call past that gets an error result, and the prose nudge answers
+  any measure call left open. Each call is one more model round trip, so
+  the rule tells the model not to measure what `fit` / `around` /
+  `tag_cutout` already size.
+- `look: true` — the second look gets `SIZES` (every operation's woven
+  width × height and center in the authoring frame, from `builtBox`: a
+  multi-op entry has no bbox of its own, so its rings are measured), the
+  picture of the cut even with no user picture, and review step 6 ("would
+  a stranger name the thing that was asked for").
+- `ladder: true` — adds `LADDER_RULE` (strategy → plain flat part →
+  depiction; the likeness rule holds on every rung) and, when the first
+  call declines the WHOLE request on an empty recipe, sends that decline
+  back once with `LADDER_TEXT`. A model that stands by its decline is not
+  asked twice; a decline on a recipe that already cuts something, an
+  answered question, and `mode: 'off'` are left alone.
+
+- `subjects: true` (needs a `lookUp`) — `find_reference` also takes
+  `kind: "subject"`: a credited Commons PHOTO of a generic animal, plant,
+  vehicle or object, attached like a building reference, with the
+  `PHOTO_LIKENESS_RULE` and `subjectReferenceText` telling the model to
+  draw its OWN simple impression from what it sees (observed notes first,
+  never traced, credit in the summary). The second look gets the picture
+  of the cut. No photo, nothing found or a refused kind (people,
+  characters, logos, brands: `REFUSED_KINDS`) means the RECOGNIZABLE rule
+  stands — never a drawing from memory, no web search. A set_shape PATH is
+  y-DOWN like an SVG file; the notes say so because every first draft
+  came out upside down without it.
+
+The loop returns `measures` and `laddered`; the probe records them under
+`row.loop` and the arm under `row.variant.eyes`.
+
+### A two-tone picture becomes an outline (`app/trace.mjs`)
+
+An uploaded PNG / JPEG / WebP that is two-tone (a silhouette, a stencil,
+black artwork on white, either polarity, transparent background counts as
+paper) is traced by `traceBitmap` — pure and DOM-free: RGBA pixels in, SVG
+text out — and stored as an ordinary SVG asset (`<name>-outline.svg`), so
+everything downstream is the existing asset path. The page only decodes
+(`imageToDataUrl` hands the canvas pixels over). A photograph or shaded
+drawing is REFUSED with a reason and stored as an image as before; so are
+specks, textures (too many loops) and low-contrast pictures. Photos to
+relief stay with Relief Studio. `test/trace-test.mjs` covers both
+directions and a traced asset cut out as a verified job.
 
 ## World-data references (the terrain pattern)
 

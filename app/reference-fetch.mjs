@@ -309,7 +309,7 @@ export async function findReference(subject, { fetch: fetchFn = globalThis.fetch
 export function referenceCredit(ref) {
   if (!ref?.ok) return null;
   return {
-    subject: ref.subject, title: ref.page.title, url: ref.page.url,
+    subject: ref.subject, title: ref.page.title, url: ref.page.url, ...(ref.kind === 'subject' ? { kind: 'subject' } : {}),
     photo: ref.photo ? { title: ref.photo.title, url: ref.photo.url, artist: ref.photo.artist, license: ref.photo.license } : null,
   };
 }

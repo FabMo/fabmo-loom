@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { tokens, pickExemplars, exemplarBlock, buildIndex, EXEMPLAR_BUDGET } from '../app/exemplars.mjs';
-import { buildParseRequest, DEFAULT_IMAGE_UTTERANCE } from '../app/intent.mjs';
+import { buildParseRequest, DEFAULT_IMAGE_UTTERANCE, ASK_LABEL } from '../app/intent.mjs';
 
 const row = (key, prompt, kinds, extra = {}) => ({
   key, date: key.slice(0, 10), prompt, kinds, outcome: 'FULFILLED', summary: `Built ${prompt}.`,
@@ -84,10 +84,11 @@ t('request: exemplars ride in the first user turn ahead of the ask, system untou
   const c = withEx.messages[0].content;
   assert.ok(Array.isArray(c) && c.length === 2);
   assert.match(c[0].text, /^WORKED EXAMPLES/);
-  assert.equal(c[1].text, 'A welcome sign with a daisy');
+  // after worked examples the ask is labelled, so a small model does not read it as more reference
+  assert.equal(c[1].text, `${ASK_LABEL}\nA welcome sign with a daisy`);
   const img = buildParseRequest(recipe, '', { exemplars: picks, image: { media_type: 'image/jpeg', data: 'AAAA' } });
   assert.deepEqual(img.messages[0].content.map(b => b.type), ['image', 'text', 'text']);
-  assert.equal(img.messages[0].content[2].text, DEFAULT_IMAGE_UTTERANCE);
+  assert.equal(img.messages[0].content[2].text, `${ASK_LABEL}\n${DEFAULT_IMAGE_UTTERANCE}`);
   const none = buildParseRequest(recipe, 'hello', { exemplars: [] });
   assert.equal(typeof none.messages[0].content, 'string');
 });

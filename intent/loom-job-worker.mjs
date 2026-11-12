@@ -147,6 +147,7 @@ try {
   const out = await runIntentLoop({
     recipe: job.recipe,
     utterance: job.utterance,
+    cache: true,   // prompt caching: the fixed part of the system prompt is read from cache after the first call
     shop: {},
     model,
     image: job.image ?? null,

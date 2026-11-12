@@ -624,7 +624,7 @@
     <img src="../assets/loom-logo.jpg" alt="FabMo Loom">
     <div>
       <h1>FabMo Loom</h1>
-      <div class="sub">A ShopBot Project · <span id="app-version">v0.114</span> · <a href="mobile.html" title="Photo → cut file, trimmed down for a phone">phone version</a></div>
+      <div class="sub">A ShopBot Project · <span id="app-version">v0.115</span> · <a href="mobile.html" title="Photo → cut file, trimmed down for a phone">phone version</a></div>
     </div>
     <div class="spacer"></div>
     <button id="shopBtn" title="Machine cut area, material sheets, and the tool rack — system facts, set once"
@@ -672,9 +672,10 @@
         </div>
         <div class="keyrow" style="margin-top:6px; align-items:flex-start; gap:8px">
           <input id="lookupOn" type="checkbox" style="width:auto; margin-top:3px">
-          <label for="lookupOn" style="margin:0">Look up named real buildings before building them — a credited photo from
-            Wikimedia Commons and facts from Wikipedia, fetched by this browser; one extra model call, and up to two web
-            searches billed to the key in use.</label>
+          <label for="lookupOn" style="margin:0">Look things up before drawing them — a named real building, or an animal, vehicle or object you want a
+            likeness of: a credited photo from Wikimedia Commons (and facts from Wikipedia for buildings), fetched by this
+            browser. The likeness is the model's own simple sketch from the photo, never a tracing. One extra model
+            call; for buildings, up to two web searches billed to the key in use.</label>
         </div>
         <div class="keynote">Stored only in this browser (localStorage); prompts call api.anthropic.com directly — the
           key never touches our server. The default model is the one that verified the most builds per dollar in our
@@ -977,6 +978,13 @@
           <div style="width:130px"><label>Max feed (in/min)</label><input id="rackMaxFeed" type="number" min="10" step="10"></div>
           <div><label>Material — derives feeds &amp; speeds by chipload</label>
             <select id="shopMaterial" style="width:auto"></select>
+          </div>
+          <div><label>How parts are held — decides when tabs are added</label>
+            <select id="shopHoldDown" style="width:auto">
+              <option value="">Not declared — tabs on pieces under 36 sq in or 3" across</option>
+              <option value="vacuum">Vacuum table — tabs on pieces under 9 sq in or 1.5" across</option>
+              <option value="fixed">Each part taped or screwed down — no tabs added</option>
+            </select>
           </div>
         </div>
         <div class="keynote">With a material chosen, every rack-matched bit runs chipload-derived feed, plunge, and RPM

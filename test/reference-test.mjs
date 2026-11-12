@@ -16,7 +16,7 @@
 // Run: node test/reference-test.mjs
 
 import { findReference, measuredSentences, referenceCredit, REFERENCE_PHOTO_BUDGET } from '../app/reference-fetch.mjs';
-import { buildParseRequest, runIntentLoop, referenceText, webSearches, REFERENCE_TOOL, WEB_SEARCH_TOOL, MAX_LOOKUPS, DEFAULT_MODEL, ACTION_TOOL } from '../app/intent.mjs';
+import { buildParseRequest, runIntentLoop, referenceText, webSearches, REFERENCE_TOOL, WEB_SEARCH_TOOL, MAX_LOOKUPS, DEFAULT_MODEL, ACTION_TOOL, ASK_LABEL } from '../app/intent.mjs';
 import { EMPTY_RECIPE } from '../app/runtime.mjs';
 
 let passed = 0, failed = 0;
@@ -220,7 +220,7 @@ const toolNames = (req) => req.tools.map(t => t.name).join(',');
   const withRef = buildParseRequest(recipe, 'a linker logs Spire Hall', { lookUp: true, reference: hall, search: true });
   const c = withRef.messages[0].content;
   ok('with a reference attached: ONE user turn — the photo first, then the reference text, then the ask',
-    withRef.messages.length === 1 && c[0].type === 'image' && c[0].source.data === hall.photo.data && /^REFERENCE — fetched by the app for "Spire Hall"/.test(c[1].text) && c[c.length - 1].text === 'a linker logs Spire Hall', c.map(b => b.type).join(','));
+    withRef.messages.length === 1 && c[0].type === 'image' && c[0].source.data === hall.photo.data && /^REFERENCE — fetched by the app for "Spire Hall"/.test(c[1].text) && c[c.length - 1].text === `${ASK_LABEL}\na linker logs Spire Hall`, c.map(b => b.type).join(','));
   ok('…web search rides on that request, capped at two uses, and one more lookup is allowed',
     toolNames(withRef) === 'apply_recipe_actions,find_reference,web_search' && withRef.tools[2].max_uses === 2 && withRef.tools[2].type === WEB_SEARCH_TOOL.type, JSON.stringify(withRef.tools.slice(1).map(t => t.type ?? t.name)));
   ok('…the system prompt points at the attached reference instead of asking for one, and turns no picture rule on',
@@ -229,7 +229,7 @@ const toolNames = (req) => req.tools.map(t => t.name).join(',');
   ok('the reference text names the article, credits the photographer and the licence, and gives the recorded height both ways',
     /FOUND: Spire Hall — Six-spired meeting hall/.test(t) && /"Spire Hall front\.jpg" by Pat Photographer, CC BY-SA 4\.0, Wikimedia Commons/.test(t) && /height 88 m \(289 ft\)/.test(t) && /7 floors above ground/.test(t), t.slice(0, 600));
   ok('…tells the model to read massing only, never trace, decline ornament, state its scale and list what it assumed',
-    /MASSING only/.test(t) && /Do not trace an outline/.test(t) && /go to declined/.test(t) && /pick a scale and say it/.test(t) && /"Assumed:"/.test(t));
+    /MASSING only/.test(t) && /Do not trace an outline/.test(t) && /goes to declined/.test(t) && /pick a scale and say it/.test(t) && /"Assumed:"/.test(t));
   ok('…and asks for a search only when the height, length or width is missing — one, and a second only if needed', /If any of the three is not stated above, run web_search for it now — one search, and a second only if/.test(t));
   const noSearch = buildParseRequest(recipe, 'a linker logs Spire Hall', { reference: hall, search: false });
   ok('without search: no web search tool, no mention of it, and no further lookup when none is offered',

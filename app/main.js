@@ -7,6 +7,7 @@
 import { EMPTY_RECIPE, runRecipe, controlDefaults, migrateRecipe, makeEvalNumber, buildVars, ingredientLines } from './runtime.mjs';
 import { registerCatalogEntries, CATALOG } from './catalog.mjs';
 import { svgAssetToRegions } from './svg.mjs';
+import { traceBitmap } from './trace.mjs';
 import { openDraw, initDraw } from './draw.mjs';
 import { sheetActive, placeOnSheet, sheetFreePct, recordCut, clearCuts } from './ledger.mjs';
 import { runIntentLoop, actionList, promptRecipeView, MODELS, DEFAULT_MODEL, isKnownModel } from './intent.mjs';
@@ -67,7 +68,7 @@ function loadRecipe() {
 function loadShop() {
   // material: a MATERIALS key ('' = keep each strategy's own feeds) —
   // with the shared tool rack it derives feeds/rpm by chipload at weave
-  const base = { machineW: 0, machineH: 0, materialW: 0, materialH: 0, material: '' };
+  const base = { machineW: 0, machineH: 0, materialW: 0, materialH: 0, material: '', holdDown: '' };
   try { return { ...base, ...JSON.parse(localStorage.getItem('loom:shop') ?? '{}') }; }
   catch { return base; }
 }
@@ -309,9 +310,14 @@ async function imageToDataUrl(file, maxDim = 1024) {
     const h = Math.max(1, Math.round(img.height * scale));
     const cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
-    cv.getContext('2d').drawImage(img, 0, 0, w, h);
+    const g = cv.getContext('2d');
+    g.drawImage(img, 0, 0, w, h);
     const type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-    return { data: cv.toDataURL(type, 0.85), width: w, height: h };
+    // the decoded pixels ride along for the outline tracer (app/trace.mjs);
+    // a canvas that refuses to hand them over just means no trace
+    let bitmap = null;
+    try { bitmap = g.getImageData(0, 0, w, h); } catch { /* no pixels, no trace */ }
+    return { data: cv.toDataURL(type, 0.85), width: w, height: h, bitmap };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -379,10 +385,23 @@ async function addAssetFile(f) {
     addSvgAsset(await f.text(), f.name);
     return;
   }
-  const { data, width, height } = await imageToDataUrl(f);
+  const { data, width, height, bitmap } = await imageToDataUrl(f);
   if (data.length > 1.5e6) throw new Error('image still too large after downscaling — crop it and retry');
+  // A two-tone picture (a silhouette, a stencil, black artwork on white)
+  // is TRACED into an outline and stored as an SVG asset, so it cuts and
+  // pockets like any uploaded SVG. A photograph is not traced — it is
+  // stored as before, with the tracer's reason.
+  let traced = null;
+  try { traced = bitmap ? traceBitmap(bitmap) : { error: 'the browser would not hand over the pixels' }; }
+  catch (e) { traced = { error: String(e?.message ?? e) }; }
+  if (traced?.svg) {
+    const outlineName = `${f.name.replace(/\.[A-Za-z0-9]+$/, '')}-outline.svg`;
+    addTurn(`Traced "${escapeHtml(f.name)}" (${width}×${height}px) into an outline — ${traced.pieces} piece${traced.pieces === 1 ? '' : 's'}${traced.holes ? `, ${traced.holes} hole${traced.holes === 1 ? '' : 's'}` : ''}.`);
+    addSvgAsset(traced.svg, outlineName);
+    return;
+  }
   pushAsset({ kind: 'image', data, width, height }, f.name);
-  addTurn(`Added image "${escapeHtml(f.name)}" (${width}×${height}px) to the recipe. Raster carving isn't in the catalog yet — it is stored for when that arrives.`);
+  addTurn(`Added image "${escapeHtml(f.name)}" (${width}×${height}px) to the recipe. It was not traced into an outline: ${escapeHtml(traced?.error ?? 'no reason given')}. Raster carving isn't in the catalog yet — it is stored for when that arrives.`);
 }
 
 // ---------------------------------------------------------------- run/draw
@@ -1309,7 +1328,7 @@ const extLink = (url, text) => `<a href="${escapeHtml(url)}" target="_blank" rel
 // one line of credit, from what the recipe keeps (no bytes, no thumbnail)
 function referenceCreditHtml(c) {
   const photo = c.photo ? ` · photo ${extLink(c.photo.url, `“${c.photo.title}”`)} by ${escapeHtml(c.photo.artist)}, ${escapeHtml(c.photo.license)}, Wikimedia Commons` : '';
-  return `<b>Reference:</b> ${extLink(c.url, c.title)} (Wikipedia)${photo} <small>(looked at for massing and proportion — nothing in it was traced)</small>`;
+  return `<b>Reference:</b> ${extLink(c.url, c.title)} (Wikipedia)${photo} <small>(${c.kind === 'subject' ? 'looked at and drawn from as a simple impression' : 'looked at for massing and proportion'} — nothing in it was traced)</small>`;
 }
 
 // the card under a turn that used a reference: the photo, who made it,
@@ -1407,10 +1426,14 @@ async function generate() {
     // stale loop may still be mid-weave — its result is dropped below
     const working = runIntentLoop({
       recipe, utterance, shop, model: currentModel(), image, exemplars,
+      cache: true,   // the fixed part of the prompt is billed at the cached rate after the first call
       // a named real building: the model may ask for a reference first. Not
       // with a picture attached — the user's picture IS the reference.
       lookUp: lookupsOn() && !image ? (subject) => findReference(subject, { signal: turn.ac.signal, pick: pin?.pick ?? null }) : null,
       search: lookupsOn(),
+      // a text-only likeness (a bull, a tractor): the model may fetch a
+      // photo and draw its own simple impression from it instead of declining
+      subjects: lookupsOn(),
       onStage: (st) => {
         if (st.stage === 'lookup') { calls = 0; setLabel(`looking up ${st.subject.slice(0, 40)}…`); }
         else if (st.stage === 'found') setLabel(st.reference?.ok ? 'reading the reference…' : 'weaving…');
@@ -1487,7 +1510,7 @@ async function generate() {
             ...(out.lookups?.length ? { reference: { lookups: out.lookups.map(l => ({ subject: l.subject, ok: l.ok, reason: l.reason ?? null, title: l.page?.title ?? null, photo: l.photo?.title ?? null })), searches: (out.searches ?? []).map(x => x.query), searchDropped: !!out.searchDropped, pinned: !!pin } } : {}),
           },
         },
-        usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
+        usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls, cacheRead: out.usage.cache_read_input_tokens, cacheWrite: out.usage.cache_creation_input_tokens },
         context: parseContext,
         // the picture itself is never logged — only that there was one, so
         // a replay knows this parse cannot be reproduced from text alone
@@ -1512,7 +1535,7 @@ async function generate() {
     // a different photo: only while this is still the latest turn's design
     turnEl.querySelectorAll('.ref-alt').forEach(btn => btn.addEventListener('click', () => {
       const alt = out.reference?.alternates?.[Number(btn.dataset.alt)];
-      if (!alt || $('history').firstElementChild !== turnEl) { addTurn('That design has been changed since — ask for the building again to pick a different photo.'); return; }
+      if (!alt || $('history').firstElementChild !== turnEl) { addTurn('That design has been changed since — ask for it again to pick a different photo.'); return; }
       rebuildFromPhoto({ utterance, before, title: alt.title });
     }));
     done = true;
@@ -1577,7 +1600,7 @@ const STARTER_CHIPS = [
 ];
 
 const TEXT_STRATEGIES = new Set(['vcarve_text', 'outline_text', 'pocket_text', 'texture_text']);
-const CUTOUT_STRATEGIES = new Set(['disc_cutout', 'shape_cutout', 'tag_cutout']);
+const CUTOUT_STRATEGIES = new Set(['disc_cutout', 'shape_cutout', 'tag_cutout', 'part']);
 const TEXTURE_STRATEGIES = new Set(['texture_field', 'texture_text']);
 
 function refinementChips(rec) {
@@ -1686,7 +1709,7 @@ if ($('lookupOn')) {
   $('lookupOn').checked = lookupsOn();
   $('lookupOn').addEventListener('change', (e) => {
     localStorage.setItem('loom:lookup', e.target.checked ? 'on' : 'off');
-    addTurn(e.target.checked ? 'Named real buildings will be looked up before they are built.' : 'Lookups are off — a named building is built from what the model knows.');
+    addTurn(e.target.checked ? 'Named real buildings, and animals or objects you ask for a likeness of, will be looked up first.' : 'Lookups are off — a named building is built from what the model knows, and a likeness needs your own drawing or picture.');
   });
 }
 
@@ -2226,6 +2249,19 @@ if (location.protocol === 'http:') {
   sel.value = shop.material && MATERIALS[shop.material] ? shop.material : '';
   sel.addEventListener('change', () => {
     shop.material = sel.value;
+    persistShop();
+    debounceRun();
+  });
+}
+
+// hold-down select: how freed parts are held. Read by the cutouts' tab
+// policy and the machinability gate (ir/machinability.js RETENTION);
+// '' = not declared, the cautious default
+{
+  const sel = $('shopHoldDown');
+  sel.value = ['vacuum', 'fixed'].includes(shop.holdDown) ? shop.holdDown : '';
+  sel.addEventListener('change', () => {
+    shop.holdDown = sel.value;
     persistShop();
     debounceRun();
   });

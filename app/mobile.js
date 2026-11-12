@@ -842,7 +842,7 @@ async function generate() {
       // BYO key: straight to Anthropic from this phone, the loop runs here
       let calls = 0;
       const out = await runIntentLoop({
-        recipe, utterance, shop: {}, model: currentModel(), image, exemplars, client: 'phone',   // no sketch dialog here (intent.mjs NO_DRAW_RULE)
+        recipe, utterance, shop: {}, model: currentModel(), image, exemplars, client: 'phone', cache: true,   // no sketch dialog here (intent.mjs NO_DRAW_RULE)
         call: (req) => { if (calls++ > 0) stage(calls === 2 ? 'checking the weave…' : 'checking again…'); return parseDirect(req, key); },
         onDraft: draft,
         weave: async (rec) => {
@@ -958,7 +958,7 @@ async function finishTurn(out, meta) {
       intent: { summary: out.summary, actions: actionList(out.turns[0].payload), declined: out.declined, suggest: out.suggest, surface: 'mobile',
         exemplars: meta.exemplars ?? [],
         loop: { turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack } },
-      usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls },
+      usage: { input: out.usage.input_tokens, output: out.usage.output_tokens, calls: out.usage.calls, cacheRead: out.usage.cache_read_input_tokens, cacheWrite: out.usage.cache_creation_input_tokens },
       context: meta.parseContext ?? null,
       ...(meta.image ? { image: meta.image } : {}),
     }),

@@ -18,6 +18,7 @@
 // the waist's half-width splits into a top and a bottom blob is refused by
 // name (fewer ribs, or a softer waist) rather than built wrong.
 
+import { passDepthFor, tabSpecFor } from '../ir/machinability.js';
 import { generateProfile } from '../strategies/profile.js';
 import { booleanRegions, offsetRegions } from './shape.mjs';
 import { formatDiameter } from '../strategies/tool-select.js';
@@ -323,8 +324,8 @@ export const LATTICE_ENTRIES = {
       let all = null;
       for (const r of placed) {
         const prof = generateProfile({ outer: r.ring }, { diameter: p.toolDiameter }, {
-          side: 'outside', totalDepth: t, depthPerPass: 0.25, safeZ: ctx.safeZ, entry: 'ramp',
-          tabs: p.tabs ? { height: p.tabHeight, spacing: p.tabSpacing } : null,
+          side: 'outside', totalDepth: t, depthPerPass: passDepthFor(p.toolDiameter, 0.25, ctx.shop?.material || null), safeZ: ctx.safeZ, entry: 'ramp',
+          tabs: p.tabs ? tabSpecFor(p.toolDiameter, { height: p.tabHeight, spacing: p.tabSpacing }) : null,
         });
         ops.push({
           subName: `rib ${r.id}`,

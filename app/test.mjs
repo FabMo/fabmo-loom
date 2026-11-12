@@ -5079,5 +5079,67 @@ console.log('--- runIntentLoop: a malformed FINAL payload is data, not a crash -
   } catch (e) { fail(`single-object declined CRASHED: ${String(e).slice(0, 200)}`); }
 }
 
+// ---------------- machinability: the second gate, on woven recipes ----------------
+console.log('--- machinability: tabs by policy, pass depth from the bit, reported beside the verifier ---');
+{
+  const tagRecipe = (cutParams = {}, extra = []) => ({
+    ...structuredClone(EMPTY_RECIPE),
+    pipeline: [
+      { id: 'name', strategy: 'vcarve_text', params: { text: 'Ada', letterHeight: 1 } },
+      ...extra,
+      { id: 'cut', strategy: 'tag_cutout', params: cutParams },
+    ],
+  });
+  const weave = (rec, shop = {}) => quiet(() => runRecipe(rec, {}, FONT_SHELF, {}, shop));
+  const pieceOf = (r) => r.machinability?.pieces?.[0];
+
+  const small = weave(tagRecipe());
+  const p0 = pieceOf(small);
+  if (small.ok && small.machinability?.ok && p0?.need && p0.held && p0.bridges >= 4) {
+    pass(`a small name tag (${p0.w}" × ${p0.h}") gets holding tabs with none asked for: ${p0.bridges} bridges measured in the motion, weakest ${p0.weakest}"`);
+  } else fail(`small tag not held: ok=${small.ok} ${JSON.stringify(p0)} ${small.errors?.join(' | ')}`);
+  if (small.warnings.some(w => /holding tabs added/.test(w))) pass('…and the weave report says the tabs were added, and why');
+  else fail(`no "holding tabs added" note: ${JSON.stringify(small.warnings)}`);
+  if (small.preview.built.some(b => b.r.previewTabs?.length >= 4)) pass('…and the preview carries the tab positions');
+  else fail('previewTabs missing on the auto-tabbed cutout');
+
+  const fixed = weave(tagRecipe(), { holdDown: 'fixed' });
+  const pf = pieceOf(fixed);
+  if (fixed.ok && pf && pf.bridges === 0 && !pf.need && !fixed.warnings.some(w => /holding tabs added/.test(w))) {
+    pass('shop declares each part taped/screwed down → no tabs added, nothing flagged');
+  } else fail(`fixed hold-down: ${JSON.stringify(pf)} ${JSON.stringify(fixed.warnings)}`);
+
+  const big = weave(tagRecipe({ width: 14, height: 8 }));
+  const pb = pieceOf(big);
+  if (big.ok && pb && !pb.need && pb.bridges === 0) pass(`a 14" × 8" plaque is left without tabs (big enough to stay put)`);
+  else fail(`big plaque: ${JSON.stringify(pb)} ${big.errors?.join(' | ')}`);
+  const vac = weave(tagRecipe({ width: 5, height: 4 }), { holdDown: 'vacuum' });
+  const und = weave(tagRecipe({ width: 5, height: 4 }));
+  if (pieceOf(vac)?.bridges === 0 && pieceOf(und)?.bridges >= 4) pass('a 5" × 4" tag: tabs with no hold-down declared, none on a vacuum table');
+  else fail(`vacuum vs undeclared: ${JSON.stringify(pieceOf(vac))} / ${JSON.stringify(pieceOf(und))}`);
+  const forced = weave(tagRecipe({ width: 14, height: 8, tabs: true }));
+  if (pieceOf(forced)?.bridges >= 4) pass('tabs: true still forces them on a big piece');
+  else fail(`forced tabs: ${JSON.stringify(pieceOf(forced))}`);
+
+  // pass depth follows the bit: a 1/8" bit cutting the tag free
+  const thin = weave(tagRecipe({ toolDiameter: 0.125 }));
+  const cutOp = thin.machinability?.ops?.find(o => /cut/.test(o.name));
+  if (cutOp && cutOp.maxPass <= 0.125 + 0.01) pass(`a 1/8" bit frees the tag at ${cutOp.maxPass}" a pass (was a fixed 0.25")`);
+  else fail(`1/8" cutout pass depth: ${JSON.stringify(cutOp)}`);
+  const tiny = weave({ ...structuredClone(EMPTY_RECIPE), pipeline: [
+    { id: 'well', strategy: 'pocket_shape', params: { shape: 'rectangle', width: 1, height: 1, cornerRadius: 0, depth: 0.25, toolDiameter: 0.0625 } }] });
+  const well = tiny.machinability?.ops?.[0];
+  if (tiny.ok && well && well.maxPass <= 0.0625 + 0.01) pass(`a 1/16" bit pockets at ${well.maxPass}" a pass (was 0.125" — twice its diameter)`);
+  else fail(`1/16" pocket pass depth: ${JSON.stringify(well)} ${tiny.errors?.join(' | ')}`);
+
+  // the gate's verdict rides beside the verifier's, and its warnings reach the list
+  const deepStock = { ...tagRecipe({ toolDiameter: 0.125 }), stock: { ...structuredClone(EMPTY_RECIPE).stock, thickness: 0.75 } };
+  const reach = weave(deepStock);
+  if (reach.machinability && reach.warnings.some(w => /shank rubs/.test(w))) pass('3/4" stock through with a 1/8" bit: the reach warning is in the weave report');
+  else fail(`reach warning missing: ${JSON.stringify(reach.warnings)}`);
+  if (small.report && small.machinability && small.report !== small.machinability) pass('result carries report (matches intent) and machinability (sound to cut) separately');
+  else fail('machinability block missing from the result');
+}
+
 console.log(failures === 0 ? '\nALL LOOM APP CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

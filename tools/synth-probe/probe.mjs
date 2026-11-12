@@ -31,7 +31,11 @@ const PROMPTS = promptsPath.endsWith('.json')
 
 const LOOM = '/var/opt/apps/contributors/brian.o/fabmo-loom';
 const { EMPTY_RECIPE, runRecipe, controlDefaults } = await import(`${LOOM}/app/runtime.mjs`);
-const { runIntentLoop, actionList, DEFAULT_IMAGE_UTTERANCE } = await import(`${LOOM}/app/intent.mjs`);
+const { runIntentLoop, runIntentCascade, actionList, DEFAULT_IMAGE_UTTERANCE } = await import(`${LOOM}/app/intent.mjs`);
+// CASCADE=claude-haiku-5-5,claude-opus-5-5 — small model first, escalate
+// when its build is not good enough (runIntentCascade); each row records
+// every attempt, so cost is priced per model
+const CASCADE = (process.env.CASCADE ?? '').split(',').map(x => x.trim()).filter(Boolean);
 const { pickExemplars } = await import(`${LOOM}/app/exemplars.mjs`);
 // the worked-example index the app retrieves from (exemplars-build.mjs);
 // EXEMPLARS=off measures the model without it
@@ -49,6 +53,12 @@ const MODEL = process.env.MODEL || undefined;
 const EFFORT = process.env.EFFORT || null;
 const EFFORT_SCOPE = process.env.EFFORT_SCOPE === 'revise' ? 'revise' : 'all';
 const FAST = process.env.FAST === '1';
+// the opt-in loop features of plan workstreams 2-3, for A/B runs:
+// EYES=measure,look,ladder,subjects (any subset; unset = the loop as
+// shipped). subjects = a likeness drawn from a fetched reference photo
+// (live Wikimedia lookups from this machine)
+const EYES = new Set(String(process.env.EYES ?? '').split(',').map(x => x.trim()).filter(x => ['measure', 'look', 'ladder', 'subjects', 'route'].includes(x)));
+const { findReference } = EYES.has('subjects') ? await import(`${LOOM}/app/reference-fetch.mjs`) : {};
 const { registerCatalogEntries } = await import(`${LOOM}/app/catalog.mjs`);
 
 // mount the same guests the deployment mounts (guests.local.mjs URLs → paths)
@@ -142,7 +152,7 @@ async function probe(p) {
     const t = Date.now();
     try { return await callModel(r); } finally { callMs.push(Date.now() - t); }
   };
-  if (EFFORT || FAST) rec.variant = { effort: EFFORT, scope: EFFORT ? EFFORT_SCOPE : null, fast: FAST };
+  if (EFFORT || FAST || EYES.size) rec.variant = { effort: EFFORT, scope: EFFORT ? EFFORT_SCOPE : null, fast: FAST, ...(EYES.size ? { eyes: [...EYES] } : {}) };
   try {
     const t0 = Date.now();
     const weaveRec = (r) => quiet(() => runRecipe(r, controlDefaults(r), FONT_SHELF, syntheticGrids(r)));
@@ -153,8 +163,11 @@ async function probe(p) {
       ? pickExemplars(EXEMPLARS, p.prompt || DEFAULT_IMAGE_UTTERANCE, { hasImage: !!image, exclude: [p.prompt, p.id] }) : [];
     rec.exemplars = exemplars.map(e => e.key);
     try {
-      out = await runIntentLoop({
+      const drive = CASCADE.length ? (o) => runIntentCascade(o, { models: CASCADE }) : runIntentLoop;
+      out = await drive({
         recipe, utterance: p.prompt, model: MODEL, mode: LOOP_MODE, image, exemplars,
+        measure: EYES.has('measure'), look: EYES.has('look'), ladder: EYES.has('ladder'), route: EYES.has('route'), cache: true,
+        ...(EYES.has('subjects') && !image ? { subjects: true, lookUp: (subject) => findReference(subject) } : {}),
         call,
         weave: async (r) => weaveRec(r),
       });
@@ -170,6 +183,8 @@ async function probe(p) {
     rec.ms = Date.now() - t0;
     rec.callMs = callMs;
     rec.usage = out.usage;
+    if (out.route) rec.route = out.route;
+    if (out.attempts) rec.cascade = { model: out.model, tier: out.tier, attempts: out.attempts.map(a => ({ model: a.model, reason: a.reason, ok: a.ok, errors: a.errors ?? [], ms: a.ms, usage: a.usage, ...(a.handoff ? { handoff: a.handoff } : {}), ...(a.judge ? { judge: a.judge } : {}) })) };
     const first = out.turns[0];
     rec.stop_reason = null;
     // summary = what the user READS (final); firstSummary = what the model
@@ -185,6 +200,8 @@ async function probe(p) {
       claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
       claimsRefusedDuring: out.turns.flatMap(t => (t.observation?.claimIssues ?? []).map(i => i.code)),
       summaryChanged: out.revised && out.summary.trim() !== out.firstSummary.trim(),
+      measures: out.measures?.length ?? 0, measuredItems: (out.measures ?? []).reduce((n, m) => n + m.items.length, 0), laddered: !!out.laddered,
+      lookups: (out.lookups ?? []).map(l => ({ subject: l.subject, kind: l.kind, ok: !!l.ok, reason: l.reason ?? null, title: l.page?.title ?? null, photo: l.photo ? { title: l.photo.title, artist: l.photo.artist, license: l.photo.license } : null })),
       perTurn: out.turns.map(t => ({
         actions: actionList(t.payload).length, applied: t.applied.length, skipped: t.skipped.length,
         ok: t.observation ? t.observation.ok : null, pipeline: t.observation ? t.observation.pipeline.length : null,

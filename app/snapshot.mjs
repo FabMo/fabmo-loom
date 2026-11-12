@@ -122,35 +122,52 @@ const disc = (c, r) => Array.from({ length: 16 }, (_, i) => ({ x: c.x + r * Math
 
 /**
  * The lowered geometry of a weave as fill groups: cutout outlines as the
- * part, pocket regions and V-carve areas dark, bores darker. Built
+ * part, pocket regions and V-carve areas dark (darker = deeper), bores
+ * darkest. Built
  * entries' preview* fields are the source — the same data the canvas
  * draws. Returns [] when nothing in the weave has a shape to show.
  */
 export function weaveGroups(weaveResult) {
   const built = weaveResult?.preview?.built ?? [];
+  const thickness = weaveResult?.preview?.stock?.thickness > 0 ? weaveResult.preview.stock.thickness : 0;
   const parts = [], marks = [], holes = [];
+  const mark = (reg, depth) => {
+    if (reg?.outer?.length >= 3) marks.push({ rings: [reg.outer, ...(reg.holes ?? [])], shade: depthShade(depth, thickness), depth: depth ?? null });
+  };
   for (const b of built) {
     const r = b?.r ?? {};
-    if (Array.isArray(r.previewRing) && r.previewRing.length >= 3) parts.push(r.previewRing);
-    for (const reg of r.previewRegions ?? []) {
-      if (reg?.outer?.length >= 3) marks.push({ rings: [reg.outer, ...(reg.holes ?? [])], shade: 'pocket' });
-    }
-    // V-carve text/shape preview: { branches, regions } — the regions are
-    // the carved letterform areas
-    for (const reg of r.previewVee?.regions ?? []) {
-      if (reg?.outer?.length >= 3) marks.push({ rings: [reg.outer, ...(reg.holes ?? [])], shade: 'pocket' });
-    }
-    for (const hh of r.previewHoles ?? []) {
-      const c = hh?.x != null ? hh : hh?.center ?? hh?.at;
-      const rad = hh?.r ?? (hh?.diameter ?? hh?.d ?? 0.25) / 2;
-      if (c?.x != null) holes.push(disc(c, rad));
+    // an entry may return several sub-ops (bulk + rest pocket, a guest's
+    // panels): each carries its own preview and its own declared depth
+    for (const s of (r.ops ?? [r])) {
+      if (Array.isArray(s.previewRing) && s.previewRing.length >= 3) parts.push(s.previewRing);
+      const depth = s.target?.depth ?? r.target?.depth;
+      for (const reg of s.previewRegions ?? []) mark(reg, depth);
+      // V-carve text/shape preview: { branches, regions } — the regions are
+      // the carved letterform areas
+      for (const reg of s.previewVee?.regions ?? []) mark(reg, s.previewVee.maxDepth ?? depth);
+      for (const hh of s.previewHoles ?? []) {
+        const c = hh?.x != null ? hh : hh?.center ?? hh?.at;
+        const rad = hh?.r ?? (hh?.diameter ?? hh?.d ?? 0.25) / 2;
+        if (c?.x != null) holes.push(disc(c, rad));
+      }
     }
   }
   const groups = [];
   if (parts.length) groups.push({ rings: parts, shade: 'part' });
+  // shallow first, so a deeper recess inside a shallow one stays visible
+  marks.sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0));
   groups.push(...marks);
   if (holes.length) groups.push({ rings: holes, shade: 'hole' });
   return groups;
+}
+
+// A recess is drawn darker the deeper it goes: a skim reads mid-grey, a
+// cut through the stock nearly black. With no depth or thickness on hand
+// it is the flat pocket shade the picture always used.
+function depthShade(depth, thickness) {
+  if (!(depth > 0) || !(thickness > 0)) return 'pocket';
+  const f = Math.min(1, depth / thickness);
+  return Math.round(165 - 125 * f);   // 165 (barely cut) … 40 (through)
 }
 
 /**
