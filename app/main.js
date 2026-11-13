@@ -14,7 +14,7 @@ import { runIntentLoop, actionList, promptRecipeView, MODELS, DEFAULT_MODEL, isK
 import { walkMoves } from '../ir/moves.js';
 import { loadToolLibrary, saveToolLibrary, describeTool, parseInches, formatInches, MATERIALS } from '../ir/tools.js';
 import { startWeave } from './weave.mjs';
-import { weaveToDxf } from './dxf.mjs';
+import { weaveToDxf, allSheetResults } from './dxf.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { resolveTerrains } from './terrain-fetch.mjs';
@@ -1250,6 +1250,70 @@ async function parseViaGuestPass(req, invite) {
   return payload.data;
 }
 
+// Open-build path — no key, no guest pass: the same free builds the phone
+// page gets (3 a day per network, 100 a day app-wide; the server's
+// open-allowance.js). The server runs the WHOLE turn as a job (draft →
+// weave/verify → fix) and this page holds a ticket and polls. The ticket
+// is saved so a reload picks the build up instead of losing a counted one.
+// Not in a free build: reference lookups and terrain (they run in this
+// browser against the caller's own key or pass).
+const JOB_KEY = 'loom:job:desktop';   // the phone page keeps its own under loom:job
+const JOB_POLL_MS = 2500;
+function saveJob(j) { try { localStorage.setItem(JOB_KEY, JSON.stringify(j)); } catch {} }
+function loadJob() { try { return JSON.parse(localStorage.getItem(JOB_KEY) ?? 'null'); } catch { return null; } }
+function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch {} }
+async function startOpenBuild(body) {
+  let res;
+  try {
+    res = await fetch('/api/intent/loom/job', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (e) { throw new Error(networkFailureMessage(e)); }
+  const payload = await res.clone().json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 429 && (payload.reason === 'ip' || payload.reason === 'app')) {
+      $('keyBox').open = true;
+      throw new Error(payload.reason === 'ip'
+        ? `The free builds from this network are used up for today — more at ${fmtTime(payload.resetsAt)}. A guest link or your own API key lifts the limit.`
+        : `Loom's free builds for today are all used up — try again after ${fmtTime(payload.resetsAt)}, or add your own API key below.`);
+    }
+    if (res.status === 401 || res.status === 403) $('keyBox').open = true;
+    throw new Error(relayFailureMessage(res.status, payload, { imageBytes: promptImage?.data?.length ?? 0 }));
+  }
+  return { job: payload.job, pass: payload.pass ?? null, allowance: payload.allowance ?? null };
+}
+// resolves with the finished turn; rejects with the build's own words
+// (e.gone = the server no longer has it). A dropped connection or a server
+// restart mid-poll is waited out, not reported.
+async function awaitOpenBuild(id, pass, turn, { onStage = null, onDraft = null } = {}) {
+  let misses = 0, draftSeen = false;
+  const nap = (ms) => new Promise(r => setTimeout(r, ms));
+  for (;;) {
+    if (turn.cancelled) throw new Error('stopped');
+    let res, payload = {};
+    try {
+      res = await fetch(`/api/intent/loom/job/${encodeURIComponent(id)}`, { headers: { 'x-loom-invite': pass }, cache: 'no-store' });
+      payload = await res.json().catch(() => ({}));
+    } catch { res = null; }
+    if (res?.status === 404) { const e = new Error(payload.error || 'That build is no longer on the server — ask again.'); e.gone = true; throw e; }
+    if (!res || !res.ok) {
+      if (++misses > 40) throw new Error('Lost touch with the server while waiting for the build — reload this page to check on it.');
+      await nap(JOB_POLL_MS * 2);
+      continue;
+    }
+    misses = 0;
+    if (payload.status === 'done' && payload.result) return payload.result;
+    if (payload.status === 'failed') { const e = new Error(payload.error || 'The build failed — it was not counted. Try again.'); e.gone = true; throw e; }
+    if (payload.draft && onDraft && !draftSeen) { draftSeen = true; onDraft(payload.draft); }
+    const label = payload.note || payload.stage;   // the model's own progress line beats a bare stage label
+    if (label) onStage?.(label);
+    await nap(JOB_POLL_MS);
+  }
+}
+// tell the server to stop a build (it gives the free build back); fire-and-forget
+function stopOpenBuild(id, pass) {
+  if (!id || !pass) return;
+  fetch(`/api/intent/loom/job/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'x-loom-invite': pass } }).catch(() => {});
+}
+
 // ---------------------------------------------------------------- picture
 // A picture attached to the prompt: fitted to 1568px (the API's own
 // ceiling — a phone photo would only cost upload time and tokens past it)
@@ -1275,6 +1339,7 @@ function cancelGeneration() {
   turn.cancelled = true;
   activeTurn = null;
   turn.ac.abort();
+  if (turn.jobId) { stopOpenBuild(turn.jobId, turn.pass); clearJob(); }   // a free build: stopped on the server, given back
   turn.stop();
   return true;
 }
@@ -1373,34 +1438,36 @@ async function rebuildFromPhoto({ utterance, before, title }) {
   }
 }
 
-async function generate() {
+// `resume` = the saved ticket of a free build that was still running when
+// this page was last closed (boot picks it up); otherwise a fresh ask.
+async function generate(resume = null) {
+  if (!resume?.id) resume = null;   // also the click event, when used as a handler
   const typed = $('prompt').value.trim();
-  const image = promptImage ? { media_type: promptImage.media_type, data: promptImage.data } : null;
-  const utterance = typed || (image ? 'Build what is in this picture.' : '');
+  const image = !resume && promptImage ? { media_type: promptImage.media_type, data: promptImage.data } : null;
+  const utterance = resume ? resume.utterance : typed || (image ? 'Build what is in this picture.' : '');
   if (!utterance || busy) return;
-  if (utterance.includes(BLANK)) {
+  if (!resume && utterance.includes(BLANK)) {
     selectBlank();
     addTurn('Fill in the blanks (___) first — Tab jumps to the next one.', true);
     return;
   }
-  const key = localStorage.getItem('loom:apiKey');
-  const invite = localStorage.getItem('loom:invite');
-  if (!key && !invite) {
-    $('keyBox').open = true;
-    addTurn('Add your Anthropic API key first — it stays in this browser. (Opening Loom from a guest-pass link works too.)', true);
-    return;
-  }
+  // three ways to prompt: your own key (straight to Anthropic), a guest
+  // pass (relayed on the shop key), or neither — a free build, run on the
+  // server and metered per network, exactly as on the phone page
+  const key = resume ? null : localStorage.getItem('loom:apiKey');
+  const invite = resume ? null : localStorage.getItem('loom:invite');
+  const open = !key && !invite;
   const pin = referencePin;
   referencePin = null;
   // the design as it stands before this turn — what "use a different photo" rebuilds from
   const before = structuredClone(recipe);
   let done = false;
-  const turn = { cancelled: false, ac: new AbortController(), stop: null };
+  const turn = { cancelled: false, ac: new AbortController(), stop: null, jobId: null, pass: null };
   const stopped = new Promise((_, reject) => { turn.stop = () => reject(new Error('stopped')); });
   activeTurn = turn;
   busy = true;
   $('generate').disabled = true;
-  $('generate').textContent = 'weaving…';
+  $('generate').textContent = resume ? 'still weaving…' : 'weaving…';
   let overlay = startWeave($('appPanel'));
   const stopWeave = () => { overlay?.(); overlay = null; };
   // once the first draft is on screen the loom overlay is gone: the stage
@@ -1410,21 +1477,67 @@ async function generate() {
     // what the model SAW — captured before the loop mutates the recipe
     // (cloned: with no assets promptRecipeView returns the live object).
     // Rides along to the funnel so intent/replay.mjs can reproduce the parse.
-    const parseContext = structuredClone(promptRecipeView(recipe));
+    const parseContext = resume?.parseContext ?? structuredClone(promptRecipeView(recipe));
     // own key wins when both exist: unlimited beats metered
     const send = (req) => (key ? parseDirect(req, key) : parseViaGuestPass(req, invite));
     let calls = 0;
     // Worked examples: past verified builds for a similar ask, retrieved
     // locally from app/exemplars.json. Fresh builds only — an edit of an
     // existing design would be misled by whole-build examples.
-    const exemplars = recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
+    const exemplars = resume ? [] : recipe.pipeline.length ? [] : pickExemplars(await loadExemplars(), utterance, { hasImage: !!image });
     // The closed loop: parse → apply → weave → the model sees the result
     // and corrects / writes the final summary (see intent.mjs). The weave
     // callback is the app's own weave path (worker + resolved terrains),
     // so what the model is told is exactly what the user would see.
     // cancelGeneration settles `stopped` so the page is free at once; the
     // stale loop may still be mid-weave — its result is dropped below
-    const working = runIntentLoop({
+    const weaveFor = async (rec) => {
+      const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
+      let terrains = {};
+      if (rec.terrains?.length) {
+        try { terrains = await resolveTerrains(rec, () => {}); }
+        catch (e) { return { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } }; }
+      }
+      const w = await weave({ recipe: rec, values, terrains, shop: shopForRun() });
+      return w.result;
+    };
+    // The FIRST woven state, shown while the second look runs: the loom
+    // comes down, the verdict badge says "first draft", and every way a
+    // cut could leave the page stays shut until the final state lands.
+    // The recipe itself is not committed yet (the controls wait for the
+    // final) — a fix turn, a claims correction or the rollback guard may
+    // still change it.
+    const showDraft = (d) => {
+      if (turn.cancelled || turn.settled || !d.result) return;   // the final result landed meanwhile
+      stopWeave();
+      result = d.result; lastSim = null;
+      render();
+      setBadge('wait', d.ok ? 'FIRST DRAFT · verified · checking…' : 'FIRST DRAFT · checking…');
+      for (const id of ['dlSbp', 'dlNc', 'dlDxf', 'sendFabmo', 'sendRunFabmo']) $(id).disabled = true;
+      window.loomDraft = d;   // test hook
+    };
+    // a free build: the server runs the loop; this page starts it (or picks
+    // a saved one up), shows its progress and its first draft, and waits
+    const openBuild = async () => {
+      let id = resume?.id, pass = resume?.pass;
+      if (!resume) {
+        const started = await startOpenBuild({ recipe, utterance, model: currentModel(), image, exemplars, values: controlValues, shop: shopForRun() });
+        ({ job: id, pass } = started);
+        if (turn.cancelled) { stopOpenBuild(id, pass); throw new Error('stopped'); }   // stopped while the POST was out
+        saveJob({ id, pass, utterance, parseContext, startedAt: Date.now() });
+        const left = started.allowance?.remaining;
+        if (left != null) renderOpenBar(left);
+      }
+      turn.jobId = id; turn.pass = pass;
+      const out = await awaitOpenBuild(id, pass, turn, {
+        onStage: setLabel,
+        // the job sends the draft's recipe; the weave for it runs here
+        onDraft: async (d) => { if (d?.recipe) showDraft({ ...d, result: await weaveFor(d.recipe).catch(() => null) }); },
+      });
+      clearJob();
+      return out;
+    };
+    const working = open ? openBuild() : runIntentLoop({
       recipe, utterance, shop, model: currentModel(), image, exemplars,
       cache: true,   // the fixed part of the prompt is billed at the cached rate after the first call
       // a named real building: the model may ask for a reference first. Not
@@ -1439,35 +1552,12 @@ async function generate() {
         else if (st.stage === 'found') setLabel(st.reference?.ok ? 'reading the reference…' : 'weaving…');
       },
       call: (req) => { if (calls++ > 0) setLabel(calls === 2 ? 'checking the weave…' : 'checking again…'); return send(req); },
-      // The FIRST woven state, shown while the second look runs: the loom
-      // comes down, the verdict badge says "first draft", and every way a
-      // cut could leave the page stays shut until the final state lands.
-      // The recipe itself is not committed yet (the controls wait for the
-      // final) — a fix turn, a claims correction or the rollback guard may
-      // still change it.
-      onDraft: (d) => {
-        if (turn.cancelled || !d.result) return;
-        stopWeave();
-        result = d.result; lastSim = null;
-        render();
-        setBadge('wait', d.ok ? 'FIRST DRAFT · verified · checking…' : 'FIRST DRAFT · checking…');
-        for (const id of ['dlSbp', 'dlNc', 'dlDxf', 'sendFabmo', 'sendRunFabmo']) $(id).disabled = true;
-        window.loomDraft = d;   // test hook
-      },
-      weave: async (rec) => {
-        setLabel('weaving…');
-        const values = { ...controlDefaults(rec), ...pickExisting(controlValues, rec) };
-        let terrains = {};
-        if (rec.terrains?.length) {
-          try { terrains = await resolveTerrains(rec, () => {}); }
-          catch (e) { return { ok: false, errors: [`terrain: ${e.message}`], warnings: [], preview: { empty: true } }; }
-        }
-        const w = await weave({ recipe: rec, values, terrains, shop: shopForRun() });
-        return w.result;
-      },
+      onDraft: showDraft,
+      weave: (rec) => { setLabel('weaving…'); return weaveFor(rec); },
     });
     working.catch(() => {});
     const out = await Promise.race([working, stopped]);
+    turn.settled = true;
     if (turn.cancelled) return;
 
     recipe = out.recipe;
@@ -1500,11 +1590,12 @@ async function generate() {
         intent: {
           summary: out.summary, actions: actionList(firstTurn.payload), declined: out.declined, suggest: out.suggest,
           exemplars: exemplars.map(e => e.key),
+          ...(open ? { surface: 'desktop-open' } : {}),
           loop: {
             turns: out.turns.length, fixes: out.fixes, firstSummary: out.firstSummary, rolledBack: out.rolledBack,
             claimIssues: (out.claimIssues ?? []).map(i => i.code), claimsCaught: !!out.claimsCaught,
             revisedActions: out.turns.slice(1).flatMap(t => actionList(t.payload)),
-            observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped.length, errors: t.observation.errors.slice(0, 3) } : null),
+            observed: out.turns.map(t => t.observation ? { ok: t.observation.ok, skipped: t.observation.skipped?.length ?? 0, errors: t.observation.errors.slice(0, 3) } : null),
             // what was looked up (never the picture): the subject asked for, the
             // article and file it resolved to, and what was searched
             ...(out.lookups?.length ? { reference: { lookups: out.lookups.map(l => ({ subject: l.subject, ok: l.ok, reason: l.reason ?? null, title: l.page?.title ?? null, photo: l.photo?.title ?? null })), searches: (out.searches ?? []).map(x => x.query), searchDropped: !!out.searchDropped, pinned: !!pin } } : {}),
@@ -1529,7 +1620,7 @@ async function generate() {
         : '') + claimNote;
     const declined = out.declined.length
       ? `<div class="declined">declined: ${out.declined.map(d => `${escapeHtml(d.what)} — ${escapeHtml(d.why)}`).join('; ')} <i>(logged as a gap report)</i></div>` : '';
-    const skipped = lastTurn.skipped.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';
+    const skipped = lastTurn.skipped?.length ? `<div class="declined">skipped: ${lastTurn.skipped.map(escapeHtml).join('; ')}</div>` : '';
     const pic = promptImage ? `<img src="${promptImage.previewUrl}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:6px;vertical-align:middle;margin-right:6px">` : '';
     const turnEl = addTurn(`<div class="you">» ${pic}${escapeHtml(utterance)}</div><div class="did">${escapeHtml(out.summary)}</div>${declined}${skipped}${loopNote}${referenceCardHtml(out)}`);
     // a different photo: only while this is still the latest turn's design
@@ -1555,9 +1646,10 @@ async function generate() {
       });
       turnEl.append(chip);
     }).catch(() => {});
-    $('prompt').value = '';
-    setPromptImage(null);   // one picture, one turn — the recipe now carries what it taught
+    if (!resume) $('prompt').value = '';
+    if (!resume) setPromptImage(null);   // one picture, one turn — the recipe now carries what it taught
   } catch (e) {
+    if (e?.gone) clearJob();
     if (!turn.cancelled) addTurn(`<div class="you">» ${escapeHtml(utterance)}</div><div>${escapeHtml(e.message)}</div>`, true);
   } finally {
     if (activeTurn === turn) activeTurn = null;
@@ -1719,11 +1811,15 @@ $('saveKey').addEventListener('click', () => {
 });
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
 $('dlNc').addEventListener('click', () => result?.ok && download(`${exportStem()}.nc`, result.gcode));
-$('dlDxf').addEventListener('click', () => {
-  const out = weaveToDxf(result, { name: recipe.name });
+// the vectors file carries EVERY sheet of the layout (the .sbp is one
+// fixturing; a drawing with parts missing is not) on the declared material
+$('dlDxf').addEventListener('click', async () => {
+  const all = await allSheetResults(result, recipe, controlValues, async (rec, values) =>
+    (await weave({ recipe: rec, values, terrains: lastTerrains, shop: shopForRun(), wantSim: false })).result);
+  const out = weaveToDxf(all, { name: recipe.name, sheet: shop.materialW > 0 && shop.materialH > 0 ? { w: shop.materialW, h: shop.materialH } : null });
   if (out.error) { $('errors').textContent = `vectors: ${out.error}`; return; }
   if (out.warnings.length) $('warnings').textContent = [$('warnings').textContent, ...out.warnings].filter(Boolean).join('\n');
-  download(`${exportStem()}-vectors.dxf`, out.dxf, 'application/dxf');
+  download(`${slug(recipe.name)}-vectors.dxf`, out.dxf, 'application/dxf');
 });
 
 // ---- sheets: a layout that needs several sheets/fixturings cuts ONE per
@@ -1858,6 +1954,15 @@ function renderInviteBar(s) {
   const refill = s.resetsAt ? ` · refills ${fmtTime(s.resetsAt)}` : '';
   bar.textContent = `Guest pass${s.name ? ` — ${s.name}` : ''}: ${s.remaining} prompt${s.remaining === 1 ? '' : 's'} left this window${refill}`
     + (s.remaining === 0 ? ' — or add your own key below for uninterrupted use' : '');
+}
+
+// the same chip for a free build: how many are left today from this network
+function renderOpenBar(remaining) {
+  const bar = $('inviteBar');
+  bar.style.display = '';
+  bar.textContent = remaining > 0
+    ? `Free builds: ${remaining} more today from this network — a guest link or your own API key lifts the limit`
+    : 'That was the last free build today from this network — a guest link or your own API key lifts the limit';
 }
 
 (async function refreshInviteBar() {
@@ -2464,6 +2569,11 @@ async function loadGuests() {
   initWeaveWorker(guestUrls);
   renderControls();
   runAndRender();
+  // a free build was running when this page was last closed: it kept going
+  // on the server — pick it up (or learn how it ended)
+  const pending = loadJob();
+  if (pending?.id && pending.pass && pending.utterance) generate(pending);
+  else clearJob();
   // first visit, empty loom → open the story unprompted, exactly once
   if (!(recipe.pipeline ?? []).length && !localStorage.getItem('loom:introSeen')) {
     $('introOverlay').style.display = 'flex';

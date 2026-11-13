@@ -76,6 +76,25 @@ const ringOut = weaveToDxf(ringRes);
 const re = parseDxfEntities(ringOut.dxf);
 ok(ringRes.ok && re.filter(e => e.layer === 'PROFILE').length === 1 && re.filter(e => e.layer === 'THROUGH').length === 1, 'the outer disc is PROFILE, the inner one THROUGH');
 
+console.log('the declared material and several sheets');
+{
+  const rst = ringRes.preview.stock;
+  const bbox = (e) => ({ w: Math.max(...e.points.map(p => p.x)) - Math.min(...e.points.map(p => p.x)), h: Math.max(...e.points.map(p => p.y)) - Math.min(...e.points.map(p => p.y)), x: Math.min(...e.points.map(p => p.x)) });
+  const sheetOf = (o) => parseDxfEntities(o.dxf).filter(e => e.layer === 'SHEET').map(bbox);
+  const onMat = weaveToDxf(ringRes, { sheet: { w: 36, h: 24 } });
+  ok(sheetOf(onMat).length === 1 && sheetOf(onMat)[0].w === 36 && sheetOf(onMat)[0].h === 24 && !onMat.warnings.length, `a board that fits the declared 36 × 24 material is drawn ON it (the weave's own board was ${rst.w} × ${rst.h})`);
+  // the sign's board is not square: declare the material the other way round
+  const turned = weaveToDxf(res, { sheet: { w: st.h, h: st.w } });
+  ok(st.w !== st.h && sheetOf(turned)[0].w === st.w && sheetOf(turned)[0].h === st.h && turned.warnings.some(w => /only fits .* turned/.test(w)), `a ${st.w} × ${st.h} board on material declared ${st.h} × ${st.w} gets the sheet turned, and a warning says so`);
+  const tooBig = weaveToDxf(ringRes, { sheet: { w: 2, h: 2 } });
+  ok(sheetOf(tooBig)[0].w === rst.w && sheetOf(tooBig)[0].h === rst.h, 'a board bigger than the material keeps its own outline');
+  const two = weaveToDxf([ringRes, ringRes], { sheet: { w: 36, h: 24 } });
+  const sh = sheetOf(two), prof = parseDxfEntities(two.dxf).filter(e => e.layer === 'PROFILE').map(bbox);
+  ok(sh.length === 2 && sh[0].x === 0 && sh[1].x === 38 && two.sheets.length === 2, 'a list of results lands as sheets left to right, 2" apart');
+  ok(prof.length === 2 && Math.abs(prof[1].x - prof[0].x - 38) < 1e-6, 'and the second sheet\'s parts ride with it');
+  ok(two.entities === 2 * ringOut.entities && /\n\$EXTMAX\n10\n74\n20\n24\n/.test(two.dxf), 'no part is missing and the extents span both sheets');
+}
+
 console.log('nothing built');
 const empty = weaveToDxf(quiet(() => runRecipe(structuredClone(EMPTY_RECIPE), {}, fonts, {})));
 ok(typeof empty.error === 'string', `an empty weave says so: "${empty.error}"`);

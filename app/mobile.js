@@ -23,7 +23,7 @@ import { createView3D } from './view3d.mjs';
 import { buildAssemblyLayer } from './assembly3d.mjs';
 import { simulateJob } from './sim.mjs';
 import { startWeave, LOGO_PALETTE } from './weave.mjs';
-import { weaveToDxf } from './dxf.mjs';
+import { weaveToDxf, allSheetResults } from './dxf.mjs';
 import { encodePhoto, kb, relayFailureMessage, directFailureMessage, networkFailureMessage } from './photo.mjs';
 import { loadExemplars, pickExemplars } from './exemplars.mjs';
 import { loadToolLibrary } from '../ir/tools.js';
@@ -982,11 +982,15 @@ function download(name, content, type = 'text/plain') {
 }
 const slug = (t) => (t ?? '').trim().replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'loom';
 $('dlSbp').addEventListener('click', () => result?.ok && download(`${exportStem()}.sbp`, result.sbp));
-$('dlDxf').addEventListener('click', () => {
-  const out = weaveToDxf(result, { name: recipe.name });
+$('dlDxf').addEventListener('click', async () => {
+  // every sheet of the layout in the one file, on the declared material
+  const shopNow = shopForRun();
+  const all = await allSheetResults(result, recipe, controlValues, async (rec, values) =>
+    (await weave({ recipe: rec, values, terrains: {}, shop: shopNow, wantSim: false })).result);
+  const out = weaveToDxf(all, { name: recipe.name, sheet: shopNow.materialW > 0 && shopNow.materialH > 0 ? { w: shopNow.materialW, h: shopNow.materialH } : null });
   if (out.error) { setNote(`vectors: ${out.error}`); return; }
   if (out.warnings.length) setNote(out.warnings.join(' '));
-  download(`${exportStem()}-vectors.dxf`, out.dxf, 'application/dxf');
+  download(`${slug(recipe.name)}-vectors.dxf`, out.dxf, 'application/dxf');
 });
 // back to an empty page (the photo and the typed text are the caller's call)
 function resetDesign() {

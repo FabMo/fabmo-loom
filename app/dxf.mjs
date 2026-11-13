@@ -74,18 +74,33 @@ function targetRings(target) {
  * weaveToDxf(result, { name }) → { dxf, warnings, entities, layers } or
  * { error } when the weave has nothing with a shape.
  */
-export function weaveToDxf(result, { name = 'loom' } = {}) {
-  const pre = result?.preview;
-  const built = pre?.built ?? [];
-  if (!pre || pre.empty || !built.length) return { error: 'nothing is built yet — there are no vectors to export' };
-  const P = pre.placement ?? { x: 0, y: 0 };
-  const stock = pre.stock ?? null;
-  const T = (p) => ({ x: p.x + P.x, y: p.y + P.y });
+//
+// `result` may be a LIST of weave results — one per sheet of a layout that
+// needs several (see allSheetResults): every sheet lands in the one file,
+// left to right, SHEET_GAP apart, each with its own SHEET outline, so no
+// part is missing from the vectors. `sheet` = the material the shop
+// declared ({ w, h }): when the weave's board fits it, the SHEET outline
+// is drawn at THAT size (turned if the board only fits turned), so the
+// file shows the parts nested on the stock the user actually has.
+const SHEET_GAP = 2;
+export function weaveToDxf(result, { name = 'loom', sheet = null } = {}) {
+  const results = (Array.isArray(result) ? result : [result]).filter(r => r?.preview && !r.preview.empty && r.preview.built?.length);
+  if (!results.length) return { error: 'nothing is built yet — there are no vectors to export' };
   const warnings = [];
   const layers = new Map([['SHEET', LAYER_COLORS.SHEET]]);
   const useLayer = (n, color) => { if (!layers.has(n)) layers.set(n, color); return n; };
   let ents = '';
   let entities = 0;
+  let ox = 0, extW = 0, extH = 0;
+  const skipped3d = [];
+  const boards = [];
+  for (const res of results) {
+  const pre = res.preview;
+  const built = pre.built;
+  const P = pre.placement ?? { x: 0, y: 0 };
+  const stock = pre.stock ?? null;
+  const X0 = ox;
+  const T = (p) => ({ x: p.x + P.x + X0, y: p.y + P.y });
   const addRing = (ring, layer, closed = true) => {
     const pts = cleanRing(ring.map(T));
     if (!pts) return;
@@ -93,8 +108,16 @@ export function weaveToDxf(result, { name = 'loom' } = {}) {
     entities++;
   };
 
-  if (stock?.w > 0 && stock?.h > 0) {
-    ents += polylineEntity([{ x: 0, y: 0 }, { x: stock.w, y: 0 }, { x: stock.w, y: stock.h }, { x: 0, y: stock.h }], 'SHEET');
+  let board = stock?.w > 0 && stock?.h > 0 ? { w: stock.w, h: stock.h } : null;
+  if (board && sheet?.w > 0 && sheet?.h > 0) {
+    if (board.w <= sheet.w + 0.01 && board.h <= sheet.h + 0.01) board = { w: sheet.w, h: sheet.h, declared: true };
+    else if (board.w <= sheet.h + 0.01 && board.h <= sheet.w + 0.01) board = { w: sheet.h, h: sheet.w, declared: true, turned: true };
+  }
+  if (board) {
+    ents += polylineEntity([{ x: X0, y: 0 }, { x: X0 + board.w, y: 0 }, { x: X0 + board.w, y: board.h }, { x: X0, y: board.h }], 'SHEET');
+    boards.push({ x: X0, ...board });
+    extW = X0 + board.w; extH = Math.max(extH, board.h);
+    ox = X0 + board.w + SHEET_GAP;
   }
   const thickness = stock?.thickness ?? Infinity;
   const isThrough = (depth) => Number.isFinite(depth) && depth >= thickness - 1e-6;
@@ -123,7 +146,6 @@ export function weaveToDxf(result, { name = 'loom' } = {}) {
   }
 
   // ---- everything else, op by op
-  const skipped3d = [];
   for (const b of built) {
     const r = b?.r ?? {};
     const opId = b.op?.id ?? '?';
@@ -176,6 +198,8 @@ export function weaveToDxf(result, { name = 'loom' } = {}) {
       skipped3d.push(opId);
     }
   }
+  }   // each sheet
+  if (boards.some(b => b.turned)) warnings.push(`the layout only fits your ${sheet.w}" × ${sheet.h}" sheet turned — the SHEET outline is drawn ${sheet.h}" × ${sheet.w}"`);
   if (skipped3d.length) warnings.push(`3D relief op${skipped3d.length === 1 ? '' : 's'} ${skipped3d.map(s => `"${s}"`).join(', ')}: a relief has no vectors — only its boundary is drawn (RELIEF_BOUNDARY); carve it from Loom's own file`);
   if (!entities) return { error: 'nothing here has a vector outline to export' };
 
@@ -185,7 +209,7 @@ export function weaveToDxf(result, { name = 'loom' } = {}) {
     + pair(9, '$ACADVER') + pair(1, 'AC1009')
     + pair(9, '$INSUNITS') + pair(70, 1)
     + pair(9, '$EXTMIN') + pair(10, 0) + pair(20, 0) + pair(30, 0)
-    + pair(9, '$EXTMAX') + pair(10, num(stock?.w ?? 0)) + pair(20, num(stock?.h ?? 0)) + pair(30, 0)
+    + pair(9, '$EXTMAX') + pair(10, num(extW)) + pair(20, num(extH)) + pair(30, 0)
     + pair(0, 'ENDSEC');
   const ltypes = pair(0, 'TABLE') + pair(2, 'LTYPE') + pair(70, 1)
     + pair(0, 'LTYPE') + pair(2, 'CONTINUOUS') + pair(70, 0) + pair(3, 'Solid line') + pair(72, 65) + pair(73, 0) + pair(40, '0.0')
@@ -193,9 +217,35 @@ export function weaveToDxf(result, { name = 'loom' } = {}) {
   const tables = pair(0, 'SECTION') + pair(2, 'TABLES') + ltypes
     + pair(0, 'TABLE') + pair(2, 'LAYER') + pair(70, layers.size) + table + pair(0, 'ENDTAB')
     + pair(0, 'ENDSEC');
-  const dxf = pair(999, `Loom — ${name} — nested vectors, inches, X0 Y0 = board corner`) + header + tables
+  const dxf = pair(999, `Loom — ${name} — nested vectors, inches, X0 Y0 = board corner${boards.length > 1 ? ` — ${boards.length} sheets, left to right, ${SHEET_GAP}" apart` : ''}`) + header + tables
     + pair(0, 'SECTION') + pair(2, 'ENTITIES') + ents + pair(0, 'ENDSEC') + pair(0, 'EOF');
-  return { dxf, warnings, entities, layers: [...layers.keys()] };
+  return { dxf, warnings, entities, layers: [...layers.keys()], sheets: boards };
+}
+
+/**
+ * One weave result per sheet of a layout that needs several fixturings
+ * (preview.setups — the weave itself cuts ONE). `weave(recipe, values)`
+ * is the page's own weave and resolves with a result; the current sheet's
+ * result is reused, the others are woven with the setup param (or the
+ * control it is bound to) set. A sheet that fails to weave is left out.
+ */
+export async function allSheetResults(result, recipe, values, weave) {
+  const s = result?.preview?.setups?.[0];
+  if (!s || !(s.count > 1)) return [result];
+  const out = [];
+  for (let k = 1; k <= s.count; k++) {
+    if (k === s.current) { out.push(result); continue; }
+    const rec = structuredClone(recipe), vals = { ...values };
+    const op = rec.pipeline.find(o => o.id === s.opId);
+    if (!op) continue;
+    op.params ??= {};
+    const bound = op.params.setup;
+    if (bound && typeof bound === 'object' && typeof bound.ctrl === 'string') vals[bound.ctrl] = k;
+    else op.params.setup = k;
+    const r = await weave(rec, vals).catch(() => null);
+    if (r?.preview?.built?.length) out.push(r);
+  }
+  return out;
 }
 
 /** Minimal reader for tests: entities as { type, layer, points, closed, center, r }. */

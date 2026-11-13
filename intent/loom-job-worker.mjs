@@ -158,7 +158,7 @@ try {
     onDraft: (d) => post({ kind: 'draft', draft: { turn: d.turn, recipe: d.recipe, summary: d.summary, declined: d.declined, ok: d.ok, errors: (d.result?.errors ?? []).slice(0, 3) } }),
     weave: async (rec) => {
       post({ kind: 'stage', stage: 'weaving…' });
-      if (rec.terrains?.length) return { ok: false, errors: ['terrain references are not available on the phone version — use the full app'], warnings: [], preview: { empty: true } };
+      if (rec.terrains?.length) return { ok: false, errors: [job.client === 'phone' ? 'terrain references are not available on the phone version — use the full app' : 'terrain references are not part of a free build — they need a guest link or your own API key in the full app'], warnings: [], preview: { empty: true } };
       const values = { ...controlDefaults(rec), ...pickExisting(job.values, rec) };
       return quiet(() => runRecipe(rec, values, fonts, {}, job.shop ?? {}));
     },
